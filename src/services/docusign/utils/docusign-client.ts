@@ -49,6 +49,30 @@ export const DOCUSIGN_DEFAULT_ROLE_NAME =
   process.env.DOCUSIGN_DEFAULT_ROLE_NAME || 'Signer';
 
 /**
+ * When true (default), draft envelopes drop signer slots not listed in CRM roles
+ * (DocuSign templates often define multiple signer roles).
+ */
+export const DOCUSIGN_SINGLE_SIGNER_ONLY =
+  String(process.env.DOCUSIGN_SINGLE_SIGNER_ONLY || 'true').trim().toLowerCase() !== 'false';
+
+/**
+ * When true (default), lock text/number/list/etc. tabs on signers so receivers can sign only.
+ */
+export const DOCUSIGN_LOCK_SIGNER_DATA_TABS =
+  String(process.env.DOCUSIGN_LOCK_SIGNER_DATA_TABS || 'true').trim().toLowerCase() !== 'false';
+
+/** How many times to attempt locking when tabs are still appearing (prod is slower than demo). */
+export const DOCUSIGN_LOCK_RETRY_ATTEMPTS = Math.max(
+  1,
+  parseInt(String(process.env.DOCUSIGN_LOCK_RETRY_ATTEMPTS || '8'), 10) || 8,
+);
+
+export const DOCUSIGN_LOCK_RETRY_DELAY_MS = Math.max(
+  500,
+  parseInt(String(process.env.DOCUSIGN_LOCK_RETRY_DELAY_MS || '2500'), 10) || 2500,
+);
+
+/**
  * When true, envelope is set to `sent` after prefill (DocuSign emails signers).
  * Default true unless DOCUSIGN_AUTO_SEND_ENVELOPE=false in .env.
  */

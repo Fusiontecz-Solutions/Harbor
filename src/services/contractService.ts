@@ -79,6 +79,28 @@ function normalizeBusinessInfoIdForFk(value: unknown): number | null {
   return n;
 }
 
+/** DocuSign remittance tab = per-period payment (daily payment when frequency is Daily). */
+function resolveContractRemittanceFromOffer(offer: any, termsOffer: any): string | null {
+  if (offer?.repayPerPeriod != null) {
+    const n = Number(offer.repayPerPeriod);
+    if (Number.isFinite(n)) return String(n);
+  }
+  if (termsOffer?.paymentAmount != null) {
+    const n = Number(termsOffer.paymentAmount);
+    if (Number.isFinite(n)) return String(n);
+  }
+  return null;
+}
+
+const OFFER_DECISION_CONTRACT_SELECT = {
+  id: true,
+  offer: true,
+  totalRemit: true,
+  term: true,
+  frequency: true,
+  repayPerPeriod: true,
+} as const;
+
 const CONTRACT_EXTRA_STRING_FIELDS = [
   'legalName',
   'clientName',
@@ -556,6 +578,7 @@ class ContractService {
     const client = application?.client as any;
     const biz = application?.businessInfo as any;
     const offer = application?.OfferDecision as any;
+    const termsOffer = application?.termsOffers?.[0] as any;
     const paymentBank = resolvedPaymentBank as any;
 
     const customerName = firstNonEmptyString(
@@ -582,7 +605,7 @@ class ContractService {
       legalName: legalName || null,
       clientName: legalName || null,
       entityType: firstNonEmptyString(client?.businessEntityType, biz?.entityType) || null,
-      remittance: firstNonEmptyString(offer?.frequency, biz?.remittance) || null,
+      remittance: resolveContractRemittanceFromOffer(offer, termsOffer) || null,
       clientEmail: firstNonEmptyString(client?.businessEmail, client?.ownerEmail) || null,
       clientPhone: firstNonEmptyString(client?.businessNumber, client?.ownerMobileNumber) || null,
       customerName: customerName || null,
@@ -635,10 +658,10 @@ class ContractService {
         select: {
           id: true,
           applicationId: true,
-          OfferDecision: { select: { id: true, offer: true, totalRemit: true, term: true, frequency: true } },
+          OfferDecision: { select: OFFER_DECISION_CONTRACT_SELECT },
         },
       },
-      offer: { select: { id: true, offer: true, totalRemit: true, term: true, frequency: true } },
+      offer: { select: OFFER_DECISION_CONTRACT_SELECT },
       createdBy: { select: { id: true, userId: true, firstName: true, lastName: true, email: true } },
       paymentTerms: { select: { id: true, paymentMethod: true, paymentFrequency: true } },
       paymentBank: { select: { id: true, bankName: true } },
@@ -842,7 +865,7 @@ class ContractService {
             OfferDecision: true,
           },
         },
-        offer: { select: { id: true, offer: true, totalRemit: true, term: true, frequency: true } },
+        offer: { select: OFFER_DECISION_CONTRACT_SELECT },
         paymentTerms: { select: { id: true, paymentMethod: true, paymentFrequency: true } },
         paymentBank: { select: { id: true, bankName: true } },
       },
@@ -874,7 +897,7 @@ class ContractService {
             },
           },
         },
-        offer: { select: { id: true, offer: true, totalRemit: true, term: true, frequency: true } },
+        offer: { select: OFFER_DECISION_CONTRACT_SELECT },
         paymentTerms: { select: { id: true, paymentMethod: true, paymentFrequency: true } },
         paymentBank: { select: { id: true, bankName: true } },
       },
@@ -905,7 +928,7 @@ class ContractService {
             },
           },
         },
-        offer: { select: { id: true, offer: true, totalRemit: true, term: true, frequency: true } },
+        offer: { select: OFFER_DECISION_CONTRACT_SELECT },
         paymentTerms: { select: { id: true, paymentMethod: true, paymentFrequency: true } },
         paymentBank: { select: { id: true, bankName: true } },
       },

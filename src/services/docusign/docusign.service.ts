@@ -10,6 +10,10 @@ import {
   DOCUSIGN_AUTO_SEND_ENVELOPE,
   DOCUSIGN_DEFAULT_ROLE_NAME,
   DOCUSIGN_DEFAULT_TEMPLATE_ID,
+  DOCUSIGN_LOCK_SIGNER_DATA_TABS,
+  DOCUSIGN_LOCK_RETRY_ATTEMPTS,
+  DOCUSIGN_LOCK_RETRY_DELAY_MS,
+  DOCUSIGN_SINGLE_SIGNER_ONLY,
   DOCUSIGN_REDIRECT_URI,
   DOCUSIGN_JWT_CONSENT_REDIRECT_URI,
   DOCUSIGN_WEBHOOK_BASIC_PASSWORD,
@@ -24,6 +28,7 @@ import {
   collectTabLabels,
   mapMatchedTabsToEnvelopeTabIds,
   matchPrefillFieldsToTextTabs,
+  normalizeFieldKey,
   type DocusignTextTabRef,
   type PrefillFieldInput,
 } from './utils/docusign-prefill';
@@ -611,15 +616,28 @@ export class DocusignService {
     console.warn(`[DocuSign] ${context}${code ? ` (${code})` : ''}: ${message}`);
   }
 
+  private normalizePublicAppOrigin(raw: string): string {
+    const trimmed = String(raw || '').trim().replace(/\/+$/, '');
+    if (!trimmed) return '';
+    try {
+      if (trimmed.includes('://')) return new URL(trimmed).origin;
+      return `https://${trimmed.replace(/^\/+/, '')}`;
+    } catch {
+      return '';
+    }
+  }
+
   /**
    * DocuSign sender view rejects many local/dev return URLs (http://localhost, http://).
-   * Draft creation already uses DOCUSIGN_SENDER_RETURN_URL — align sender-view with that.
+   * When localhost is sent, remap to public origin + same path so users return to the deal page.
    */
   private normalizeSenderReturnUrl(returnUrl: string): string {
-    const fallback =
-      process.env.DOCUSIGN_SENDER_RETURN_URL?.trim() || 'https://www.docusign.com';
+    const fallbackOrigin =
+      this.normalizePublicAppOrigin(
+        process.env.DOCUSIGN_SENDER_RETURN_URL?.trim() || '',
+      ) || 'https://www.docusign.com';
     const raw = String(returnUrl || '').trim();
-    if (!raw) return fallback;
+    if (!raw) return fallbackOrigin;
     try {
       const u = new URL(raw);
       const host = u.hostname.toLowerCase();
@@ -627,15 +645,24 @@ export class DocusignService {
         host === 'localhost' ||
         host === '127.0.0.1' ||
         host.endsWith('.local');
+      const pathSuffix = `${u.pathname}${u.search}${u.hash}`;
+
       if (isLocal || u.protocol !== 'https:') {
+        if (isLocal && fallbackOrigin && pathSuffix && pathSuffix !== '/') {
+          const remapped = `${fallbackOrigin}${pathSuffix}`;
+          console.log(
+            `[DocuSign] Sender view returnUrl "${raw}" is not public HTTPS; using ${remapped}`,
+          );
+          return remapped;
+        }
         console.log(
-          `[DocuSign] Sender view returnUrl "${raw}" is not a public HTTPS URL; using ${fallback}`,
+          `[DocuSign] Sender view returnUrl "${raw}" is not a public HTTPS URL; using ${fallbackOrigin}`,
         );
-        return fallback;
+        return fallbackOrigin;
       }
       return raw;
     } catch {
-      return fallback;
+      return fallbackOrigin;
     }
   }
 
@@ -712,6 +739,272 @@ export class DocusignService {
       applied += chunk.length;
     }
     return applied;
+  }
+
+  /** Recipient tab groups that stay interactive (signature / initials only). */
+  private static readonly SIGNER_SIGNING_TAB_GROUPS = new Set([
+    'signHereTabs',
+    'initialHereTabs',
+    'initialHereOptionalTabs',
+  ]);
+
+  /** Tab response keys that are not lockable tab arrays. */
+  private static readonly SIGNER_TAB_SKIP_KEYS = new Set([
+    'tabGroups',
+    'recipientAttachmentTabs',
+  ]);
+
+  private static readonly TAB_VALUE_PRESERVE_KEYS = [
+    'value',
+    'selected',
+    'numberValue',
+    'originalValue',
+    'listSelectedValue',
+  ] as const;
+
+  private isSignerDataTabGroup(group: string): boolean {
+    return (
+      group.endsWith('Tabs') &&
+      !DocusignService.SIGNER_SIGNING_TAB_GROUPS.has(group) &&
+      !DocusignService.SIGNER_TAB_SKIP_KEYS.has(group)
+    );
+  }
+
+  private isSignerDataTabLocked(tab: Record<string, unknown>): boolean {
+    return String(tab.locked || '').toLowerCase() === 'true';
+  }
+
+  private buildLockedTabUpdateRow(tab: Record<string, unknown>): Record<string, string> | null {
+    const tabId = String(tab.tabId || '').trim();
+    if (!tabId) return null;
+    if (this.isSignerDataTabLocked(tab)) return null;
+
+    const row: Record<string, string> = {
+      tabId,
+      locked: 'true',
+    };
+    for (const key of DocusignService.TAB_VALUE_PRESERVE_KEYS) {
+      const v = tab[key];
+      if (v !== undefined && v !== null && String(v).trim() !== '') {
+        row[key] = String(v);
+      }
+    }
+    return row;
+  }
+
+  private collectSignerDataTabGroups(
+    tabsResData: Record<string, unknown>,
+  ): Array<[string, Record<string, unknown>[]]> {
+    const groups: Array<[string, Record<string, unknown>[]]> = [];
+    for (const [group, tabs] of Object.entries(tabsResData)) {
+      if (!this.isSignerDataTabGroup(group) || !Array.isArray(tabs) || !tabs.length) {
+        continue;
+      }
+      groups.push([group, tabs as Record<string, unknown>[]]);
+    }
+    return groups;
+  }
+
+  private async countUnlockedSignerDataTabs(
+    client: AxiosInstance,
+    accountId: string,
+    envelopeId: string,
+  ): Promise<{ total: number; unlocked: number; unlockedLabels: string[] }> {
+    const recRes = await client.get(
+      `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients`,
+    );
+    const signers = (recRes.data?.signers || []) as Array<{ recipientId?: string }>;
+    let total = 0;
+    let unlocked = 0;
+    const unlockedLabels: string[] = [];
+
+    for (const signer of signers) {
+      const recipientId = String(signer.recipientId || '').trim();
+      if (!recipientId) continue;
+
+      try {
+        const tabsRes = await client.get(
+          `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients/${recipientId}/tabs`,
+        );
+        for (const [, tabs] of this.collectSignerDataTabGroups(
+          (tabsRes.data || {}) as Record<string, unknown>,
+        )) {
+          for (const tab of tabs) {
+            total += 1;
+            if (this.isSignerDataTabLocked(tab)) continue;
+            unlocked += 1;
+            const label = String(tab.tabLabel || tab.name || tab.tabId || '').trim();
+            if (label && unlockedLabels.length < 30) unlockedLabels.push(label);
+          }
+        }
+      } catch (err) {
+        this.logDocusignApiError(`countUnlockedSignerDataTabs ${recipientId}`, err);
+      }
+    }
+
+    return { total, unlocked, unlockedLabels };
+  }
+
+  private async putLockedSignerTabGroup(
+    client: AxiosInstance,
+    accountId: string,
+    envelopeId: string,
+    recipientId: string,
+    group: string,
+    toLock: Record<string, string>[],
+  ): Promise<number> {
+    const path = `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients/${recipientId}/tabs`;
+    try {
+      await client.put(path, { [group]: toLock });
+      return toLock.length;
+    } catch (batchErr) {
+      this.logDocusignApiError(`lockSignerDataTabs batch ${recipientId}/${group}`, batchErr);
+    }
+
+    let locked = 0;
+    for (const row of toLock) {
+      try {
+        await client.put(path, { [group]: [row] });
+        locked += 1;
+      } catch (err) {
+        this.logDocusignApiError(
+          `lockSignerDataTabs single ${recipientId}/${group}/${row.tabId}`,
+          err,
+        );
+      }
+    }
+    return locked;
+  }
+
+  /**
+   * Lock all signer tabs except Sign Here / Initial Here so receivers can sign only.
+   */
+  private async lockEnvelopeSignerDataTabs(
+    client: AxiosInstance,
+    accountId: string,
+    envelopeId: string,
+  ): Promise<number> {
+    if (!DOCUSIGN_LOCK_SIGNER_DATA_TABS) return 0;
+
+    const recRes = await client.get(
+      `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients`,
+    );
+    const signers = (recRes.data?.signers || []) as Array<{ recipientId?: string }>;
+    let totalLocked = 0;
+
+    for (const signer of signers) {
+      const recipientId = String(signer.recipientId || '').trim();
+      if (!recipientId) continue;
+
+      let tabsResData: Record<string, unknown>;
+      try {
+        const tabsRes = await client.get(
+          `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients/${recipientId}/tabs`,
+        );
+        tabsResData = (tabsRes.data || {}) as Record<string, unknown>;
+      } catch (err) {
+        this.logDocusignApiError(`lockSignerDataTabs fetch ${recipientId}`, err);
+        continue;
+      }
+
+      for (const [group, tabs] of this.collectSignerDataTabGroups(tabsResData)) {
+        const toLock = tabs
+          .map((t) => this.buildLockedTabUpdateRow(t))
+          .filter((row): row is Record<string, string> => row != null);
+        if (!toLock.length) continue;
+
+        const n = await this.putLockedSignerTabGroup(
+          client,
+          accountId,
+          envelopeId,
+          recipientId,
+          group,
+          toLock,
+        );
+        if (n) {
+          totalLocked += n;
+          console.log(
+            `[DocuSign] locked ${n} ${group} for recipient ${recipientId} on ${envelopeId}`,
+          );
+        }
+      }
+    }
+
+    return totalLocked;
+  }
+
+  /**
+   * Prod envelopes often materialize tabs in waves (main doc, then addendum, numberTabs, etc.).
+   * Do not stop after the first partial lock — wait until every data tab is locked or retries end.
+   */
+  private async lockEnvelopeSignerDataTabsWithRetry(
+    client: AxiosInstance,
+    accountId: string,
+    envelopeId: string,
+    options?: { attempts?: number; delayMs?: number },
+  ): Promise<number> {
+    const attempts = Math.max(1, options?.attempts ?? DOCUSIGN_LOCK_RETRY_ATTEMPTS);
+    const delayMs = options?.delayMs ?? DOCUSIGN_LOCK_RETRY_DELAY_MS;
+    let totalLocked = 0;
+
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      if (attempt > 0) {
+        await this.sleep(delayMs);
+      }
+
+      const passLocked = await this.lockEnvelopeSignerDataTabs(client, accountId, envelopeId);
+      totalLocked += passLocked;
+
+      const { total, unlocked, unlockedLabels } = await this.countUnlockedSignerDataTabs(
+        client,
+        accountId,
+        envelopeId,
+      );
+
+      if (total === 0) {
+        if (attempt === attempts - 1) {
+          console.warn(
+            `[DocuSign] sign-only restriction: 0 signer data tabs found on ${envelopeId}`,
+          );
+        }
+        continue;
+      }
+
+      if (unlocked === 0) {
+        console.log(
+          `[DocuSign] sign-only restriction: all ${total} signer data tab(s) locked on ${envelopeId}`,
+        );
+        return totalLocked;
+      }
+
+      console.warn(
+        `[DocuSign] sign-only restriction: ${unlocked}/${total} tab(s) still editable on ${envelopeId}` +
+          (unlockedLabels.length ? ` (e.g. ${unlockedLabels.slice(0, 8).join(', ')})` : ''),
+      );
+    }
+
+    const { total, unlocked, unlockedLabels } = await this.countUnlockedSignerDataTabs(
+      client,
+      accountId,
+      envelopeId,
+    );
+    if (unlocked > 0) {
+      console.error(
+        `[DocuSign] sign-only restriction FAILED: ${unlocked}/${total} tab(s) still editable on ${envelopeId}` +
+          (unlockedLabels.length ? ` — ${unlockedLabels.join(', ')}` : ''),
+      );
+    }
+    return totalLocked;
+  }
+
+  private async lockEnvelopeSignerDataTabsAsSystem(envelopeId: string): Promise<number> {
+    try {
+      const { client, accountId } = await this.getJwtAuthContext();
+      return this.lockEnvelopeSignerDataTabsWithRetry(client, accountId, envelopeId);
+    } catch (err) {
+      console.warn(`[DocuSign] lockEnvelopeSignerDataTabsAsSystem failed for ${envelopeId}:`, err);
+      return 0;
+    }
   }
 
   /**
@@ -992,6 +1285,80 @@ export class DocusignService {
     if (removed) {
       console.log(
         `[DocuSign] removed ${removed} carbon copy slot(s) on ${envelopeId} (CRM emails CC when sent)`,
+      );
+    }
+    return removed;
+  }
+
+  /**
+   * DocuSign copies every signer role from the template into the envelope.
+   * When CRM sends one signer (e.g. Receiver), remove extra signer slots on the draft.
+   */
+  private async pruneEnvelopeSignersToCrmRoles(
+    client: AxiosInstance,
+    accountId: string,
+    envelopeId: string,
+    roles: SignerRoleInput[],
+  ): Promise<number> {
+    if (!DOCUSIGN_SINGLE_SIGNER_ONLY) return 0;
+
+    const normalized = this.normalizeSignerRoles(roles);
+    if (!normalized.length) return 0;
+
+    const recRes = await client.get(
+      `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients`,
+    );
+    const signers = (recRes.data?.signers || []) as Array<{
+      recipientId?: string;
+      roleName?: string;
+    }>;
+    if (signers.length <= normalized.length) return 0;
+
+    const allowedRoles = new Set(
+      normalized.map((r) => r.roleName.toLowerCase()).filter(Boolean),
+    );
+
+    let removed = 0;
+    if (normalized.length === 1) {
+      const preferredRole = normalized[0]!.roleName.toLowerCase();
+      let keepIndex = signers.findIndex(
+        (s) => String(s.roleName || '').trim().toLowerCase() === preferredRole,
+      );
+      if (keepIndex < 0) keepIndex = 0;
+
+      for (let i = 0; i < signers.length; i++) {
+        if (i === keepIndex) continue;
+        const rid = String(signers[i]?.recipientId || '').trim();
+        if (!rid) continue;
+        try {
+          await client.delete(
+            `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients/${rid}`,
+          );
+          removed++;
+        } catch (delErr) {
+          this.logDocusignApiError('pruneEnvelopeSignersToCrmRoles', delErr);
+        }
+      }
+    } else {
+      for (const signer of signers) {
+        const rid = String(signer.recipientId || '').trim();
+        if (!rid) continue;
+        const roleKey = String(signer.roleName || '').trim().toLowerCase();
+        if (allowedRoles.has(roleKey)) continue;
+        try {
+          await client.delete(
+            `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients/${rid}`,
+          );
+          removed++;
+        } catch (delErr) {
+          this.logDocusignApiError('pruneEnvelopeSignersToCrmRoles', delErr);
+        }
+      }
+    }
+
+    if (removed) {
+      console.log(
+        `[DocuSign] removed ${removed} extra signer slot(s) on ${envelopeId} (CRM single-signer send)`,
       );
     }
     return removed;
@@ -1389,6 +1756,8 @@ export class DocusignService {
       }
     }
 
+    await this.lockEnvelopeSignerDataTabsWithRetry(client, accountId, eid);
+
     const envelopeSigners = ((recAfter.data?.signers || []) as Array<{
       roleName?: string;
       email?: string;
@@ -1428,6 +1797,146 @@ export class DocusignService {
       .filter((r) => r.email);
   }
 
+  private async fetchTemplateLockableTabGroupsForRole(
+    client: AxiosInstance,
+    accountId: string,
+    templateId: string,
+    roleName: string,
+  ): Promise<Record<string, Record<string, unknown>[]>> {
+    const merged = new Map<string, Map<string, Record<string, unknown>>>();
+
+    const addGroupTabs = (data: Record<string, unknown>) => {
+      for (const [group, tabs] of this.collectSignerDataTabGroups(data)) {
+        if (!merged.has(group)) merged.set(group, new Map());
+        const byLabel = merged.get(group)!;
+        for (const tab of tabs) {
+          const label = String(tab.tabLabel || tab.name || tab.tabId || '').trim();
+          if (!label || byLabel.has(label)) continue;
+          byLabel.set(label, tab);
+        }
+      }
+    };
+
+    let roleRecipientId = '';
+    try {
+      const recRes = await client.get(
+        `/v2.1/accounts/${accountId}/templates/${templateId}/recipients`,
+      );
+      const signers = recRes.data?.signers || [];
+      const roleLower = roleName.trim().toLowerCase();
+      const signer =
+        signers.find(
+          (s: { roleName?: string }) =>
+            String(s.roleName || '').trim().toLowerCase() === roleLower,
+        ) || signers[0];
+      roleRecipientId = String(signer?.recipientId || '').trim();
+      if (roleRecipientId) {
+        const tabsRes = await client.get(
+          `/v2.1/accounts/${accountId}/templates/${templateId}/recipients/${roleRecipientId}/tabs`,
+        );
+        addGroupTabs((tabsRes.data || {}) as Record<string, unknown>);
+      }
+    } catch (err) {
+      console.warn('[DocuSign] fetchTemplateLockableTabGroupsForRole (recipient) failed:', err);
+    }
+
+    try {
+      const docsRes = await client.get(
+        `/v2.1/accounts/${accountId}/templates/${templateId}/documents`,
+      );
+      const docs =
+        docsRes.data?.templateDocuments || docsRes.data?.documents || [];
+      for (const doc of docs.length ? docs : [{ documentId: '1' }]) {
+        const docId = String(doc?.documentId ?? '1');
+        try {
+          const tabsRes = await client.get(
+            `/v2.1/accounts/${accountId}/templates/${templateId}/documents/${docId}/tabs`,
+          );
+          const raw = (tabsRes.data || {}) as Record<string, unknown>;
+          if (!roleRecipientId) {
+            addGroupTabs(raw);
+            continue;
+          }
+          const filtered: Record<string, unknown> = {};
+          for (const [group, tabs] of Object.entries(raw)) {
+            if (!this.isSignerDataTabGroup(group) || !Array.isArray(tabs)) continue;
+            const roleTabs = (tabs as Record<string, unknown>[]).filter(
+              (t) => String(t.recipientId || '').trim() === roleRecipientId,
+            );
+            if (roleTabs.length) filtered[group] = roleTabs;
+          }
+          addGroupTabs(filtered);
+        } catch (docErr) {
+          console.warn(
+            `[DocuSign] fetchTemplateLockableTabGroupsForRole document ${docId} failed:`,
+            docErr,
+          );
+        }
+      }
+    } catch (err) {
+      console.warn('[DocuSign] fetchTemplateLockableTabGroupsForRole (documents) failed:', err);
+    }
+
+    const out: Record<string, Record<string, unknown>[]> = {};
+    for (const [group, byLabel] of merged) {
+      out[group] = [...byLabel.values()];
+    }
+    return out;
+  }
+
+  private buildCreateTimeLockedTabsPayload(
+    tabGroups: Record<string, Record<string, unknown>[]>,
+    prefillByLabel: Map<string, string>,
+  ): Record<string, Array<Record<string, string>>> {
+    const payload: Record<string, Array<Record<string, string>>> = {};
+
+    for (const [group, tabs] of Object.entries(tabGroups)) {
+      const rows: Array<Record<string, string>> = [];
+      for (const tab of tabs) {
+        const tabLabel = String(tab.tabLabel || tab.name || '').trim();
+        if (!tabLabel) continue;
+
+        const row: Record<string, string> = {
+          tabLabel,
+          locked: 'true',
+        };
+
+        const prefill =
+          prefillByLabel.get(normalizeFieldKey(tabLabel)) ||
+          prefillByLabel.get(normalizeFieldKey(String(tab.name || '')));
+        if (prefill) {
+          row.value = prefill;
+        } else {
+          for (const key of DocusignService.TAB_VALUE_PRESERVE_KEYS) {
+            const v = tab[key];
+            if (v === undefined || v === null || String(v).trim() === '') continue;
+            row[key === 'numberValue' ? 'value' : key] = String(v);
+          }
+        }
+        rows.push(row);
+      }
+      if (rows.length) payload[group] = rows;
+    }
+
+    return payload;
+  }
+
+  private async buildCreateTimeLockedTabsForTemplate(
+    client: AxiosInstance,
+    accountId: string,
+    templateId: string,
+    roleName: string,
+    prefillByLabel: Map<string, string>,
+  ): Promise<Record<string, Array<Record<string, string>>>> {
+    const templateTabGroups = await this.fetchTemplateLockableTabGroupsForRole(
+      client,
+      accountId,
+      templateId,
+      roleName,
+    );
+    return this.buildCreateTimeLockedTabsPayload(templateTabGroups, prefillByLabel);
+  }
+
   private async buildTemplateRolesForSend(
     client: AxiosInstance,
     accountId: string,
@@ -1446,6 +1955,31 @@ export class DocusignService {
         preloadedRoleNames
       : await this.getTemplateSignerRoleNames(client, accountId, templateId);
 
+    const prefillByLabel = new Map<string, string>();
+    for (const t of textTabs) {
+      prefillByLabel.set(normalizeFieldKey(t.tabLabel), t.value);
+    }
+
+    let createTimeLockedTabs: Record<string, Array<Record<string, string>>> = {};
+    if (DOCUSIGN_LOCK_SIGNER_DATA_TABS && templateId) {
+      const primaryRoleName = String(
+        templateRoleNames[0] || signers[0]?.roleName || DOCUSIGN_DEFAULT_ROLE_NAME,
+      ).trim();
+      createTimeLockedTabs = await this.buildCreateTimeLockedTabsForTemplate(
+        client,
+        accountId,
+        templateId,
+        primaryRoleName,
+        prefillByLabel,
+      );
+      const tabCount = Object.values(createTimeLockedTabs).reduce((n, g) => n + g.length, 0);
+      if (tabCount) {
+        console.log(
+          `[DocuSign] create-time lock: ${tabCount} template tab(s) for role ${primaryRoleName}`,
+        );
+      }
+    }
+
     return signers.map((s, idx) => {
       const roleName =
         templateRoleNames[idx] ||
@@ -1453,21 +1987,27 @@ export class DocusignService {
         s.roleName ||
         DOCUSIGN_DEFAULT_ROLE_NAME;
 
+      let tabs: Record<string, Array<Record<string, string>>> | undefined;
+      if (idx === 0) {
+        if (Object.keys(createTimeLockedTabs).length) {
+          tabs = createTimeLockedTabs;
+        } else if (textTabs.length) {
+          tabs = {
+            textTabs: textTabs.map((t) => ({
+              ...(t.tabId
+                ? { tabId: t.tabId, tabLabel: t.tabLabel, value: t.value }
+                : { tabLabel: t.tabLabel, value: t.value }),
+              locked: 'true',
+            })),
+          };
+        }
+      }
+
       return {
         roleName: String(roleName).trim(),
         name: s.name || s.email.split('@')[0],
         email: s.email,
-        tabs:
-          idx === 0 && textTabs.length
-            ? {
-                textTabs: textTabs.map((t) => ({
-                  ...(t.tabId
-                    ? { tabId: t.tabId, tabLabel: t.tabLabel, value: t.value }
-                    : { tabLabel: t.tabLabel, value: t.value }),
-                  locked: 'true',
-                })),
-              }
-            : undefined,
+        tabs,
       };
     });
   }
@@ -2078,6 +2618,16 @@ export class DocusignService {
       }
     }
 
+    if (prefillApplied.applied > 0 || prefillApplied.attempted > 0) {
+      await this.sleep(autoSend ? 4000 : 5000);
+    }
+
+    await this.lockEnvelopeSignerDataTabsWithRetry(
+      options.client,
+      options.accountId,
+      envelopeId,
+    );
+
     let envelopeSigners: Array<{ roleName?: string; email?: string; name?: string }> = [];
     try {
       const rec = await options.client.get(
@@ -2093,11 +2643,13 @@ export class DocusignService {
     }
 
     let envelopeStatus: 'created' | 'sent' = 'created';
-    if (prefillApplied.applied > 0) {
-      await this.sleep(autoSend ? 4000 : 5000);
-    }
     if (autoSend) {
       try {
+        await this.lockEnvelopeSignerDataTabsWithRetry(
+          options.client,
+          options.accountId,
+          envelopeId,
+        );
         await options.client.put(
           `/v2.1/accounts/${options.accountId}/envelopes/${envelopeId}`,
           { status: 'sent' },
@@ -2106,6 +2658,11 @@ export class DocusignService {
         if (prefillApplied.applied > 0) {
           await this.sleep(6000);
         }
+        await this.lockEnvelopeSignerDataTabsWithRetry(
+          options.client,
+          options.accountId,
+          envelopeId,
+        );
         if (appId) {
           await this.markEnvelopeSent(appId, envelopeId);
         } else {
@@ -2294,6 +2851,9 @@ export class DocusignService {
 
       await this.assertEnvelopeHasSigners(client, accountId, envelopeId, templateId);
 
+      await this.pruneEnvelopeSignersToCrmRoles(client, accountId, envelopeId, roles);
+      await this.applyCrmRolesToEnvelopeSigners(client, accountId, envelopeId, roles);
+
       return this.finalizeEnvelopeFlow(userId, envelopeId, {
         applicationId: options.applicationId,
         redirectUrl: options.redirectUrl,
@@ -2402,27 +2962,65 @@ export class DocusignService {
     const roleName =
       templateRoleNames[0] || primarySigner.roleName || DOCUSIGN_DEFAULT_ROLE_NAME;
 
-    const compositeTemplates = templateIds.map((tid, idx) => ({
-      compositeTemplateId: String(idx + 1),
-      serverTemplates: [{ sequence: '1', templateId: tid }],
-      inlineTemplates: [
-        {
-          sequence: String(idx + 1),
-          recipients: {
-            signers: [
-              {
-                roleName,
-                name: primarySigner.name || primarySigner.email.split('@')[0],
-                email: primarySigner.email,
-                recipientId: '1',
-                routingOrder: String(primarySigner.routingOrder || idx + 1),
-                ...(idx === 0 && textTabs.length ? { tabs: { textTabs } } : {}),
+    const prefillByLabel = new Map<string, string>();
+    for (const t of textTabs) {
+      prefillByLabel.set(normalizeFieldKey(t.tabLabel), t.value);
+    }
+
+    const compositeTemplates = await Promise.all(
+      templateIds.map(async (tid, idx) => {
+        let tabsPayload: Record<string, Array<Record<string, string>>> | undefined;
+        if (DOCUSIGN_LOCK_SIGNER_DATA_TABS) {
+          const lockedTabs = await this.buildCreateTimeLockedTabsForTemplate(
+            client,
+            accountId,
+            tid,
+            roleName,
+            idx === 0 ? prefillByLabel : new Map(),
+          );
+          if (Object.keys(lockedTabs).length) {
+            tabsPayload = lockedTabs;
+            if (idx > 0) {
+              const n = Object.values(lockedTabs).reduce((sum, g) => sum + g.length, 0);
+              console.log(
+                `[DocuSign] create-time lock: ${n} tab(s) on merged template ${tid} (addendum/doc ${idx + 1})`,
+              );
+            }
+          }
+        }
+        if (!tabsPayload && idx === 0 && textTabs.length) {
+          tabsPayload = {
+            textTabs: textTabs.map((t) => ({
+              tabLabel: t.tabLabel,
+              value: t.value,
+              locked: 'true',
+            })),
+          };
+        }
+
+        return {
+          compositeTemplateId: String(idx + 1),
+          serverTemplates: [{ sequence: '1', templateId: tid }],
+          inlineTemplates: [
+            {
+              sequence: String(idx + 1),
+              recipients: {
+                signers: [
+                  {
+                    roleName,
+                    name: primarySigner.name || primarySigner.email.split('@')[0],
+                    email: primarySigner.email,
+                    recipientId: '1',
+                    routingOrder: String(primarySigner.routingOrder || idx + 1),
+                    ...(tabsPayload ? { tabs: tabsPayload } : {}),
+                  },
+                ],
               },
-            ],
-          },
-        },
-      ],
-    }));
+            },
+          ],
+        };
+      }),
+    );
 
     const envelopeDefinition: Record<string, unknown> = {
       status: 'created',
@@ -2463,6 +3061,19 @@ export class DocusignService {
       if (!envelopeId) {
         throw new BadRequestException('DocuSign did not return envelopeId from composite merge');
       }
+
+      await this.pruneEnvelopeSignersToCrmRoles(
+        client,
+        accountId,
+        envelopeId,
+        options.roles,
+      );
+      await this.applyCrmRolesToEnvelopeSigners(
+        client,
+        accountId,
+        envelopeId,
+        options.roles,
+      );
 
       const result = await this.finalizeEnvelopeFlow(userId, envelopeId, {
         applicationId: options.applicationId,
@@ -2584,6 +3195,7 @@ export class DocusignService {
       undefined,
       fields,
     );
+    await this.lockEnvelopeSignerDataTabsWithRetry(client, accountId, documentId);
     if (!result.applied) {
       throw new BadRequestException(
         'No DocuSign form fields matched the provided prefill ids for this envelope.',
@@ -2893,6 +3505,8 @@ export class DocusignService {
       return { envelopeId: eid, status: priorStatus, alreadySent: true };
     }
 
+    await this.lockEnvelopeSignerDataTabsWithRetry(client, accountId, eid);
+
     const res = await client.put(`/v2.1/accounts/${accountId}/envelopes/${eid}`, {
       status: 'sent',
     });
@@ -2904,6 +3518,8 @@ export class DocusignService {
         data: { status: 'sent', sentAt: new Date() } as any,
       });
     }
+
+    await this.lockEnvelopeSignerDataTabsWithRetry(client, accountId, eid);
 
     const ccForEmail = ccFromRequest.length
       ? ccFromRequest
@@ -2991,6 +3607,7 @@ export class DocusignService {
       priorStatus !== 'sent' &&
       priorStatus !== 'completed'
     ) {
+      await this.lockEnvelopeSignerDataTabsAsSystem(envelopeId);
       await this.notifyCcRecipientsOnEnvelopeSent(
         '',
         envelopeId,
@@ -3058,6 +3675,7 @@ export class DocusignService {
       priorStatus !== 'sent' &&
       priorStatus !== 'completed'
     ) {
+      await this.lockEnvelopeSignerDataTabsWithRetry(client, accountId, envelopeId);
       ccPrefilledEmail = await this.notifyCcRecipientsOnEnvelopeSent(
         userId,
         envelopeId,
