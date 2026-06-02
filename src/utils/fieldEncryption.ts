@@ -17,11 +17,7 @@ export function isEncrypted(value: unknown): value is string {
   return typeof value === 'string' && value.startsWith(ENCRYPTION_PREFIX);
 }
 
-export function encryptField(value: string): string {
-  const plaintext = String(value ?? '').trim();
-  if (!plaintext) return plaintext;
-  if (isEncrypted(plaintext)) return plaintext;
-
+function encryptPlaintext(plaintext: string): string {
   const key = getKey();
   const iv = crypto.randomBytes(12); // recommended IV length for GCM
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
@@ -33,6 +29,26 @@ export function encryptField(value: string): string {
     ENCRYPTION_PREFIX +
     `${iv.toString('base64')}.${tag.toString('base64')}.${ciphertext.toString('base64')}`
   );
+}
+
+export function encryptField(value: string): string {
+  const plaintext = String(value ?? '').trim();
+  if (!plaintext) return plaintext;
+  if (isEncrypted(plaintext)) {
+    try {
+      const decrypted = decryptField(plaintext);
+      if (decrypted == null || isEncrypted(decrypted)) {
+        throw new Error('decrypt failed');
+      }
+      return encryptPlaintext(String(decrypted).trim());
+    } catch {
+      throw new Error(
+        'Unable to decrypt stored bank value with the current FIELD_ENCRYPTION_KEY. Please re-enter the account and routing numbers.',
+      );
+    }
+  }
+
+  return encryptPlaintext(plaintext);
 }
 
 export function decryptField(value: string | null | undefined): string | null | undefined {
@@ -58,3 +74,97 @@ export function decryptField(value: string | null | undefined): string | null | 
   return plaintext.toString('utf8');
 }
 
+/** Never throws — returns null when decryption fails (wrong key, corrupt data, etc.). */
+export function decryptSensitiveField(value: string | null | undefined): string | null | undefined {
+  if (value == null) return value;
+  if (!isEncrypted(value)) return value;
+  try {
+    const decrypted = decryptField(value);
+    if (decrypted == null || isEncrypted(decrypted)) {
+      console.warn('[fieldEncryption] Failed to decrypt sensitive field (returning null)');
+      return null;
+    }
+    return decrypted;
+  } catch (err) {
+    console.warn('[fieldEncryption] Failed to decrypt sensitive field:', err);
+    return null;
+  }
+}
+
+const CONTRACT_BANK_SCALAR_KEYS = [
+  'authorizationClientBankAccount',
+  'authorizationClientBankRouting',
+] as const;
+
+const ACH_BANK_SCALAR_KEYS = ['accountNumber', 'routingNumber'] as const;
+
+const BANK_DETAIL_SCALAR_KEYS = ['accountNumber', 'routingNumber'] as const;
+
+export function mapBankDetailRecordForApi<T extends Record<string, unknown>>(record: T): T {
+  if (!record || typeof record !== 'object') return record;
+  const out = { ...record } as T;
+  for (const key of BANK_DETAIL_SCALAR_KEYS) {
+    if (key in out) {
+      (out as Record<string, unknown>)[key] = decryptSensitiveField(
+        out[key] as string | null | undefined,
+      );
+    }
+  }
+  return out;
+}
+
+export function mapAchRecordForApi<T extends Record<string, unknown>>(record: T): T {
+  if (!record || typeof record !== 'object') return record;
+  const out = { ...record } as T;
+  for (const key of ACH_BANK_SCALAR_KEYS) {
+    if (key in out) {
+      (out as Record<string, unknown>)[key] = decryptSensitiveField(
+        out[key] as string | null | undefined,
+      );
+    }
+  }
+  return out;
+}
+
+export function mapContractRecordForApi<T extends Record<string, unknown>>(record: T): T {
+  if (!record || typeof record !== 'object') return record;
+  const out = { ...record } as T;
+  for (const key of CONTRACT_BANK_SCALAR_KEYS) {
+    if (key in out) {
+      (out as Record<string, unknown>)[key] = decryptSensitiveField(
+        out[key] as string | null | undefined,
+      );
+    }
+  }
+  if ('contractPrefillOverrides' in out && out.contractPrefillOverrides != null) {
+    (out as Record<string, unknown>).contractPrefillOverrides = decryptEncryptedStringsInJson(
+      out.contractPrefillOverrides,
+    );
+  }
+  if (Array.isArray(out.achs)) {
+    (out as Record<string, unknown>).achs = out.achs.map((row) =>
+      mapAchRecordForApi(row as Record<string, unknown>),
+    );
+  }
+  return out;
+}
+
+/** Recursively decrypt enc:v1: strings in JSON (e.g. contractPrefillOverrides). */
+export function decryptEncryptedStringsInJson(value: unknown): unknown {
+  if (value == null) return value;
+  if (typeof value === 'string') {
+    if (!isEncrypted(value)) return value;
+    return decryptSensitiveField(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => decryptEncryptedStringsInJson(item));
+  }
+  if (typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = decryptEncryptedStringsInJson(v);
+    }
+    return out;
+  }
+  return value;
+}

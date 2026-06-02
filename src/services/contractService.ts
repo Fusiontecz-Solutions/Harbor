@@ -3,6 +3,12 @@ import prisma from '../config/prismaClient';
 import uploadService from './uploadService';
 import { parseContractLengthDaysFromOfferTerm } from '../utils/deriveFrequencyFromTerm';
 import { ValidationError } from '../utils/errors';
+import {
+  decryptEncryptedStringsInJson,
+  mapAchRecordForApi,
+  mapBankDetailRecordForApi,
+  mapContractRecordForApi,
+} from '../utils/fieldEncryption';
 import { resolveKatanFunderFromName } from '../utils/katanFunderDealId';
 import { syncApplicationDealIdForKatanFunder } from './syncApplicationDealIdForKatanFunder';
 
@@ -33,7 +39,7 @@ async function resolvePaymentBankDetailForContract(
           'Selected bank account was not found for this application; add BankDetail on the application or pass a valid paymentBankId.',
         );
       }
-      return bank;
+      return mapBankDetailRecordForApi(bank);
     }
     const bank = await prismaClient.bankDetail.findFirst({
       where: { applicationId },
@@ -45,7 +51,7 @@ async function resolvePaymentBankDetailForContract(
         'Bank details must exist on the application (BankDetail) before creating a contract.',
       );
     }
-    return bank;
+    return mapBankDetailRecordForApi(bank);
   }
 
   if (paymentBankId) {
@@ -56,7 +62,7 @@ async function resolvePaymentBankDetailForContract(
     if (!bank) {
       throw new ValidationError('paymentBankId does not reference an existing BankDetail.');
     }
-    return bank;
+    return mapBankDetailRecordForApi(bank);
   }
 
   throw new ValidationError(
@@ -564,7 +570,7 @@ class ContractService {
     const businessZip = firstNonEmptyString(client?.businessZipCode, biz?.zipCode, biz?.zip);
     const purchaseAmount = derivedApprovedAmount != null ? String(derivedApprovedAmount) : '';
     const purchasePrice = derivedTotalAmount != null ? String(derivedTotalAmount) : '';
-    const purchasePercent = offer?.rate != null ? String(offer.rate) : '';
+    const purchasePercent = '';
     const legalName = firstNonEmptyString(client?.businessName, biz?.clientBusinessName);
     const bankRouting = firstNonEmptyString(paymentBank?.routingNumber);
     const bankAccount = firstNonEmptyString(paymentBank?.accountNumber);
@@ -803,7 +809,7 @@ class ContractService {
         });
       }
 
-      return created;
+      return mapContractRecordForApi(created);
     }, createContractTransactionOptions);
   }
 
@@ -825,7 +831,7 @@ class ContractService {
     if (filters.applicationId) where.applicationId = filters.applicationId;
     if (filters.status) where.status = filters.status;
 
-    return (prisma as any).contract.findMany({
+    const rows = await (prisma as any).contract.findMany({
       where,
       include: {
         client: { select: { id: true, businessName: true, businessEmail: true, ownerFirstName: true, ownerLastName: true } },
@@ -842,10 +848,11 @@ class ContractService {
       },
       orderBy: { createdAt: 'desc' },
     });
+    return rows.map((row: Record<string, unknown>) => mapContractRecordForApi(row));
   }
 
   async getByIdContract(id: number) {
-    return (prisma as any).contract.findUnique({
+    const row = await (prisma as any).contract.findUnique({
       where: { id },
       include: {
         client: { select: { id: true, businessName: true, businessEmail: true, ownerFirstName: true, ownerLastName: true } },
@@ -872,10 +879,11 @@ class ContractService {
         paymentBank: { select: { id: true, bankName: true } },
       },
     });
+    return row ? mapContractRecordForApi(row) : row;
   }
 
   async getByApplicationIdContract(applicationId: string) {
-    return (prisma as any).contract.findUnique({
+    const row = await (prisma as any).contract.findUnique({
       where: { applicationId },
       include: {
         client: { select: { id: true, businessName: true, businessEmail: true, ownerFirstName: true, ownerLastName: true } },
@@ -902,6 +910,7 @@ class ContractService {
         paymentBank: { select: { id: true, bankName: true } },
       },
     });
+    return row ? mapContractRecordForApi(row) : row;
   }
 
   async updateContract(
@@ -956,7 +965,7 @@ class ContractService {
       updateData.contractPrefillOverrides =
         data.contractPrefillOverrides === null
           ? Prisma.DbNull
-          : (data.contractPrefillOverrides as Prisma.InputJsonValue);
+          : (decryptEncryptedStringsInJson(data.contractPrefillOverrides) as Prisma.InputJsonValue);
     }
     applyContractExtraFields(updateData, data);
 
@@ -972,11 +981,12 @@ class ContractService {
       paymentBank: { select: { id: true, bankName: true } },
     } as const;
 
-    return prisma.contract.update({
+    const row = await prisma.contract.update({
       where: { id },
       data: updateData,
       include: contractInclude,
     });
+    return mapContractRecordForApi(row as Record<string, unknown>);
   }
 
   /**
@@ -1133,22 +1143,24 @@ class ContractService {
     if (filters.clientId) where.clientId = filters.clientId;
     if (filters.contractId) where.contractId = filters.contractId;
 
-    return (prisma as any).aCH.findMany({
+    const rows = await (prisma as any).aCH.findMany({
       where,
       include: {
         client: { select: { id: true, businessName: true, businessEmail: true, ownerFirstName: true, ownerLastName: true } },
       },
       orderBy: { createdAt: 'desc' },
     });
+    return rows.map((row: Record<string, unknown>) => mapAchRecordForApi(row));
   }
 
   async getByIdACH(id: number) {
-    return (prisma as any).aCH.findUnique({
+    const row = await (prisma as any).aCH.findUnique({
       where: { id },
       include: {
         client: { select: { id: true, businessName: true, businessEmail: true, ownerFirstName: true, ownerLastName: true } },
       },
     });
+    return row ? mapAchRecordForApi(row) : row;
   }
 
   async updateACH(
@@ -1775,7 +1787,7 @@ class ContractService {
       throw new Error('Contract not found');
     }
 
-    return contract;
+    return mapContractRecordForApi(contract);
   }
 
   async createBoldSignTemplate(data: {

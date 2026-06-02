@@ -81,13 +81,33 @@ export function getDocusignOAuthUrls() {
   };
 }
 
+/** DocuSign REST paths include `/v2.1/...` — base URI must end at `/restapi` only. */
+export function isDocusignAccountIdGuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    String(value || '').trim(),
+  );
+}
+
 export function normalizeDocusignRestBaseUri(baseUri: string): string {
   let uri = String(baseUri || '').trim().replace(/\/+$/, '');
   if (!uri) return uri;
-  if (!uri.endsWith('/restapi')) {
+  // Never keep /v2.1 on the axios baseURL — paths already include /v2.1/... (double version → INVALID_API_VERSION)
+  uri = uri.replace(/\/restapi\/v2\.1$/i, '/restapi');
+  uri = uri.replace(/\/v2\.1$/i, '');
+  if (!/\/restapi$/i.test(uri)) {
     uri = `${uri}/restapi`;
   }
   return uri;
+}
+
+/** Absolute REST URL: `{base}/restapi/v2.1/accounts/...` (path may start with `/accounts/` or `/v2.1/accounts/`). */
+export function buildDocusignApiUrl(restBaseUri: string, relativePath: string): string {
+  const base = normalizeDocusignRestBaseUri(restBaseUri).replace(/\/+$/, '');
+  let rel = relativePath.startsWith('/') ? relativePath : `/${relativePath}`;
+  if (!rel.startsWith('/v2.1/')) {
+    rel = `/v2.1${rel}`;
+  }
+  return `${base}${rel}`;
 }
 
 export function resolveDocusignAuthMode(): 'jwt' | 'oauth' {

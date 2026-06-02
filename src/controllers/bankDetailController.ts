@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import prisma from '../config/prismaClient';
-import { decryptField, encryptField } from '../utils/fieldEncryption';
+import { syncBankDetailToContractPrefill } from '../services/bankDetailContractSync';
+import { decryptSensitiveField, encryptField, mapBankDetailRecordForApi } from '../utils/fieldEncryption';
 
 const mapBankDetailToApi = (detail: any) => {
   if (!detail) return detail;
@@ -41,19 +42,53 @@ const mapBankDetailToApi = (detail: any) => {
       email: createdBy.email,
     } as any);
 
+  const decrypted = mapBankDetailRecordForApi({
+    accountNumber,
+    routingNumber,
+  });
+
   return {
     ...rest,
     _id: id,
     id,
     bankName,
-    accountNumber: decryptField(accountNumber),
-    routingNumber: decryptField(routingNumber),
+    accountNumber: decrypted.accountNumber,
+    routingNumber: decrypted.routingNumber,
     application: mappedApplication ?? applicationId,
     createdBy: mappedCreatedBy ?? createdById,
     createdAt,
     updatedAt,
   };
 };
+
+function plainBankFromRequest(body: {
+  bankName?: unknown;
+  accountNumber?: unknown;
+  routingNumber?: unknown;
+}) {
+  return {
+    bankName: body.bankName !== undefined ? String(body.bankName).trim() : '',
+    accountNumber: body.accountNumber !== undefined ? String(body.accountNumber).trim() : '',
+    routingNumber:
+      body.routingNumber !== undefined
+        ? body.routingNumber
+          ? String(body.routingNumber).trim()
+          : null
+        : null,
+  };
+}
+
+async function syncAfterBankSave(
+  applicationId: string,
+  plainBank: ReturnType<typeof plainBankFromRequest>,
+  bankDetailId: string,
+) {
+  try {
+    await syncBankDetailToContractPrefill(applicationId, plainBank, { bankDetailId });
+  } catch (err) {
+    console.error('syncBankDetailToContractPrefill failed:', err);
+  }
+}
 
 const resolveApplicationByAnyId = async (application: any) => {
   const applicationStr = String(application);
@@ -100,11 +135,13 @@ class BankDetailController {
         });
       }
 
+      const plainBank = plainBankFromRequest({ bankName, accountNumber, routingNumber });
+
       const bankDetail = await prisma.bankDetail.create({
         data: {
-          bankName: bankName ? String(bankName).trim() : '',
-          accountNumber: encryptField(accountNumber),
-          routingNumber: routingNumber ? encryptField(String(routingNumber)) : null,
+          bankName: plainBank.bankName,
+          accountNumber: encryptField(plainBank.accountNumber),
+          routingNumber: plainBank.routingNumber ? encryptField(String(plainBank.routingNumber)) : null,
           applicationId: applicationRecord.id,
           createdById: createdBy,
         } as any,
@@ -125,16 +162,23 @@ class BankDetailController {
         },
       });
 
+      await syncAfterBankSave(applicationRecord.id, plainBank, bankDetail.id);
+
       return res.status(201).json({
         success: true,
         message: 'Bank detail created successfully',
         data: mapBankDetailToApi(bankDetail),
       });
-    } catch (error) {
+    } catch (error: any) {
       console.error('Create bank detail error:', error);
-      return res.status(500).json({
+      const message =
+        error?.message?.includes('FIELD_ENCRYPTION_KEY') ||
+        error?.message?.includes('re-enter')
+          ? error.message
+          : 'Internal server error';
+      return res.status(error?.message?.includes('re-enter') ? 400 : 500).json({
         success: false,
-        message: 'Internal server error',
+        message,
       });
     }
   }
@@ -211,6 +255,19 @@ class BankDetailController {
           })
         )
       );
+
+      const latest = createdBanks[createdBanks.length - 1];
+      if (latest) {
+        await syncAfterBankSave(
+          applicationRecord.id,
+          {
+            bankName: String(latest.bankName ?? ''),
+            accountNumber: decryptSensitiveField(latest.accountNumber) ?? '',
+            routingNumber: decryptSensitiveField(latest.routingNumber) ?? null,
+          },
+          latest.id,
+        );
+      }
 
       return res.status(201).json({
         success: true,
@@ -343,23 +400,6 @@ class BankDetailController {
         });
       }
 
-      // Require OTP-based approval for editing bank details
-      const isBankEditApproved = await prisma.verificationToken.findFirst({
-        where: {
-          userId: currentUserId,
-          tokenType: 'BANK_EDIT_VERIFIED',
-          expiresAt: { gt: new Date() },
-        },
-        orderBy: { createdAt: 'desc' },
-      });
-
-      if (!isBankEditApproved) {
-        return res.status(403).json({
-          success: false,
-          message: 'OTP verification required to edit bank details',
-        });
-      }
-
       const existing = await prisma.bankDetail.findUnique({ where: { id } });
       if (!existing) {
         return res.status(404).json({
@@ -411,16 +451,38 @@ class BankDetailController {
         },
       });
 
+      const applicationIdForSync = String(updatedBankDetail.applicationId ?? existing.applicationId);
+      const plainForSync = {
+        bankName:
+          bankName !== undefined ? String(bankName).trim() : String(updatedBankDetail.bankName ?? ''),
+        accountNumber:
+          accountNumber !== undefined
+            ? String(accountNumber).trim()
+            : (decryptSensitiveField(existing.accountNumber) ?? ''),
+        routingNumber:
+          routingNumber !== undefined
+            ? routingNumber
+              ? String(routingNumber).trim()
+              : null
+            : (decryptSensitiveField(existing.routingNumber) ?? null),
+      };
+      await syncAfterBankSave(applicationIdForSync, plainForSync, updatedBankDetail.id);
+
       return res.status(200).json({
         success: true,
         message: 'Bank detail updated successfully',
         data: mapBankDetailToApi(updatedBankDetail),
       });
-    } catch (error) {
+    } catch (error: any) {
       console.error('Update bank detail error:', error);
-      return res.status(500).json({
+      const message =
+        error?.message?.includes('FIELD_ENCRYPTION_KEY') ||
+        error?.message?.includes('re-enter')
+          ? error.message
+          : 'Internal server error';
+      return res.status(error?.message?.includes('re-enter') ? 400 : 500).json({
         success: false,
-        message: 'Internal server error',
+        message,
       });
     }
   }
@@ -456,4 +518,3 @@ class BankDetailController {
 
 const bankDetailController = new BankDetailController();
 export default bankDetailController;
-

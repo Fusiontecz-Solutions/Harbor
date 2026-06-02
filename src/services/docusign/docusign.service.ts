@@ -70,6 +70,71 @@ class ServiceConfigException extends Error {
   }
 }
 
+/** Turn DocuSign/Axios failures into a user-visible message (not "Request failed with status code 400"). */
+export function formatDocusignApiErrorMessage(err: unknown): string {
+  const ax = err as {
+    response?: { status?: number; data?: unknown };
+    message?: string;
+  };
+  const data = ax?.response?.data;
+  if (typeof data === 'string' && data.trim()) {
+    return data.trim();
+  }
+  if (data && typeof data === 'object') {
+    const o = data as Record<string, unknown>;
+    const code = String(o.errorCode ?? '').trim();
+    const msg = String(o.message ?? o.error ?? '').trim();
+    if (msg) {
+      return code ? `DocuSign (${code}): ${msg}` : `DocuSign: ${msg}`;
+    }
+    const details = o.errorDetails;
+    if (Array.isArray(details) && details.length > 0) {
+      const first = details[0] as Record<string, unknown>;
+      const dMsg = String(first?.message ?? '').trim();
+      const dCode = String(first?.errorCode ?? '').trim();
+      if (dMsg) {
+        return dCode ? `DocuSign (${dCode}): ${dMsg}` : `DocuSign: ${dMsg}`;
+      }
+    }
+    try {
+      return `DocuSign error: ${JSON.stringify(data)}`;
+    } catch {
+      /* fall through */
+    }
+  }
+  const fallback = String(ax?.message ?? err ?? 'Unknown error');
+  if (/^request failed with status code \d+$/i.test(fallback) && ax?.response?.status) {
+    return `DocuSign API returned HTTP ${ax.response.status} with no error details. Check envelope id, DocuSign account, and JWT impersonated user.`;
+  }
+  return fallback;
+}
+
+export function formatDocusignRouteError(error: unknown): { status: number; message: string } {
+  if (error instanceof BadRequestException) {
+    return { status: 400, message: error.message };
+  }
+  if (error instanceof ServiceConfigException) {
+    return { status: error.status, message: error.message };
+  }
+  if (error instanceof UnauthorizedException) {
+    return { status: 401, message: error.message };
+  }
+  const ax = error as { response?: { status?: number }; status?: number };
+  if (ax?.response?.status === 401) {
+    clearDocusignJwtCache();
+    return {
+      status: 503,
+      message:
+        'DocuSign API rejected credentials. Check JWT key, impersonated user, and admin consent.',
+    };
+  }
+  const httpStatus = ax?.status || ax?.response?.status || 500;
+  return {
+    status: httpStatus >= 400 && httpStatus < 600 ? httpStatus : 500,
+    message: formatDocusignApiErrorMessage(error),
+  };
+}
+
 type PrefillField = PrefillFieldInput;
 
 type SignerRoleInput = Record<string, unknown> & {
@@ -226,14 +291,24 @@ export class DocusignService {
   }
 
   private createRestClient(accessToken: string, baseUri: string): AxiosInstance {
+    const baseURL = normalizeDocusignRestBaseUri(baseUri);
     return axios.create({
-      baseURL: baseUri,
+      baseURL,
       headers: {
         Authorization: `Bearer ${accessToken}`,
         Accept: 'application/json',
         'Content-Type': 'application/json',
       },
     });
+  }
+
+  private ensureClientApiBase(client: AxiosInstance): void {
+    const current = String(client.defaults.baseURL || '');
+    const fixed = normalizeDocusignRestBaseUri(current);
+    if (fixed && fixed !== current) {
+      console.warn(`[DocuSign] normalized axios baseURL: ${current} → ${fixed}`);
+      client.defaults.baseURL = fixed;
+    }
   }
 
   private async getJwtAuthContext() {
@@ -534,6 +609,61 @@ export class DocusignService {
     const code = ax?.response?.data?.errorCode;
     const message = ax?.response?.data?.message || ax?.message || String(err);
     console.warn(`[DocuSign] ${context}${code ? ` (${code})` : ''}: ${message}`);
+  }
+
+  /**
+   * DocuSign sender view rejects many local/dev return URLs (http://localhost, http://).
+   * Draft creation already uses DOCUSIGN_SENDER_RETURN_URL — align sender-view with that.
+   */
+  private normalizeSenderReturnUrl(returnUrl: string): string {
+    const fallback =
+      process.env.DOCUSIGN_SENDER_RETURN_URL?.trim() || 'https://www.docusign.com';
+    const raw = String(returnUrl || '').trim();
+    if (!raw) return fallback;
+    try {
+      const u = new URL(raw);
+      const host = u.hostname.toLowerCase();
+      const isLocal =
+        host === 'localhost' ||
+        host === '127.0.0.1' ||
+        host.endsWith('.local');
+      if (isLocal || u.protocol !== 'https:') {
+        console.log(
+          `[DocuSign] Sender view returnUrl "${raw}" is not a public HTTPS URL; using ${fallback}`,
+        );
+        return fallback;
+      }
+      return raw;
+    } catch {
+      return fallback;
+    }
+  }
+
+  private throwBadRequestFromDocusignAxios(context: string, err: unknown): never {
+    this.logDocusignApiError(context, err);
+    throw new BadRequestException(`${context}: ${formatDocusignApiErrorMessage(err)}`);
+  }
+
+  private async assertEnvelopeDraftForSenderView(
+    client: AxiosInstance,
+    accountId: string,
+    envelopeId: string,
+  ): Promise<void> {
+    try {
+      const res = await client.get(
+        `/v2.1/accounts/${accountId}/envelopes/${envelopeId}`,
+      );
+      const status = String(res.data?.status || '').toLowerCase();
+      if (status && status !== 'created') {
+        throw new BadRequestException(
+          `DocuSign envelope status is "${status}" (sender view requires draft "created"). ` +
+            'Create a new draft from Review & send.',
+        );
+      }
+    } catch (err) {
+      if (err instanceof BadRequestException) throw err;
+      this.logDocusignApiError('assertEnvelopeDraftForSenderView', err);
+    }
   }
 
   /** Decrypt CRM `enc:v1:` values and drop empty fields before sending to DocuSign. */
@@ -960,7 +1090,38 @@ export class DocusignService {
   }
 
   /**
-   * Apply CRM signer emails onto the draft envelope (per recipient PUT — does not wipe other recipients).
+   * Update envelope signers via PUT /recipients (bulk).
+   * Per-recipient PUT .../recipients/{id} returns INVALID_API_VERSION on current DocuSign REST.
+   */
+  private async updateEnvelopeSignersBulk(
+    client: AxiosInstance,
+    accountId: string,
+    envelopeId: string,
+    signerUpdates: Array<{
+      recipientId: string;
+      email: string;
+      name: string;
+      roleName?: string;
+      routingOrder?: string;
+    }>,
+  ): Promise<void> {
+    if (!signerUpdates.length) return;
+    await client.put(
+      `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients`,
+      {
+        signers: signerUpdates.map((s) => ({
+          recipientId: s.recipientId,
+          email: s.email,
+          name: s.name,
+          roleName: s.roleName,
+          routingOrder: s.routingOrder,
+        })),
+      },
+    );
+  }
+
+  /**
+   * Apply CRM signer emails onto the draft envelope (bulk PUT /recipients — does not wipe other recipients).
    */
   private async applyCrmRolesToEnvelopeSigners(
     client: AxiosInstance,
@@ -991,7 +1152,13 @@ export class DocusignService {
     }
 
     const missingRoles: string[] = [];
-    let updated = 0;
+    const bulkUpdates: Array<{
+      recipientId: string;
+      email: string;
+      name: string;
+      roleName?: string;
+      routingOrder?: string;
+    }> = [];
 
     for (let i = 0; i < signers.length; i++) {
       const signer = signers[i];
@@ -1012,23 +1179,25 @@ export class DocusignService {
       const current = String(signer.email || '').trim().toLowerCase();
       if (current === email.toLowerCase()) continue;
 
-      await client.put(
-        `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients/${rid}`,
-        {
-          recipientId: rid,
-          email,
-          name: match.name || email.split('@')[0],
-          roleName: signer.roleName,
-          routingOrder: signer.routingOrder || String(i + 1),
-        },
-      );
-      updated++;
-      console.log(
-        `[DocuSign] signer ${signer.roleName} on ${envelopeId} → ${email}`,
-      );
+      bulkUpdates.push({
+        recipientId: rid,
+        email,
+        name: match.name || email.split('@')[0],
+        roleName: signer.roleName,
+        routingOrder: signer.routingOrder || String(i + 1),
+      });
     }
 
-    return { updated, missingRoles };
+    if (bulkUpdates.length) {
+      await this.updateEnvelopeSignersBulk(client, accountId, envelopeId, bulkUpdates);
+      for (const u of bulkUpdates) {
+        console.log(
+          `[DocuSign] signer ${u.roleName || 'Signer'} on ${envelopeId} → ${u.email}`,
+        );
+      }
+    }
+
+    return { updated: bulkUpdates.length, missingRoles };
   }
 
   /**
@@ -1067,8 +1236,7 @@ export class DocusignService {
       const current = String(primary.email || '').trim().toLowerCase();
       if (current === email.toLowerCase()) return;
 
-      await client.put(
-        `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients/${rid}`,
+      await this.updateEnvelopeSignersBulk(client, accountId, envelopeId, [
         {
           recipientId: rid,
           email,
@@ -1078,7 +1246,7 @@ export class DocusignService {
           roleName: primary.roleName,
           routingOrder: primary.routingOrder || '1',
         },
-      );
+      ]);
       console.log(
         `[DocuSign] primary signer on ${envelopeId} set to ${email} (was ${current || 'empty'})`,
       );
@@ -1823,13 +1991,20 @@ export class DocusignService {
     envelopeId: string,
     returnUrl: string,
   ): Promise<string> {
-    const res = await client.post(
-      `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/views/sender`,
-      { returnUrl },
-    );
-    const url = res.data?.url;
-    if (!url) throw new BadRequestException('DocuSign did not return sender view URL');
-    return url;
+    this.ensureClientApiBase(client);
+    const safeReturnUrl = this.normalizeSenderReturnUrl(returnUrl);
+    try {
+      const res = await client.post(
+        `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/views/sender`,
+        { returnUrl: safeReturnUrl },
+      );
+      const url = res.data?.url;
+      if (!url) throw new BadRequestException('DocuSign did not return sender view URL');
+      return url;
+    } catch (err) {
+      if (err instanceof BadRequestException) throw err;
+      this.throwBadRequestFromDocusignAxios('Sender view', err);
+    }
   }
 
   private async finalizeEnvelopeFlow(
@@ -2448,10 +2623,20 @@ export class DocusignService {
       status: 'voided',
       voidedReason: reason || 'Voided by user',
     });
+    const existingDoc = await prisma.document.findFirst({
+      where: { envelopeId: documentId },
+      select: { applicationId: true },
+    });
     await prisma.document.updateMany({
       where: { envelopeId: documentId },
       data: { status: 'revoked' },
     });
+    const appId = existingDoc?.applicationId
+      ? String(existingDoc.applicationId).trim()
+      : '';
+    if (appId) {
+      await this.syncContractSigningStatus(appId, 'revoked');
+    }
     return { success: true };
   }
 
@@ -2576,24 +2761,38 @@ export class DocusignService {
     },
   ) {
     const eid = String(envelopeId || '').trim();
-    const ccList = [...new Set((options?.ccEmails || []).map((e) => String(e).trim()).filter(Boolean))];
-    const hasSignerSync =
-      Boolean(String(options?.signerEmail || '').trim()) ||
-      (Array.isArray(options?.roles) && options.roles.length > 0);
-    if (ccList.length || hasSignerSync) {
-      await this.syncEnvelopeCcEmails(
-        userId,
-        eid,
-        ccList,
-        options?.applicationId,
-        options?.signerEmail,
-        options?.signerName,
-        options?.roles,
-      );
+    try {
+      const ccList = [
+        ...new Set((options?.ccEmails || []).map((e) => String(e).trim()).filter(Boolean)),
+      ];
+      const hasSignerSync =
+        Boolean(String(options?.signerEmail || '').trim()) ||
+        (Array.isArray(options?.roles) && options.roles.length > 0);
+      if (ccList.length || hasSignerSync) {
+        await this.syncEnvelopeCcEmails(
+          userId,
+          eid,
+          ccList,
+          options?.applicationId,
+          options?.signerEmail,
+          options?.signerName,
+          options?.roles,
+        );
+      }
+      const { client, accountId } = await this.getAuthContext(userId);
+      await this.assertEnvelopeDraftForSenderView(client, accountId, eid);
+      const url = await this.createSenderViewUrl(client, accountId, eid, returnUrl);
+      return { url };
+    } catch (err) {
+      if (
+        err instanceof BadRequestException ||
+        err instanceof ServiceConfigException ||
+        err instanceof UnauthorizedException
+      ) {
+        throw err;
+      }
+      this.throwBadRequestFromDocusignAxios('DocuSign sender view', err);
     }
-    const { client, accountId } = await this.getAuthContext(userId);
-    const url = await this.createSenderViewUrl(client, accountId, eid, returnUrl);
-    return { url };
   }
 
   private async emailCcPrefilledPdfIfConfigured(

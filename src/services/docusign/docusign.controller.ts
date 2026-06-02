@@ -1,5 +1,5 @@
 import type { Request, Response } from 'express';
-import { DocusignService } from './docusign.service';
+import { DocusignService, formatDocusignRouteError } from './docusign.service';
 
 const docusignService = new DocusignService();
 
@@ -439,8 +439,10 @@ export const getSenderView = async (req: Request, res: Response) => {
       roles: Array.isArray(roles) ? roles : undefined,
     });
     return res.json(result);
-  } catch (error: any) {
-    return res.status(error.status || 500).json({ message: error.message });
+  } catch (error: unknown) {
+    const { status, message } = formatDocusignRouteError(error);
+    console.error('[DocuSign] sender-view failed:', message);
+    return res.status(status).json({ message });
   }
 };
 
