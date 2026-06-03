@@ -99,8 +99,60 @@ const OFFER_DECISION_CONTRACT_SELECT = {
   term: true,
   frequency: true,
   repayPerPeriod: true,
+  rate: true,
 } as const;
 
+/** Latest terms offer fields needed for contract UI (buy rate, % gross, factor, etc.). */
+const TERMS_OFFER_CONTRACT_SELECT = {
+  id: true,
+  termsOfferId: true,
+  approvedAmount: true,
+  factorRate: true,
+  paybackAmount: true,
+  paymentAmount: true,
+  percentOfGross: true,
+  buyRate: true,
+  commissionPercent: true,
+  commissionAmount: true,
+  termLength: true,
+  frequency: true,
+  position: true,
+  numberOfPayments: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
+function mapTermsOfferNestedForApi(offer: Record<string, unknown> | null | undefined) {
+  if (!offer || typeof offer !== 'object') return offer;
+  const { id, ...rest } = offer;
+  return { ...rest, _id: id, id };
+}
+
+function enrichContractRowForApi(row: Record<string, unknown> | null | undefined) {
+  if (!row) return row;
+  const mapped = mapContractRecordForApi(row) as Record<string, unknown>;
+  const termsOffers = Array.isArray(row.termsOffers)
+    ? row.termsOffers.map((t) => mapTermsOfferNestedForApi(t as Record<string, unknown>))
+    : row.termsOffers;
+  const app = row.application as Record<string, unknown> | undefined;
+  const application =
+    app && typeof app === 'object'
+      ? {
+          ...app,
+          termsOffers: Array.isArray(app.termsOffers)
+            ? app.termsOffers.map((t) =>
+                mapTermsOfferNestedForApi(t as Record<string, unknown>),
+              )
+            : app.termsOffers,
+        }
+      : app;
+  return { ...mapped, termsOffers, application };
+}
+
+/**
+ * Contract scalar columns only (see prisma/schema/contract.prisma).
+ * ACH portal/credentials and other prefill-only keys live in `contractPrefillOverrides` JSON.
+ */
 const CONTRACT_EXTRA_STRING_FIELDS = [
   'legalName',
   'clientName',
@@ -130,16 +182,6 @@ const CONTRACT_EXTRA_STRING_FIELDS = [
   'authorizationClientBankName',
   'authorizationClientBankAccount',
   'authorizationClientBankRouting',
-  'achAuthorizationBankPortalWebsite',
-  'achAuthorizationUsername',
-  'achAuthorizationPassword',
-  'achAuthorizationSecurityQuestion1',
-  'achAuthorizationSecurityAnswer1',
-  'achAuthorizationSecurityQuestion2',
-  'achAuthorizationSecurityAnswer2',
-  'achAuthorizationSecurityQuestion3',
-  'achAuthorizationSecurityAnswer3',
-  'achAuthorizationOtherInfomation',
   'authorizedBusinessPhone',
   'businessAddressContract',
   'businessAddressContractCity',
@@ -624,8 +666,8 @@ class ContractService {
       appendixUnderwritingFees: firstNonEmptyString(offer?.fees) || null,
       authorizationApplication: firstNonEmptyString(legalName, customerName) || null,
       authorizationClientDate: derivedAgreementDate.toISOString().slice(0, 10),
-      authorizationClientName: customerName || null,
-      authorizationClientNamePrint: customerName || null,
+      authorizationClientName: legalName || null,
+      authorizationClientNamePrint: legalName || null,
       authorizationClientTaxId: taxEin || null,
       authorizationClientBankName: bankName || null,
       authorizationClientBankAccount: bankAccount || null,
@@ -742,7 +784,7 @@ class ContractService {
             contractId: created.id,
             businessInfoId,
             bankName: bankName || null,
-            accountHolderName: customerName || null,
+            accountHolderName: legalName || null,
             accountNumber: bankAccount || null,
             routingNumber: bankRouting || null,
             paymentAmount: purchaseAmount || null,
@@ -895,14 +937,24 @@ class ContractService {
                 updatedAt: true,
               },
             },
+            termsOffers: {
+              orderBy: { createdAt: 'desc' as const },
+              take: 1,
+              select: TERMS_OFFER_CONTRACT_SELECT,
+            },
           },
         },
         offer: { select: OFFER_DECISION_CONTRACT_SELECT },
+        termsOffers: {
+          orderBy: { createdAt: 'desc' as const },
+          take: 1,
+          select: TERMS_OFFER_CONTRACT_SELECT,
+        },
         paymentTerms: { select: { id: true, paymentMethod: true, paymentFrequency: true } },
         paymentBank: { select: { id: true, bankName: true } },
       },
     });
-    return row ? mapContractRecordForApi(row) : row;
+    return row ? enrichContractRowForApi(row) : row;
   }
 
   async getByApplicationIdContract(applicationId: string) {
@@ -926,14 +978,24 @@ class ContractService {
                 updatedAt: true,
               },
             },
+            termsOffers: {
+              orderBy: { createdAt: 'desc' as const },
+              take: 1,
+              select: TERMS_OFFER_CONTRACT_SELECT,
+            },
           },
         },
         offer: { select: OFFER_DECISION_CONTRACT_SELECT },
+        termsOffers: {
+          orderBy: { createdAt: 'desc' as const },
+          take: 1,
+          select: TERMS_OFFER_CONTRACT_SELECT,
+        },
         paymentTerms: { select: { id: true, paymentMethod: true, paymentFrequency: true } },
         paymentBank: { select: { id: true, bankName: true } },
       },
     });
-    return row ? mapContractRecordForApi(row) : row;
+    return row ? enrichContractRowForApi(row) : row;
   }
 
   async updateContract(
