@@ -60,7 +60,22 @@ const applicationStateApiToPrisma: Record<string, ApplicationState> = {
 /** Queue labels used by deal-pipeline filters (aligned with application list aliases). */
 export const dashboardStateQueueAliases: Record<string, string[]> = {
     Contract_Pending: ['Contract Pending', 'Contract_Pending'],
-    Contracted: ['Contracted', 'Contract Out', 'Contracts Out', 'Contracts_Out', 'Contract_Out'],
+    Contract_Generated: ['Contract Generated', 'Contract_Generated'],
+    Contracted: [
+        'Contracted',
+        'Contract Pending',
+        'Contract_Pending',
+        'Contract Generated',
+        'Contract_Generated',
+        'Contract Out',
+        'Contracts Out',
+        'Contracts_Out',
+        'Contract_Out',
+        'Contract Signed',
+        'Contract_Signed',
+        'Signed Contracts',
+        'Signed_Contracts',
+    ],
     'Contract Out': ['Contract Out', 'Contract_Out', 'Contracted', 'Contracts Out', 'Contracts_Out'],
     'Contracts Out': ['Contracts Out', 'Contracts_Out', 'Contract Out', 'Contract_Out', 'Contracted'],
     Contracts_Out: ['Contracts Out', 'Contracts_Out', 'Contract Out', 'Contract_Out'],
@@ -189,12 +204,56 @@ function signedContractsBroadMatchWhere(): Prisma.ApplicationWhereInput {
     };
 }
 
+/** Queue labels for contract-pending stage (generated, not yet in DocuSign). */
+const CONTRACT_PENDING_QUEUE_STRICT = ['Contract Pending', 'Contract_Pending'];
+
+/** Queue labels for contract-generated stage (DocuSign draft, not yet sent). */
+const CONTRACT_GENERATED_QUEUE_STRICT = ['Contract Generated', 'Contract_Generated'];
+
+/** Stored `currentState` spellings for contract-generated (not a Prisma workflow enum). */
+const CONTRACT_GENERATED_STATE_STRICT = [
+    'Contract_Generated',
+    'CONTRACT_GENERATED',
+    'Contract Generated',
+];
+
+function contractPendingBroadMatchWhere(): Prisma.ApplicationWhereInput {
+    const aliases = dashboardStateQueueAliases.Contract_Pending || [];
+    const queueValues = Array.from(
+        new Set([...CONTRACT_PENDING_QUEUE_STRICT, ...aliases]),
+    );
+    return {
+        OR: [
+            { currentState: { in: expandStoredCurrentStateValues('CONTRACT_PENDING') } },
+            { currentQueue: { in: queueValues } },
+        ],
+    };
+}
+
+function contractGeneratedBroadMatchWhere(): Prisma.ApplicationWhereInput {
+    const aliases = dashboardStateQueueAliases.Contract_Generated || [];
+    const queueValues = Array.from(
+        new Set([...CONTRACT_GENERATED_QUEUE_STRICT, ...aliases]),
+    );
+    return {
+        OR: [
+            { currentState: { in: CONTRACT_GENERATED_STATE_STRICT } },
+            { currentQueue: { in: queueValues } },
+        ],
+    };
+}
+
 /**
- * `operationsStatus=Contracted` — contract out **and** contract signed (operations CONTRACT bucket).
+ * `operationsStatus=Contracted` — full contract pipeline: pending → generated → out → signed.
  */
 function contractsCombinedMatchWhere(): Prisma.ApplicationWhereInput {
     return {
-        OR: [contractsOutBroadMatchWhere(), signedContractsBroadMatchWhere()],
+        OR: [
+            contractPendingBroadMatchWhere(),
+            contractGeneratedBroadMatchWhere(),
+            contractsOutBroadMatchWhere(),
+            signedContractsBroadMatchWhere(),
+        ],
     };
 }
 

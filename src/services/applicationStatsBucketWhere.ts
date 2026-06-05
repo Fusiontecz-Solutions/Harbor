@@ -124,6 +124,8 @@ export function buildApplicationStatsBucketWhere(
                 'New',
                 'Agent',
                 'On Hold',
+                'Contract Pending',
+                'Contract Generated',
                 'Contracted',
                 'Contract Out',
                 'Contracts Out',

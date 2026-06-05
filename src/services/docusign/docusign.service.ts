@@ -2168,6 +2168,45 @@ export class DocusignService {
     await this.syncApplicationWorkflowOnContractSigning(appId, internalStatus);
   }
 
+  /** Draft envelope ready in DocuSign (review before send) — not yet Contract Out. */
+  private async syncApplicationWorkflowOnDraftCreated(applicationId: string) {
+    const appId = String(applicationId || '').trim();
+    if (!appId) return;
+
+    const normalizeQueueKey = (queue: string | null | undefined) =>
+      String(queue ?? '')
+        .trim()
+        .replace(/[\s_-]+/g, '')
+        .toLowerCase();
+
+    const app = await prisma.application.findUnique({
+      where: { id: appId },
+      select: { currentQueue: true },
+    });
+    const qKey = normalizeQueueKey(app?.currentQueue);
+    const postDraftQueues = new Set([
+      'contractgenerated',
+      'contractout',
+      'contractsout',
+      'contractsigned',
+      'signedcontracts',
+      'final',
+      'fundingcall',
+      'disbursment',
+      'disbursement',
+      'funded',
+    ]);
+    if (postDraftQueues.has(qKey)) return;
+
+    await prisma.application.updateMany({
+      where: { id: appId },
+      data: {
+        currentQueue: 'Contract Generated',
+        currentState: 'Contract_Generated',
+      },
+    });
+  }
+
   /** Move deal to Contract Signed when fully signed; keep Contract Out while awaiting signature. */
   private async syncApplicationWorkflowOnContractSigning(
     applicationId: string,
@@ -2696,6 +2735,10 @@ export class DocusignService {
           senderViewErr,
         );
       }
+    }
+
+    if (!autoSend && envelopeStatus !== 'sent' && appId) {
+      await this.syncApplicationWorkflowOnDraftCreated(appId);
     }
 
     const message =

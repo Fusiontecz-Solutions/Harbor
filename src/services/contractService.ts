@@ -865,13 +865,35 @@ class ContractService {
       }
 
       if (data.applicationId) {
-        await tx.application.update({
+        const appRow = await tx.application.findUnique({
           where: { id: data.applicationId },
-          data: {
-            currentQueue: 'Contract Out',
-            currentState: 'Contract Out',
-          },
+          select: { currentQueue: true },
         });
+        const queueKey = String(appRow?.currentQueue ?? '')
+          .trim()
+          .replace(/[\s_-]+/g, '')
+          .toLowerCase();
+        const postSendQueues = new Set([
+          'contractgenerated',
+          'contractout',
+          'contractsout',
+          'contractsigned',
+          'signedcontracts',
+          'final',
+          'fundingcall',
+          'disbursment',
+          'disbursement',
+          'funded',
+        ]);
+        if (!postSendQueues.has(queueKey)) {
+          await tx.application.update({
+            where: { id: data.applicationId },
+            data: {
+              currentQueue: 'Contract Pending',
+              currentState: 'Contract_Pending',
+            },
+          });
+        }
       }
 
       return mapContractRecordForApi(created);
