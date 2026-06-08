@@ -47,6 +47,7 @@ import {
   resolveDocusignWebhookEnvelopeStatus,
 } from './utils/docusign-webhook';
 import { decryptField, isEncrypted } from '../../utils/fieldEncryption';
+import { handleContractSigningStatusTransition } from '../contractSigningStatusEffects';
 
 dotenv.config();
 
@@ -2132,8 +2133,17 @@ export class DocusignService {
     envelopeId: string,
     incomingResolved: string,
     applicationId: string | null,
-    existingDoc?: { status?: string | null; sentAt?: Date | null; applicationId?: string } | null,
+    existingDoc?: {
+      status?: string | null;
+      sentAt?: Date | null;
+      applicationId?: string;
+      originalName?: string | null;
+      title?: string | null;
+    } | null,
   ) {
+    const priorStatus = existingDoc?.status
+      ? String(existingDoc.status).trim().toLowerCase()
+      : null;
     const status = mergeWithExistingEnvelopeStatus(existingDoc?.status, incomingResolved);
     if (!status) return status;
 
@@ -2152,6 +2162,20 @@ export class DocusignService {
     const appId = applicationId || existingDoc?.applicationId || null;
     if (appId) {
       await this.syncContractSigningStatus(String(appId), status);
+      if (priorStatus !== status) {
+        const documentName =
+          String(existingDoc?.originalName || existingDoc?.title || '').trim() || 'Contract.pdf';
+        void handleContractSigningStatusTransition({
+          applicationId: String(appId),
+          priorStatus,
+          newStatus: status,
+          envelopeId: String(envelopeId),
+          documentName,
+          provider: 'docusign',
+        }).catch((err) => {
+          console.warn('[DocuSign] contract signing status side-effects failed:', err);
+        });
+      }
     }
     return status;
   }
@@ -2265,11 +2289,15 @@ export class DocusignService {
   private async markEnvelopeSent(applicationId: string, envelopeId: string) {
     const appId = String(applicationId || '').trim();
     if (!appId) return;
-    await prisma.document.updateMany({
+    const existingDoc = await prisma.document.findFirst({
       where: { envelopeId: String(envelopeId), applicationId: appId },
-      data: { status: 'sent', sentAt: new Date() } as any,
     });
-    await this.syncContractSigningStatus(appId, 'sent');
+    await this.applySigningStatusUpdate(
+      String(envelopeId),
+      'sent',
+      appId,
+      existingDoc,
+    );
   }
 
   private async getEnvelopeStatus(

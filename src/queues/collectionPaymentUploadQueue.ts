@@ -1,4 +1,4 @@
-import { Queue } from 'bullmq';
+import { Queue, type ConnectionOptions } from 'bullmq';
 import Redis from 'ioredis';
 
 export const COLLECTION_PAYMENT_UPLOAD_QUEUE = 'collection-payment-upload';
@@ -15,13 +15,13 @@ let queueInstance: Queue<CollectionPaymentUploadJobData> | null = null;
 
 const redisUrl = () => String(process.env.REDIS_URL || '').trim();
 
-const createRedisConnection = () =>
+const createRedisConnection = (): ConnectionOptions =>
   new Redis(redisUrl(), {
     maxRetriesPerRequest: null,
     retryStrategy(times) {
       return Math.min(times * 200, 2000);
     },
-  });
+  }) as ConnectionOptions;
 
 export const isCollectionPaymentUploadQueueEnabled = (): boolean => Boolean(redisUrl());
 
@@ -37,7 +37,7 @@ export const getCollectionPaymentUploadQueue = (): Queue<CollectionPaymentUpload
         removeOnComplete: 1000,
         removeOnFail: 1000,
       },
-    });
+    }) as Queue<CollectionPaymentUploadJobData>;
   }
 
   return queueInstance;
