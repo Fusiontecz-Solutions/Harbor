@@ -1,6 +1,10 @@
 // @ts-nocheck
 import type { Request, Response } from 'express';
 import prisma from '../config/prismaClient';
+import {
+  resolveApplicationAttributedUserId,
+  APPLICATION_USER_ATTRIBUTION_ERROR,
+} from '../middleware/authMiddleware';
 import { isOutboundSmtpConfigured } from '../config/nodemailer';
 import { sendFundingCallPendingEmail } from '../services/emailService';
 
@@ -106,11 +110,14 @@ class FundingCallController {
         });
       }
 
-      const createdBy = (req as any).user?.id;
+      const createdBy = await resolveApplicationAttributedUserId(req, {
+        createdById: appRecord.createdById,
+        salesRepresentativeId: appRecord.salesRepresentativeId,
+      });
       if (!createdBy) {
-        return res.status(401).json({
+        return res.status(400).json({
           success: false,
-          message: 'User authentication required',
+          message: APPLICATION_USER_ATTRIBUTION_ERROR,
         });
       }
 

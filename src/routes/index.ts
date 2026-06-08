@@ -29,7 +29,6 @@ import commissionRequestRoutes from './commissionRequestRoutes';
 import oAuth2Client from '../config/gmail';
 import prisma from '../config/prismaClient';
 import gmailServiceRoutes from './gmailServiceRoutes';
-import mailRoutes from './mailRoutes';
 import docusignRoutes from '../services/docusign/docusign.routes';
 import boldsignRoutes from '../services/boldsign/boldsign.routes';
 import automatedBankStatementRoutes from '../services/automatedBankStatement/automatedBankStatement.route';
@@ -45,6 +44,8 @@ import syndicatorRoutes from './syndicatorRoutes';
 import applicationSyndicatorRoutes from './applicationSyndicatorRoutes';
 import avochatoVoiceRoutes from './avochatoVoiceRoutes';
 import avochatoMessagingRoutes from './avochatoMessagingRoutes';
+import superAdminPlatformRoutes from './superAdminPlatformRoutes';
+import activityLogRoutes from './activityLogRoutes';
 
 router.use('/auth', authRoutes);
 router.use('/roles', roleRoutes);
@@ -72,7 +73,6 @@ router.get('/google/connect', connectGoogle);
 router.use('/commission-requests', commissionRequestRoutes);
 router.get('/google/callback', googleCallback);
 router.use('/gmail', gmailServiceRoutes);
-router.use('/mail', mailRoutes);
 router.use('/docusign', docusignRoutes);
 router.use('/boldsign', boldsignRoutes);
 router.use('/funding-calls', fundingCallRoutes);
@@ -90,6 +90,8 @@ router.use('/syndicators', syndicatorRoutes);
 router.use('/application-syndicators', applicationSyndicatorRoutes);
 router.use('/avochato-voice', avochatoVoiceRoutes);
 router.use('/avochato-messaging', avochatoMessagingRoutes);
+router.use('/super-admin-platform', superAdminPlatformRoutes);
+router.use('/activity-logs', activityLogRoutes);
 
 // router.get('/google/test', async (req, res) => {
 //   try {

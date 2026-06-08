@@ -61,6 +61,7 @@ model User {
   termsOffers                TermsOffer[]
   typingIndicators           TypingIndicator[]
   verificationTokens         VerificationToken[]
+  outbound_communications    outbound_communications[]
 }
 
 model AccessToken {
@@ -227,6 +228,7 @@ model Application {
   SchedulePaymentTracking  SchedulePaymentTracking[]
   scheduledRePayments      ScheduledRePayment[]
   termsOffers              TermsOffer[]
+  outbound_communications  outbound_communications[]
   syndicator               Syndicator[]                  @relation("ApplicationSyndicators")
 
   @@index([isoId])

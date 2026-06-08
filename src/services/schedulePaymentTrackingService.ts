@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { Prisma, type SchedulePaymentTracking } from '@prisma/client';
 import { SchedulePaymentTrackingStatus } from '@prisma/client';
 import prisma from '../config/prismaClient';
+import { resolveApplicationAttributedUserIdForActor } from '../middleware/authMiddleware';
 import type { AuthenticatedUser } from './applicationService';
 import { canUserAccessApplication } from './applicationService';
 import {
@@ -120,7 +121,13 @@ export async function replaceSchedulePaymentTracking(
 ) {
   const application = await prisma.application.findUnique({
     where: { id: applicationId },
-    select: { id: true, dealId: true, referringAgentId: true, createdById: true },
+    select: {
+      id: true,
+      dealId: true,
+      referringAgentId: true,
+      createdById: true,
+      salesRepresentativeId: true,
+    },
   });
 
   if (!application) {
@@ -166,7 +173,10 @@ export async function replaceSchedulePaymentTracking(
     null;
 
   const batchId = randomUUID();
-  const confirmedById = user?.id ?? null;
+  const confirmedById = await resolveApplicationAttributedUserIdForActor(user?.id, {
+    createdById: application.createdById,
+    salesRepresentativeId: application.salesRepresentativeId,
+  });
 
   const rows = validated.payments.map((p) => ({
     applicationId,

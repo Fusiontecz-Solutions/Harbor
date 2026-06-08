@@ -32,6 +32,32 @@ const mapApplicationForApproval = (app: any) => {
   };
 };
 
+const mapOfferDecisionForApproval = (row: any) => {
+  if (!row) return null;
+
+  return {
+    _id: row.id,
+    id: row.id,
+    application: row.applicationId,
+    decision: row.decision,
+    position: row.position,
+    offer: row.offer,
+    rate: row.rate,
+    factorRate: row.rate,
+    term: row.term,
+    frequency: row.frequency,
+    repayPerPeriod: row.repayPerPeriod,
+    monthlyPayment: row.monthlyPayment,
+    fees: row.fees,
+    ourRemit: row.ourRemit,
+    totalRemit: row.totalRemit,
+    refinanceAmount: row.refinanceAmount,
+    declineReason: row.declineReason,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+};
+
 const mapTermsOfferForApproval = (offer: any) => {
   if (!offer) return offer;
 
@@ -173,17 +199,23 @@ class PublicApprovalController {
             });
           }
 
-          const termsOffers = await prisma.termsOffer.findMany({
-            where: { applicationId: appRecord.id },
-            orderBy: { createdAt: 'desc' },
-            take: 10,
-          });
+          const [termsOffers, offerDecision] = await Promise.all([
+            prisma.termsOffer.findMany({
+              where: { applicationId: appRecord.id },
+              orderBy: { createdAt: 'desc' },
+              take: 10,
+            }),
+            prisma.offerDecision.findUnique({
+              where: { applicationId: appRecord.id },
+            }),
+          ]);
 
           return res.status(200).json({
             success: true,
             data: {
               application: mapApplicationForApproval(appRecord),
               termsOffers: termsOffers.map(mapTermsOfferForApproval),
+              offerDecision: mapOfferDecisionForApproval(offerDecision),
               expiresAt: null,
             },
           });
@@ -214,17 +246,23 @@ class PublicApprovalController {
         return res.status(404).json({ success: false, code: 'APPLICATION_NOT_FOUND', message: 'Application not found' });
       }
 
-      const termsOffers = await prisma.termsOffer.findMany({
-        where: { applicationId: tokenRecord.applicationId },
-        orderBy: { createdAt: 'desc' },
-        take: 10,
-      });
+      const [termsOffers, offerDecision] = await Promise.all([
+        prisma.termsOffer.findMany({
+          where: { applicationId: tokenRecord.applicationId },
+          orderBy: { createdAt: 'desc' },
+          take: 10,
+        }),
+        prisma.offerDecision.findUnique({
+          where: { applicationId: tokenRecord.applicationId },
+        }),
+      ]);
 
       return res.status(200).json({
         success: true,
         data: {
           application: mapApplicationForApproval(appRecord),
           termsOffers: termsOffers.map(mapTermsOfferForApproval),
+          offerDecision: mapOfferDecisionForApproval(offerDecision),
           expiresAt: tokenRecord.expiresAt ?? null,
         },
       });

@@ -14,6 +14,7 @@ import {
     type AuthenticatedUser,
 } from '../services/applicationService';
 import { getUnderwriterClaimMutationDenial } from '../services/underwriterClaimGuard';
+import { getApplicationStageAccessForUser } from '../services/applicationStageAccess';
 import {
     aggregateApplicationStats,
     aggregateApplicationMonthlyTrend,
@@ -22,7 +23,14 @@ import { classifyFundedApprovedRejected } from '../services/applicationStatsPred
 import {
     getApplicationStatsCache,
     setApplicationStatsCache,
+    invalidateAllApplicationStatsCache,
 } from '../services/applicationStatsCache';
+import { DashboardCacheKind, withDashboardCache } from '../services/dashboardCache';
+import {
+    aggregateDashboardPipelineFunnel,
+    aggregateApplicationTrendChart,
+    listDashboardRecentApplications,
+} from '../services/dashboardAggregatesService';
 import {
     aggregateOperationsDashboardSummary,
     listOperationsDashboardRecentCases,
@@ -38,6 +46,7 @@ import {
     type ApplicationStatsBucketWhereOptions,
 } from '../services/applicationStatsBucketWhere';
 import { getBalancesForApplicationIds } from '../services/collectionPaymentFinancials';
+import { applyContractCompletedSyncToApplicationRecord } from '../services/contractApplicationWorkflowSync';
 import {
     sendApplicationApprovalEmail,
     sendApplicationOfferUpdatedEmail,
@@ -49,8 +58,12 @@ import {
 import { isOutboundSmtpConfigured } from '../config/nodemailer';
 import { resolveCrmFrontendBaseUrl } from '../utils/crmFrontendUrl';
 import { applicationCreateUncheckedData } from '../utils/prisma/applicationCreateUncheckedData';
-import { buildOrganizationListFilterWhere } from '../utils/deriveOrganizationFromDealId';
+import {
+    resolveApplicationAttributedUserId,
+    resolveTenantUserId,
+} from '../middleware/authMiddleware';
 import { createPublicPortalToken } from '../services/publicPortalTokenService';
+import { syncTermsOfferFromOfferDecision } from '../services/syncTermsOfferFromOfferDecision';
 import {
     createApplicationActivityLog,
     getApplicationActivityLogsForUser,
@@ -76,6 +89,11 @@ import {
     type BulkImportSummary,
 } from '../services/applicationBulkExcelIngestService';
 import { approveApplication } from '../services/applicationApprovalService';
+import {
+    buildApplicationApprovalEmailHtml,
+    buildApplicationOfferUpdatedEmailHtml,
+} from '../services/emailService';
+import { recordCommunicationAudit } from '../services/systemActivityLogService';
 
 type ApplicationState =
     | 'DRAFT'
@@ -490,7 +508,7 @@ const shouldSetApplicationQueueToDisbursement = (currentQueue: string | null | u
     QUEUES_THAT_CAN_MOVE_TO_DISBURSEMENT.has(normalizeWorkflowQueueKeyForDisbursement(currentQueue));
 
 // Helper to map Prisma Application (with includes) to the API shape previously returned by Mongoose
-const mapApplicationToApi = (app: any) => {
+export const mapApplicationToApi = (app: any) => {
     if (!app) return app;
 
     const {
@@ -514,9 +532,6 @@ const mapApplicationToApi = (app: any) => {
         claimedByUnderwriterId,
         claimedAt,
         claimedByUnderwriter,
-        dealId,
-        dealDisplayName,
-        organization,
         ...rest
     } = app;
 
@@ -638,9 +653,6 @@ const mapApplicationToApi = (app: any) => {
         _id: id,
         id,
         applicationId,
-        dealId: dealId ?? null,
-        dealDisplayName: dealDisplayName ?? null,
-        organization: organization ?? null,
         priority,
         type,
         loanAmount: loanAmount ?? undefined,
@@ -749,6 +761,48 @@ const blockIfUnderwriterUnclaimedDeal = (
     return true;
 };
 
+/** PUT body only sets `isoId` — allowed on overview without an underwriter claim. */
+const isApplicationIsoLinkOnlyBody = (body: Record<string, unknown>): boolean => {
+    const keys = Object.keys(body ?? {}).filter((k) => body[k] !== undefined);
+    return keys.length === 1 && keys[0] === 'isoId';
+};
+
+/**
+ * Returns 403 when a workflow role (Agent/Underwriter/Final Underwriter) tries to
+ * mutate an application that has advanced past their stage. Non-workflow roles
+ * (Operations/Admin/Super Admin/Accountant/etc.) always pass through.
+ *
+ * Returns `true` when the request handler should `return` after the helper
+ * sent the 403 response.
+ */
+const sendPreviewOnlyForbidden = (
+    res: Response,
+    user: AuthenticatedUser | null | undefined,
+    application:
+        | { currentQueue?: string | null; currentState?: string | null }
+        | null
+        | undefined,
+): boolean => {
+    if (!application) return false;
+    const access = getApplicationStageAccessForUser(user, application);
+    if (access.isPreview) {
+        res.status(403).json({
+            success: false,
+            message:
+                access.reason ||
+                'This deal has moved past your stage and is read-only for your role.',
+            code: 'STAGE_PREVIEW_ONLY',
+            stageAccess: {
+                stageKey: access.stageKey,
+                nextStageLabel: access.nextStageLabel,
+                roleKey: access.roleKey,
+            },
+        });
+        return true;
+    }
+    return false;
+};
+
 class ApplicationController {
     // Create a new application
     async create(req: Request, res: Response) {
@@ -828,22 +882,17 @@ class ApplicationController {
                 }
             }
 
-            const createdById = (req as any).user?.id || null;
             const authUser = getAuthenticatedUser(req);
-            const roleUpper = String(authUser?.role || '')
-                .toUpperCase()
-                .replace(/-/g, '_');
-            // Agents always own the deal; ignore any referringAgent sent from the client.
-            const effectiveReferringAgentId =
-                roleUpper === 'AGENT' && authUser?.id
-                    ? authUser.id
-                    : referringAgent
-                      ? String(referringAgent)
-                      : null;
+            const createdById = resolveTenantUserId(req);
+            // When an AGENT creates an application, set referringAgentId to them so they see it in their list
+            const effectiveReferringAgentId = referringAgent
+                ? String(referringAgent)
+                : (authUser && String(authUser.role).toUpperCase() === 'AGENT' ? authUser.id : null);
 
             const loanAmountNum = loanAmount !== undefined && loanAmount !== '' && loanAmount !== null
                 ? (typeof loanAmount === 'number' ? loanAmount : parseFloat(String(loanAmount).replace(/[^0-9.-]+/g, '')))
                 : null;
+            const roleUpper = String(authUser?.role || '').toUpperCase();
             const creationQueue = roleUpper === 'AGENT' ? WORKFLOW_QUEUES.AGENT : undefined;
             const creationState = roleUpper === 'AGENT' ? ApplicationState.PENDING : undefined;
 
@@ -861,8 +910,6 @@ class ApplicationController {
                     isoId: normalizedIsoId,
                     currentQueue: creationQueue,
                     currentState: creationState,
-                    // Manual create flow keeps dealId empty; list UI falls back to applicationId.
-                    dealId: null,
                     files: uploadedFiles.length
                         ? {
                             createMany: {
@@ -902,6 +949,7 @@ class ApplicationController {
                 await createApplicationActivityLog({
                     applicationId: application.id,
                     user: authUserForLog,
+                    req,
                     actionType: 'CREATE_APPLICATION' as ApplicationActivityActionType,
                     actionDescription,
                     previousStatus: null,
@@ -961,6 +1009,8 @@ class ApplicationController {
             } catch (emailErr) {
                 console.error('Create application ISO email enqueue failed:', emailErr);
             }
+
+            invalidateAllApplicationStatsCache();
 
             return res.status(201).json({
                 success: true,
@@ -1118,6 +1168,7 @@ class ApplicationController {
                 await createApplicationActivityLog({
                     applicationId: updatedApplicationRecord.id,
                     user: authUserForLog,
+                    req,
                     actionType: 'FILE_UPLOADED' as ApplicationActivityActionType,
                     actionDescription:
                         `${roleLabel} ${actorName}`.trim() + ` uploaded ${newFiles.length} file(s) to the application.`,
@@ -1254,7 +1305,6 @@ class ApplicationController {
                 limit = 10,
                 priority,
                 type,
-                organization,
                 currentQueue,
                 currentState,
                 operationsStatus,
@@ -1281,9 +1331,7 @@ class ApplicationController {
                 : '';
 
             const pageNum = Math.max(1, Number(page) || 1);
-            const parsedLimit = Math.max(1, Number(limit) || 10);
-            /** Prevent accidental multi-thousand row pulls; use aggregate endpoints for dashboard totals. */
-            const limitNum = Math.min(parsedLimit, 500);
+            const limitNum = Math.min(Math.max(1, Number(limit) || 10), 500);
             const skip = (pageNum - 1) * limitNum;
             const useLitePayload = String(lite ?? '').trim() === '1';
 
@@ -1295,18 +1343,6 @@ class ApplicationController {
 
             if (priority) where.priority = String(priority);
             if (type) where.type = { contains: String(type), mode: 'insensitive' };
-            if (organization) {
-                const orgFilter = buildOrganizationListFilterWhere(String(organization));
-                const existingAnd = where.AND
-                    ? Array.isArray(where.AND)
-                        ? where.AND
-                        : [where.AND]
-                    : [];
-                where = {
-                    ...where,
-                    AND: [...existingAnd, orgFilter],
-                };
-            }
             if (operationsStatus) {
                 const operationsFilter = buildOperationsStatusFilterWhere(
                     String(operationsStatus),
@@ -1436,7 +1472,7 @@ class ApplicationController {
 
             if (search) {
                 const searchStr = String(search);
-                const searchOr: Prisma.ApplicationWhereInput[] = [
+                where.OR = [
                     { type: { contains: searchStr, mode: 'insensitive' } },
                     { note: { contains: searchStr, mode: 'insensitive' } },
                     {
@@ -1451,15 +1487,6 @@ class ApplicationController {
                         },
                     },
                 ];
-                if (String(statsBucket ?? '').trim().toLowerCase() === 'funded') {
-                    searchOr.push(
-                        { dealId: { contains: searchStr, mode: 'insensitive' } },
-                    );
-                    if (/^\d+$/.test(searchStr)) {
-                        searchOr.push({ applicationId: Number(searchStr) });
-                    }
-                }
-                where.OR = searchOr;
             }
 
             if (
@@ -1487,14 +1514,16 @@ class ApplicationController {
             }
 
             let orderByField: string = 'createdAt';
-            if (sortBy === 'createdAt' || sortBy === 'applicationId') {
+            if (
+                sortBy === 'createdAt' ||
+                sortBy === 'applicationId' ||
+                sortBy === 'updatedAt'
+            ) {
                 orderByField = String(sortBy);
             }
             const orderBy: Prisma.ApplicationOrderByWithRelationInput = {
                 [orderByField]: sortOrder === 'asc' ? 'asc' : 'desc',
             };
-
-            where = mergeApplicationVisibilityWhere(where, authUser);
 
             const listInclude: Prisma.ApplicationInclude = useLitePayload
                 ? {
@@ -1537,7 +1566,7 @@ class ApplicationController {
                             ownerZipCode: true,
                         },
                     },
-                    iso: { select: { id: true, name: true, email: true } },
+                    iso: { select: { id: true, name: true, email: true, phone: true } },
                     claimedByUnderwriter: {
                         select: { id: true, firstName: true, lastName: true, email: true },
                     },
@@ -1807,7 +1836,7 @@ class ApplicationController {
                 underwriterClaimParam ?? '',
             ].join('|');
 
-            const cached = getApplicationStatsCache(cacheKey);
+            const cached = await getApplicationStatsCache(cacheKey);
             if (cached) {
                 res.set('Cache-Control', 'private, max-age=5');
                 return res.status(200).json({
@@ -1824,7 +1853,7 @@ class ApplicationController {
                 underwriterClaim: underwriterClaimParam,
             });
 
-            setApplicationStatsCache(cacheKey, data);
+            await setApplicationStatsCache(cacheKey, data);
             res.set('Cache-Control', 'private, max-age=5');
 
             return res.status(200).json({
@@ -1852,7 +1881,13 @@ class ApplicationController {
                     message: 'Unauthorized',
                 });
             }
-            const data = await aggregateOperationsDashboardSummary(authUser);
+            const roleKey = String(authUser.role ?? '').trim();
+            const opsCacheKey = `${authUser.id}|${roleKey}`;
+            const data = await withDashboardCache(
+                DashboardCacheKind.OPS_SUMMARY,
+                opsCacheKey,
+                () => aggregateOperationsDashboardSummary(authUser),
+            );
             return res.status(200).json({
                 success: true,
                 data,
@@ -1865,6 +1900,7 @@ class ApplicationController {
             });
         }
     }
+
 
     /**
      * Operations dashboard recent list: backend-filtered contracted pipeline rows.
@@ -1880,7 +1916,13 @@ class ApplicationController {
             }
             const rawLimit = Number(req.query.limit);
             const limit = Number.isFinite(rawLimit) ? rawLimit : 200;
-            const data = await listOperationsDashboardRecentCases(authUser, limit);
+            const roleKey = String(authUser.role ?? '').trim();
+            const opsRecentKey = `${authUser.id}|${roleKey}|${limit}`;
+            const data = await withDashboardCache(
+                DashboardCacheKind.OPS_RECENT,
+                opsRecentKey,
+                () => listOperationsDashboardRecentCases(authUser, limit),
+            );
             return res.status(200).json({
                 success: true,
                 data,
@@ -1901,6 +1943,26 @@ class ApplicationController {
     async getAdminDashboardStats(req: Request, res: Response) {
         try {
             const authUser = getAuthenticatedUser(req);
+            const adminCached = await withDashboardCache(
+                DashboardCacheKind.ADMIN,
+                'global',
+                async () => this.buildAdminDashboardStatsPayload(authUser),
+            );
+            return res.status(200).json({
+                success: true,
+                data: adminCached,
+            });
+        } catch (error) {
+            console.error('Get admin dashboard stats error:', error);
+            return res.status(500).json({
+                success: false,
+                message: 'Internal server error',
+            });
+        }
+    }
+
+    /** Heavy admin dashboard aggregation (cached via Redis / memory). */
+    private async buildAdminDashboardStatsPayload(authUser: AuthenticatedUser | null) {
             const now = new Date();
             const last7Days = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
             last7Days.setHours(0, 0, 0, 0);
@@ -2179,51 +2241,37 @@ class ApplicationController {
                 advanceAmount: app.loanAmount ?? null,
             }));
 
-            return res.status(200).json({
-                success: true,
-                data: {
-                    users: {
-                        total: totalUsers,
-                        agents,
-                        underwriters,
-                        finalUnderwriters,
-                        operations,
-                        admins,
-                        clients: totalClients,
-                        syndicators: totalSyndicators,
-                    },
-                    applications: {
-                        funded,
-                        approved,
-                        rejected,
-                        pending,
-                        last7Days: {
-                            funded: fundedLast7,
-                            approved: approvedLast7,
-                            rejected: rejectedLast7,
-                            pending: pendingLast7,
-                        },
-                    },
-                    charts: {
-                        // For the frontend dropdown: you can use these three datasets
-                        // monthlyTrend: last 12 months
-                        // weeklyTrend: last 8 weeks (YYYY-Www)
-                        // yearlyTrend: by calendar year
-                        monthlyTrend,
-                        weeklyTrend,
-                        yearlyTrend,
-                        pipelineFunnel,
-                    },
-                    recentApplications,
+            return {
+                users: {
+                    total: totalUsers,
+                    agents,
+                    underwriters,
+                    finalUnderwriters,
+                    operations,
+                    admins,
+                    clients: totalClients,
+                    syndicators: totalSyndicators,
                 },
-            });
-        } catch (error) {
-            console.error('Get admin dashboard stats error:', error);
-            return res.status(500).json({
-                success: false,
-                message: 'Internal server error',
-            });
-        }
+                applications: {
+                    funded,
+                    approved,
+                    rejected,
+                    pending,
+                    last7Days: {
+                        funded: fundedLast7,
+                        approved: approvedLast7,
+                        rejected: rejectedLast7,
+                        pending: pendingLast7,
+                    },
+                },
+                charts: {
+                    monthlyTrend,
+                    weeklyTrend,
+                    yearlyTrend,
+                    pipelineFunnel,
+                },
+                recentApplications,
+            };
     }
 
     // Get single application by MongoDB ObjectId
@@ -2262,6 +2310,11 @@ class ApplicationController {
                     });
                 }
 
+                await applyContractCompletedSyncToApplicationRecord(
+                    prisma,
+                    applicationRecord,
+                    'application.getById.operations',
+                );
                 const application = mapApplicationToApi(applicationRecord);
 
                 return res.status(200).json({
@@ -2305,6 +2358,11 @@ class ApplicationController {
                 });
             }
 
+            await applyContractCompletedSyncToApplicationRecord(
+                prisma,
+                applicationRecord,
+                'application.getById',
+            );
             const application = mapApplicationToApi(applicationRecord);
 
             return res.status(200).json({
@@ -2354,6 +2412,11 @@ class ApplicationController {
                     });
                 }
 
+                await applyContractCompletedSyncToApplicationRecord(
+                    prisma,
+                    applicationRecord,
+                    'application.getByApplicationId.operations',
+                );
                 const application = mapApplicationToApi(applicationRecord);
 
                 return res.status(200).json({
@@ -2388,6 +2451,11 @@ class ApplicationController {
                 });
             }
 
+            await applyContractCompletedSyncToApplicationRecord(
+                prisma,
+                applicationRecord,
+                'application.getByApplicationId',
+            );
             const application = mapApplicationToApi(applicationRecord);
 
             return res.status(200).json({
@@ -2524,7 +2592,14 @@ class ApplicationController {
                 });
             }
 
-            if (blockIfUnderwriterUnclaimedDeal(res, authUser, application)) {
+            const isoLinkOnlyUpdate = isApplicationIsoLinkOnlyBody(
+                (req.body ?? {}) as Record<string, unknown>,
+            );
+
+            if (
+                !isoLinkOnlyUpdate &&
+                blockIfUnderwriterUnclaimedDeal(res, authUser, application)
+            ) {
                 return;
             }
 
@@ -2567,15 +2642,9 @@ class ApplicationController {
                 }
             }
 
-            const roleUpper = String(authUser?.role || '')
-                .toUpperCase()
-                .replace(/-/g, '_');
-
             if (priority !== undefined) data.priority = priority;
             if (type !== undefined) data.type = type;
-            if (referringAgent !== undefined && roleUpper !== 'AGENT') {
-                data.referringAgentId = referringAgent || null;
-            }
+            if (referringAgent !== undefined) data.referringAgentId = referringAgent || null;
             if (salesRepresentative !== undefined) data.salesRepresentativeId = salesRepresentative;
             if (note !== undefined) data.note = note;
             if (currentQueue !== undefined) {
@@ -2741,6 +2810,8 @@ class ApplicationController {
 
             const updatedApplication = mapApplicationToApi(updatedRecord);
 
+            invalidateAllApplicationStatsCache();
+
             return res.status(200).json({
                 success: true,
                 message: 'Application updated successfully',
@@ -2881,6 +2952,7 @@ class ApplicationController {
                 await createApplicationActivityLog({
                     applicationId: applicationRecord.id,
                     user: authUserForLog,
+                    req,
                     actionType,
                     actionDescription: description,
                     previousStatus: `${previousQueue} / ${existingApplication.currentState}`,
@@ -2901,7 +2973,11 @@ class ApplicationController {
                 const roleUpper = String(authUserForNotif?.role || '').toUpperCase();
 
                 if (upperQueue === 'UNDERWRITER' && roleUpper === 'AGENT') {
-                    const senderId = String((req as any).user?.id || authUserForNotif?.id || '');
+                    const attributedSenderId = await resolveApplicationAttributedUserId(
+                        req,
+                        applicationRecord,
+                    );
+                    const senderId = attributedSenderId ? String(attributedSenderId) : '';
                     const senderName = String((req as any).user?.name || 'Agent').trim() || 'Agent';
 
                     const clientName =
@@ -3062,6 +3138,8 @@ class ApplicationController {
                 console.error('Failed to create underwriter notification for queue update:', notifError);
             }
 
+            invalidateAllApplicationStatsCache();
+
             return res.status(200).json({
                 success: true,
                 message: 'Application queue updated successfully',
@@ -3177,6 +3255,7 @@ class ApplicationController {
                 await createApplicationActivityLog({
                     applicationId: refreshed.id,
                     user: authUser,
+                    req,
                     actionType: 'UNDERWRITER_CLAIMED',
                     actionDescription: `${actorName} claimed this deal for underwriting.`,
                     previousStatus: `${application.currentQueue} / ${application.currentState}`,
@@ -3286,6 +3365,7 @@ class ApplicationController {
                 await createApplicationActivityLog({
                     applicationId: refreshed.id,
                     user: authUser,
+                    req,
                     actionType: 'UNDERWRITER_RELEASED',
                     actionDescription: `${actorName} returned this deal to the underwriter queue.`,
                     previousStatus: `${application.currentQueue} / ${application.currentState}`,
@@ -3390,6 +3470,7 @@ class ApplicationController {
                 await createApplicationActivityLog({
                     applicationId: applicationRecord.id,
                     user: authUserForLog,
+                    req,
                     actionType: 'STATUS_CHANGED' as ApplicationActivityActionType,
                     actionDescription:
                         `${roleLabel} ${actorName}`.trim() +
@@ -3404,6 +3485,8 @@ class ApplicationController {
             } catch (logError) {
                 console.error('Failed to create activity log for state update:', logError);
             }
+
+            invalidateAllApplicationStatsCache();
 
             return res.status(200).json({
                 success: true,
@@ -3483,6 +3566,7 @@ class ApplicationController {
                 await createApplicationActivityLog({
                     applicationId: applicationRecord.id,
                     user: authUserForLog,
+                    req,
                     actionType: 'APPLICATION_UPDATED' as ApplicationActivityActionType,
                     actionDescription:
                         `${roleLabel} ${actorName}`.trim() + ' updated the document checklist.',
@@ -3599,10 +3683,13 @@ class ApplicationController {
 
                 // Use raw IDs - exclude sender (don't notify yourself)
                 const recipientIds = new Set<string>();
-                const createdById = (req as any).user?.id;
+                const attributedCreatedById = await resolveApplicationAttributedUserId(
+                    req,
+                    appRecord,
+                );
                 const addIfNotSender = (id: string) => {
                     const sid = String(id);
-                    if (sid && sid !== String(createdById)) recipientIds.add(sid);
+                    if (sid && sid !== String(attributedCreatedById)) recipientIds.add(sid);
                 };
                 if (appRecord.referringAgentId) addIfNotSender(appRecord.referringAgentId);
                 if (appRecord.salesRepresentativeId) addIfNotSender(appRecord.salesRepresentativeId);
@@ -3623,7 +3710,7 @@ class ApplicationController {
                             type: 'application_update',
                             recipientId: String(recId),
                             applicationId: appIdForNotif,
-                            createdById,
+                            createdById: attributedCreatedById,
                         },
                     });
                 }
@@ -3652,6 +3739,7 @@ class ApplicationController {
                 await createApplicationActivityLog({
                     applicationId: applicationRecord.id,
                     user: authUserForLog,
+                    req,
                     actionType: 'APPLICATION_REJECTED' as ApplicationActivityActionType,
                     actionDescription:
                         `${roleLabel} ${actorName}`.trim() + ` rejected the application. Reason: ${reasonText}`,
@@ -3701,6 +3789,8 @@ class ApplicationController {
                     message: 'Application not found',
                 });
             }
+
+            if (sendPreviewOnlyForbidden(res, authUser, application)) return;
 
             if (blockIfUnderwriterUnclaimedDeal(res, authUser, application)) {
                 return;
@@ -3833,6 +3923,8 @@ class ApplicationController {
                     timeout: 120_000,
                 },
             );
+
+            invalidateAllApplicationStatsCache();
 
             return res.status(200).json({
                 success: true,
@@ -4256,7 +4348,6 @@ class ApplicationController {
                         createdById: currentUserId,
                         currentQueue: pdfAgentCreationQueue,
                         currentState: pdfAgentCreationState,
-                        dealId: null,
                     }),
                     include: {
                         referringAgent: { select: { id: true, firstName: true, lastName: true, email: true } },
@@ -4419,7 +4510,6 @@ class ApplicationController {
                         createdById: currentUserId,
                         currentQueue: pdfAgentCreationQueue,
                         currentState: pdfAgentCreationState,
-                        dealId: null,
                     }),
                     include: {
                         referringAgent: { select: { id: true, firstName: true, lastName: true, email: true } },
@@ -5241,6 +5331,15 @@ class ApplicationController {
                 });
             }
 
+            try {
+                await syncTermsOfferFromOfferDecision(
+                    (application as any).id,
+                    authUser?.id ?? null,
+                );
+            } catch (syncErr) {
+                console.error('Send approval email: failed to sync terms offer from offer decision:', syncErr);
+            }
+
             const baseUrl = resolveCrmFrontendBaseUrl() || '';
 
             const numericAppId = (application as any).applicationId;
@@ -5276,6 +5375,23 @@ class ApplicationController {
                 { to: isoEmailRaw, clientName: isoRecipientName },
             ];
 
+            const emailSubject = resend
+                ? 'Your Offer Values Have Been Updated'
+                : 'Your Application Has Been Approved';
+            const emailHtml = resend
+                ? buildApplicationOfferUpdatedEmailHtml({
+                    clientName: isoRecipientName,
+                    companyName,
+                    viewApplicationUrl,
+                    calculateApprovalUrl,
+                })
+                : buildApplicationApprovalEmailHtml({
+                    clientName: isoRecipientName,
+                    companyName,
+                    viewApplicationUrl,
+                    calculateApprovalUrl,
+                });
+
             const deliveryResults = await Promise.all(
                 recipients.map(async ({ to, clientName }) => {
                     const ok = resend
@@ -5310,7 +5426,6 @@ class ApplicationController {
                 ? ' resent updated offer email to the linked ISO.'
                 : ' sent approval email to the linked ISO.';
 
-            // Best-effort activity log for approval email
             try {
                 const authUserForLog = getAuthenticatedUser(req);
                 const roleLabel = authUserForLog?.role
@@ -5318,13 +5433,18 @@ class ApplicationController {
                     : 'User';
                 const actorName = (req as any).user?.name || '';
 
-                await createApplicationActivityLog({
+                await recordCommunicationAudit(req, {
                     applicationId: (application as any).id,
+                    channel: 'EMAIL',
+                    recipientType: 'ISO',
+                    recipient: recipients.map((r) => r.to).join(', '),
+                    subject: emailSubject,
+                    body: emailHtml,
+                    templateName: resend ? 'Offer updated (ISO)' : 'Application approved (ISO)',
+                    actionType: 'APPROVED',
                     user: authUserForLog,
-                    actionType: 'APPROVED' as ApplicationActivityActionType,
-                    actionDescription: `${roleLabel} ${actorName}`.trim() + approvalEmailLogSuffix,
-                    previousStatus: `${(application as any).currentQueue} / ${(application as any).currentState}`,
                     currentStatus: `${(application as any).currentQueue} / ${(application as any).currentState}`,
+                    actionDescription: `${roleLabel} ${actorName}`.trim() + approvalEmailLogSuffix,
                     metadata: {
                         emailSentTo: recipients.map((r) => r.to),
                         sentToLinkedIsoOnly: true,
@@ -5471,25 +5591,8 @@ class ApplicationController {
 
             const { logs } = await getApplicationActivityLogsForUser(application.id, authUser);
 
-            const mappedLogs = logs.map((log) => {
-                const user = (log as any).user ?? (log as any).User;
-
-                return {
-                    id: log.id,
-                    applicationId: log.applicationId,
-                    userId: log.userId,
-                    userName: user
-                        ? `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.email
-                        : null,
-                    userRole: log.userRole,
-                    actionType: log.actionType,
-                    actionDescription: log.actionDescription,
-                    previousStatus: log.previousStatus,
-                    currentStatus: log.currentStatus,
-                    metadata: log.metadata,
-                    createdAt: log.createdAt,
-                };
-            });
+            const { mapApplicationActivityLogEntry } = await import('../services/applicationActivityLogMapper');
+            const mappedLogs = logs.map((log) => mapApplicationActivityLogEntry(log as any));
 
             return res.status(200).json({
                 success: true,
@@ -5497,6 +5600,63 @@ class ApplicationController {
             });
         } catch (error: any) {
             console.error('Get application activity logs error:', error);
+            return res.status(500).json({
+                success: false,
+                message: 'Internal server error',
+            });
+        }
+    }
+
+    async getActivityLogContent(req: Request, res: Response) {
+        try {
+            const { id, logId } = req.params;
+            const authUser = getAuthenticatedUser(req);
+
+            const appIdStr = String(id);
+            const whereClause: Prisma.ApplicationWhereUniqueInput = /^\d+$/.test(appIdStr)
+                ? { applicationId: Number(appIdStr) }
+                : { id: appIdStr };
+
+            const { application, forbidden } = await getApplicationForUser(whereClause, authUser);
+
+            if (forbidden) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'Forbidden: you do not have access to this application',
+                });
+            }
+
+            if (!application) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Application not found',
+                });
+            }
+
+            const activityLog = await prisma.applicationActivityLog.findFirst({
+                where: { id: String(logId), applicationId: application.id },
+            });
+
+            if (!activityLog) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Activity log not found for this application',
+                });
+            }
+
+            const { getSystemActivityLogContent } = await import('../services/systemActivityLogService');
+            const content = await getSystemActivityLogContent(activityLog.id);
+
+            if (!content) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'No viewable content for this log entry',
+                });
+            }
+
+            return res.status(200).json({ success: true, data: content });
+        } catch (error: any) {
+            console.error('Get application activity log content error:', error);
             return res.status(500).json({
                 success: false,
                 message: 'Internal server error',
@@ -5612,7 +5772,7 @@ class ApplicationController {
                 subject,
                 body: mailBody,
                 status: statusRaw as 'queued' | 'sent' | 'failed',
-            });
+            }, req);
 
             if (result.forbidden) {
                 return res.status(403).json({
@@ -5653,6 +5813,138 @@ class ApplicationController {
             });
         } catch (error: any) {
             console.error('Create payment mail log error:', error);
+            return res.status(500).json({
+                success: false,
+                message: 'Internal server error',
+            });
+        }
+    }
+
+    async getDashboardPipelineFunnel(req: Request, res: Response) {
+        try {
+            const data = await withDashboardCache(
+                DashboardCacheKind.FUNNEL,
+                'global',
+                () => aggregateDashboardPipelineFunnel(),
+            );
+            return res.status(200).json({ success: true, data });
+        } catch (error) {
+            console.error('Get dashboard pipeline funnel error:', error);
+            return res.status(500).json({
+                success: false,
+                message: 'Internal server error',
+            });
+        }
+    }
+
+    async getDashboardTrendChart(req: Request, res: Response) {
+        try {
+            const authUser = getAuthenticatedUser(req);
+            const currentUserRole = authUser?.role;
+            const { startDate, endDate, trendView } = req.query as {
+                startDate?: string;
+                endDate?: string;
+                trendView?: string;
+            };
+
+            let start: Date | null = null;
+            let end: Date | null = null;
+            if (startDate) {
+                const d = new Date(startDate);
+                if (!isNaN(d.getTime())) {
+                    d.setHours(0, 0, 0, 0);
+                    start = d;
+                }
+            }
+            if (endDate) {
+                const d = new Date(endDate);
+                if (!isNaN(d.getTime())) {
+                    d.setHours(23, 59, 59, 999);
+                    end = d;
+                }
+            }
+
+            const viewRaw = String(trendView ?? 'monthly').toLowerCase();
+            const trendViewNorm =
+                viewRaw === 'weekly' || viewRaw === 'yearly' ? viewRaw : 'monthly';
+
+            const rawUwClaim = req.query.underwriterClaim;
+            const uwClaimNorm =
+                rawUwClaim != null
+                    ? String(Array.isArray(rawUwClaim) ? rawUwClaim[0] : rawUwClaim)
+                          .trim()
+                          .toLowerCase()
+                    : '';
+            let underwriterClaimParam: 'unclaimed' | 'mine' | null = null;
+            if (uwClaimNorm === 'unclaimed' || uwClaimNorm === 'mine') {
+                underwriterClaimParam = uwClaimNorm;
+            }
+
+            const trendCacheKey = [
+                authUser?.id ?? 'none',
+                String(currentUserRole ?? ''),
+                start ? start.toISOString() : '',
+                end ? end.toISOString() : '',
+                trendViewNorm,
+                underwriterClaimParam ?? '',
+            ].join('|');
+
+            const data = await withDashboardCache(
+                DashboardCacheKind.TREND,
+                trendCacheKey,
+                () =>
+                    aggregateApplicationTrendChart({
+                        authUser,
+                        role: currentUserRole,
+                        startDate: start,
+                        endDate: end,
+                        trendView: trendViewNorm,
+                        underwriterClaim: underwriterClaimParam,
+                    }),
+            );
+
+            return res.status(200).json({ success: true, data });
+        } catch (error) {
+            console.error('Get dashboard trend chart error:', error);
+            return res.status(500).json({
+                success: false,
+                message: 'Internal server error',
+            });
+        }
+    }
+
+    async getDashboardRecentApplications(req: Request, res: Response) {
+        try {
+            const authUser = getAuthenticatedUser(req);
+            if (!authUser) {
+                return res.status(401).json({ success: false, message: 'Unauthorized' });
+            }
+            const limitRaw = req.query.limit;
+            const limit = Number.isFinite(Number(limitRaw)) ? Number(limitRaw) : 10;
+            const roleKey = String(authUser.role ?? '').trim();
+            const recentCacheKey = `${authUser.id}|${roleKey}|${limit}`;
+            const cachedPayload = await withDashboardCache(
+                DashboardCacheKind.RECENT,
+                recentCacheKey,
+                async () => {
+                    const { applications, totalItems } = await listDashboardRecentApplications({
+                        authUser,
+                        role: authUser.role,
+                        limit,
+                    });
+                    return {
+                        data: applications.map((app) => mapApplicationToApi(app)),
+                        pagination: { totalItems },
+                    };
+                },
+            );
+            return res.status(200).json({
+                success: true,
+                data: cachedPayload.data,
+                pagination: cachedPayload.pagination,
+            });
+        } catch (error) {
+            console.error('Get dashboard recent applications error:', error);
             return res.status(500).json({
                 success: false,
                 message: 'Internal server error',
@@ -5997,6 +6289,18 @@ class ApplicationController {
                     console.log(
                         `[bulk-import] job ${jobId}: completed — inserted=${finalSummary.successCount}, updated=${finalSummary.updatedCount}, failed=${finalSummary.failedCount}/${finalSummary.totalRows}`,
                     );
+                    if (mergedErrors.length) {
+                        console.warn(
+                            `[bulk-import] job ${jobId}: ${mergedErrors.length} row(s) failed:`,
+                        );
+                        for (const rowError of mergedErrors) {
+                            console.warn(
+                                `[bulk-import]   row ${rowError.excelRowNumber}` +
+                                    `${rowError.dealId ? ` (deal ${rowError.dealId})` : ''}` +
+                                    `${rowError.dealName ? ` [${rowError.dealName}]` : ''}: ${rowError.message}`,
+                            );
+                        }
+                    }
                 } catch (error: any) {
                     job.status = 'failed';
                     job.message = error?.message || 'Bulk upload failed';
@@ -6176,6 +6480,7 @@ class ApplicationController {
 
             const result = await approveApplication(whereClause, {
                 actor: authUser,
+                req,
                 actorType: reqUser?.publicApprovalActor || authUser?.role || null,
                 actorName: reqUser?.name ?? null,
                 note: typeof note === 'string' ? note : null,

@@ -1,4 +1,5 @@
 import type { PaymentMailLogStatus } from '@prisma/client';
+import type { Request } from 'express';
 import prisma from '../config/prismaClient';
 import type { AuthenticatedUser } from './applicationService';
 import { createApplicationActivityLog } from './applicationActivityLogService';
@@ -70,6 +71,7 @@ export async function createPaymentMailLog(
   applicationId: string,
   user: AuthenticatedUser | null,
   input: CreatePaymentMailLogInput,
+  req?: Request | null,
 ) {
   const access = await assertApplicationMailLogAccess(applicationId, user);
   if (!access.application) {
@@ -108,6 +110,7 @@ export async function createPaymentMailLog(
   await createApplicationActivityLog({
     applicationId,
     user,
+    req,
     actionType:
       prismaStatus === 'SENT'
         ? 'PAYMENT_MAIL_SENT'
