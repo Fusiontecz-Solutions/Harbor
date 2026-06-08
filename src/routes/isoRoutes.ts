@@ -24,7 +24,7 @@ router.put(
 );
 
 router.get('/:id', authenticateToken, isoController.getById.bind(isoController));
-router.put('/:id', authenticateToken, forbidRoles('AGENT'), isoController.update.bind(isoController));
+router.put('/:id', authenticateToken, isoController.update.bind(isoController));
 router.delete('/:id', authenticateToken, forbidRoles('AGENT'), isoController.delete.bind(isoController));
 
 export default router;

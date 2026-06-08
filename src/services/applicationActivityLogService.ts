@@ -1,5 +1,7 @@
 import type { Role } from '@prisma/client';
+import type { Request } from 'express';
 import prisma from '../config/prismaClient';
+import { resolveAuditLogUserId } from '../middleware/authMiddleware';
 import type { AuthenticatedUser } from './applicationService';
 
 // Local TypeScript representation of allowed activity action types.
@@ -22,19 +24,24 @@ export type ApplicationActivityActionType =
   | 'PAYMENT_MAIL_QUEUED';
 
 export interface CreateApplicationActivityLogInput {
-  applicationId: string;
+  applicationId: string | null;
   user: AuthenticatedUser | null;
   actionType: ApplicationActivityActionType;
   actionDescription: string;
   previousStatus?: string | null;
-  currentStatus: string;
+  currentStatus?: string | null;
+  /** Optional originating request, used by callers to enrich context. */
+  req?: Request | null;
   metadata?: Record<string, unknown>;
 }
 
 export async function createApplicationActivityLog(input: CreateApplicationActivityLogInput) {
-  const { applicationId, user, actionType, actionDescription, previousStatus, currentStatus, metadata } = input;
+  const { applicationId, user, actionType, actionDescription, previousStatus, currentStatus, metadata, req } = input;
 
-  const userId = user?.id ?? null;
+  const userId = await resolveAuditLogUserId(req, {
+    user,
+    applicationId: applicationId ?? undefined,
+  });
   const normalizedRole = (user?.role ?? null) as Role | string | null;
   const roleValue =
     typeof normalizedRole === 'string' 

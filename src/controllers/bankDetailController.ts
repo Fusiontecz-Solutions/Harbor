@@ -1,5 +1,9 @@
 import type { Request, Response } from 'express';
 import prisma from '../config/prismaClient';
+import {
+  resolveApplicationAttributedUserId,
+  APPLICATION_USER_ATTRIBUTION_ERROR,
+} from '../middleware/authMiddleware';
 import { syncBankDetailToContractPrefill } from '../services/bankDetailContractSync';
 import { decryptSensitiveField, encryptField, mapBankDetailRecordForApi } from '../utils/fieldEncryption';
 
@@ -127,11 +131,14 @@ class BankDetailController {
         });
       }
 
-      const createdBy = (req as any).user?.id;
+      const createdBy = await resolveApplicationAttributedUserId(req, {
+        createdById: applicationRecord.createdById,
+        salesRepresentativeId: applicationRecord.salesRepresentativeId,
+      });
       if (!createdBy) {
-        return res.status(401).json({
+        return res.status(400).json({
           success: false,
-          message: 'User authentication required',
+          message: APPLICATION_USER_ATTRIBUTION_ERROR,
         });
       }
 
@@ -210,11 +217,14 @@ class BankDetailController {
         });
       }
 
-      const createdBy = (req as any).user?.id;
+      const createdBy = await resolveApplicationAttributedUserId(req, {
+        createdById: applicationRecord.createdById,
+        salesRepresentativeId: applicationRecord.salesRepresentativeId,
+      });
       if (!createdBy) {
-        return res.status(401).json({
+        return res.status(400).json({
           success: false,
-          message: 'User authentication required',
+          message: APPLICATION_USER_ATTRIBUTION_ERROR,
         });
       }
 

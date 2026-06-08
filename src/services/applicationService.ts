@@ -8,7 +8,6 @@ import { attachBufferAsApplicationFile } from './applicationPdfAttachService';
 import { extractPdfPlainTextForParsing } from './pdfIngestionService';
 import { normalizeOcrTextForParsing } from './ocrFieldExtraction';
 import { logExtractedBusinessDataCsv } from './csvConverter';
-import { generateNextDealId } from '../utils/generateNextDealId';
 
 export type UserRole = Role;
 
@@ -392,8 +391,6 @@ export async function createClientAndApplicationFromPDFBuffer(
             where: { id: clientRecord.id },
         });
 
-        const nextDealIdExisting = await generateNextDealId();
-
         // Client already exists → create application only
         const createdApplication = await prisma.application.create({
             data: {
@@ -408,7 +405,6 @@ export async function createClientAndApplicationFromPDFBuffer(
                 createdById: userId,
                 currentQueue: agentCreationQueue,
                 currentState: agentCreationState,
-                dealId: nextDealIdExisting,
             },
             include: applicationWithFilesInclude,
         });
@@ -484,8 +480,6 @@ export async function createClientAndApplicationFromPDFBuffer(
             },
         });
 
-        const nextDealIdNewClient = await generateNextDealId(tx);
-
         const newApplication = await tx.application.create({
             data: {
                 priority: 'High',
@@ -499,7 +493,6 @@ export async function createClientAndApplicationFromPDFBuffer(
                 createdById: userId,
                 currentQueue: agentCreationQueue,
                 currentState: agentCreationState,
-                dealId: nextDealIdNewClient,
             },
             include: applicationWithFilesInclude,
         });

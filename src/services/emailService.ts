@@ -1,3 +1,4 @@
+import fs from 'fs';
 import path from 'path';
 import sendMail, { isOutboundSmtpConfigured } from '../config/nodemailer';
 import {
@@ -33,22 +34,35 @@ export function buildBrandLogoAttachments(): Array<{
     contentType: string;
     contentDisposition: 'inline';
 }> {
-    return [
+    const candidates = [
         {
-            filename: false,
+            filename: false as const,
             path: BRAND_LIGHT_LOGO_PATH,
             cid: BRAND_LIGHT_LOGO_CID,
             contentType: 'image/png',
-            contentDisposition: 'inline',
+            contentDisposition: 'inline' as const,
         },
         {
-            filename: false,
+            filename: false as const,
             path: BRAND_DARK_LOGO_PATH,
             cid: BRAND_DARK_LOGO_CID,
             contentType: 'image/png',
-            contentDisposition: 'inline',
+            contentDisposition: 'inline' as const,
         },
     ];
+
+    const existing = candidates.filter((item) => fs.existsSync(item.path));
+    if (existing.length < candidates.length) {
+        const missing = candidates
+            .filter((item) => !fs.existsSync(item.path))
+            .map((item) => item.path);
+        // eslint-disable-next-line no-console
+        console.warn(
+            '[email] Brand logo file(s) missing — sending without inline logo attachment(s):',
+            missing,
+        );
+    }
+    return existing;
 }
 
 /**

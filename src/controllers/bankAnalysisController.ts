@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express';
 import prisma from '../config/prismaClient';
+import { resolveApplicationAttributedUserId } from '../middleware/authMiddleware';
 
 const resolveApplicationByAnyId = async (application: any) => {
   const applicationStr = String(application);
@@ -343,7 +344,14 @@ class BankAnalysisController {
         });
       }
 
-      const createdBy = (req as any).user?.id;
+      // Resolve a tenant User.id safe for the required `fk_bank_analysis_user`
+      // foreign key. Regular JWT users attribute to themselves; Super Admin
+      // proxy requests have no tenant User row, so fall back to the
+      // application's creator or sales representative.
+      const createdBy = await resolveApplicationAttributedUserId(req, {
+        createdById: applicationRecord.createdById,
+        salesRepresentativeId: applicationRecord.salesRepresentativeId,
+      });
       if (!createdBy) {
         return res.status(401).json({
           success: false,

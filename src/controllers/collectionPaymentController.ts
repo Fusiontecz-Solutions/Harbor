@@ -2407,6 +2407,30 @@ class CollectionPaymentController {
     }
   }
 
+  async financialOverviewSummary(req: Request, res: Response) {
+    try {
+      const { buildPaymentFinancialOverviewSummary } = await import(
+        '../services/paymentFinancialOverviewService'
+      );
+      const chartYear = Number(req.query.chartYear);
+      const chartMonthRaw = req.query.chartMonth;
+      const organization = String(req.query.organization ?? '').trim() || undefined;
+      const data = await buildPaymentFinancialOverviewSummary(
+        Number.isFinite(chartYear) ? chartYear : undefined,
+        chartMonthRaw === 'all'
+          ? 'all'
+          : chartMonthRaw != null && String(chartMonthRaw).trim() !== ''
+            ? Number(chartMonthRaw)
+            : undefined,
+        organization,
+      );
+      return res.status(200).json({ success: true, data });
+    } catch (error) {
+      console.error('Collection payment financial overview summary error:', error);
+      return res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+  }
+
   /**
    * Debit vs credit trend for the payment dashboard chart — scoped by view/year/month.
    * Loads only collection rows in the relevant date window (not the full portfolio).

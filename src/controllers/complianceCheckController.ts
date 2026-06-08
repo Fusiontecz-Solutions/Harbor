@@ -1,5 +1,9 @@
 import type { Request, Response } from 'express';
 import prisma from '../config/prismaClient';
+import {
+  resolveApplicationAttributedUserId,
+  APPLICATION_USER_ATTRIBUTION_ERROR,
+} from '../middleware/authMiddleware';
 
 const findApplication = async (applicationIdOrUuid: unknown) => {
   const raw = Array.isArray(applicationIdOrUuid) ? applicationIdOrUuid[0] : applicationIdOrUuid;
@@ -103,12 +107,18 @@ class ComplianceCheckController {
         });
       }
 
-      const createdBy = (req as any).user?.id;
+      // Resolve a tenant User.id safe for the required createdById FK.
+      // Super Admin proxy requests have no row in the tenant User table, so we
+      // fall back to the application's creator / sales representative.
+      const createdBy = await resolveApplicationAttributedUserId(req, {
+        createdById: applicationRecord.createdById,
+        salesRepresentativeId: applicationRecord.salesRepresentativeId,
+      });
       if (!createdBy) {
-        console.error('User authentication error - req.user:', (req as any).user);
-        return res.status(401).json({
+        console.error('User attribution error - req.user:', (req as any).user);
+        return res.status(400).json({
           success: false,
-          message: 'User authentication required',
+          message: APPLICATION_USER_ATTRIBUTION_ERROR,
         });
       }
 
