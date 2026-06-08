@@ -676,6 +676,15 @@ export class DocusignService {
     accountId: string,
     envelopeId: string,
   ): Promise<void> {
+    await this.assertEnvelopeDraftOrThrow(client, accountId, envelopeId);
+  }
+
+  /** Throws when the envelope is missing or no longer an editable draft. */
+  private async assertEnvelopeDraftOrThrow(
+    client: AxiosInstance,
+    accountId: string,
+    envelopeId: string,
+  ): Promise<void> {
     try {
       const res = await client.get(
         `/v2.1/accounts/${accountId}/envelopes/${envelopeId}`,
@@ -683,13 +692,20 @@ export class DocusignService {
       const status = String(res.data?.status || '').toLowerCase();
       if (status && status !== 'created') {
         throw new BadRequestException(
-          `DocuSign envelope status is "${status}" (sender view requires draft "created"). ` +
+          `DocuSign envelope status is "${status}" (requires draft "created"). ` +
             'Create a new draft from Review & send.',
         );
       }
     } catch (err) {
       if (err instanceof BadRequestException) throw err;
-      this.logDocusignApiError('assertEnvelopeDraftForSenderView', err);
+      const ax = err as { response?: { status?: number } };
+      if (ax?.response?.status === 404) {
+        throw new BadRequestException(
+          'DocuSign draft envelope was not found (it may have been voided or expired). ' +
+            'Click Review & send to create a new draft.',
+        );
+      }
+      this.throwBadRequestFromDocusignAxios('Envelope lookup', err);
     }
   }
 
@@ -1304,6 +1320,8 @@ export class DocusignService {
 
     const normalized = this.normalizeSignerRoles(roles);
     if (!normalized.length) return 0;
+    /** CRM explicitly configured multiple signers — keep every template slot that will be filled. */
+    if (normalized.length > 1) return 0;
 
     const recRes = await client.get(
       `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients`,
@@ -1488,6 +1506,73 @@ export class DocusignService {
   }
 
   /**
+   * When CRM has more signers than the draft envelope, add missing slots via POST /recipients.
+   */
+  private async addMissingCrmSignersToEnvelope(
+    client: AxiosInstance,
+    accountId: string,
+    envelopeId: string,
+    roles: SignerRoleInput[],
+    templateId?: string | null,
+  ): Promise<number> {
+    const normalized = this.normalizeSignerRoles(roles);
+    if (!normalized.length) return 0;
+
+    const recRes = await client.get(
+      `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients`,
+    );
+    const existingSigners = (recRes.data?.signers || []) as Array<{
+      recipientId?: string;
+    }>;
+    if (existingSigners.length >= normalized.length) return 0;
+
+    const tid =
+      String(templateId || '').trim() ||
+      (await this.getTemplateIdFromEnvelope(client, accountId, envelopeId));
+    const templateRoleNames = tid
+      ? await this.getTemplateSignerRoleNames(client, accountId, tid)
+      : [];
+
+    const maxRecipientId = existingSigners.reduce((max, s) => {
+      const n = parseInt(String(s.recipientId || ''), 10);
+      return Number.isFinite(n) ? Math.max(max, n) : max;
+    }, 0);
+
+    const toAdd: Array<{
+      email: string;
+      name: string;
+      roleName: string;
+      recipientId: string;
+      routingOrder: string;
+    }> = [];
+
+    for (let i = existingSigners.length; i < normalized.length; i++) {
+      const crm = normalized[i]!;
+      const roleName = String(
+        templateRoleNames[i] || templateRoleNames[0] || crm.roleName || DOCUSIGN_DEFAULT_ROLE_NAME,
+      ).trim();
+      toAdd.push({
+        email: crm.email,
+        name: crm.name || crm.email.split('@')[0],
+        roleName,
+        recipientId: String(maxRecipientId + toAdd.length + 1),
+        routingOrder: crm.routingOrder || String(i + 1),
+      });
+    }
+
+    if (!toAdd.length) return 0;
+
+    await client.post(
+      `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients`,
+      { signers: toAdd },
+    );
+    console.log(
+      `[DocuSign] added ${toAdd.length} signer slot(s) on ${envelopeId}: ${toAdd.map((s) => s.roleName).join(', ')}`,
+    );
+    return toAdd.length;
+  }
+
+  /**
    * Apply CRM signer emails onto the draft envelope (bulk PUT /recipients — does not wipe other recipients).
    */
   private async applyCrmRolesToEnvelopeSigners(
@@ -1495,11 +1580,20 @@ export class DocusignService {
     accountId: string,
     envelopeId: string,
     roles: SignerRoleInput[],
+    templateId?: string | null,
   ): Promise<{ updated: number; missingRoles: string[] }> {
     const normalized = this.normalizeSignerRoles(roles);
     if (!normalized.length) {
       return { updated: 0, missingRoles: [] };
     }
+
+    await this.addMissingCrmSignersToEnvelope(
+      client,
+      accountId,
+      envelopeId,
+      roles,
+      templateId,
+    );
 
     const recRes = await client.get(
       `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients`,
@@ -1518,6 +1612,13 @@ export class DocusignService {
       );
     }
 
+    const tid =
+      String(templateId || '').trim() ||
+      (await this.getTemplateIdFromEnvelope(client, accountId, envelopeId));
+    const templateRoleNames = tid
+      ? await this.getTemplateSignerRoleNames(client, accountId, tid)
+      : [];
+
     const missingRoles: string[] = [];
     const bulkUpdates: Array<{
       recipientId: string;
@@ -1533,23 +1634,31 @@ export class DocusignService {
       const match =
         normalized.find((n) => n.roleName.toLowerCase() === roleKey) ||
         normalized[i] ||
-        normalized[0];
+        null;
       const email = String(match?.email || '').trim();
       const rid = String(signer.recipientId || '').trim();
       if (!rid) continue;
 
       if (!email) {
-        missingRoles.push(String(signer.roleName || `Signer ${i + 1}`));
+        missingRoles.push(
+          String(
+            templateRoleNames[i] || signer.roleName || match?.roleName || `Signer ${i + 1}`,
+          ),
+        );
         continue;
       }
 
-      const current = String(signer.email || '').trim().toLowerCase();
-      if (current === email.toLowerCase()) continue;
+      const currentEmail = String(signer.email || '').trim().toLowerCase();
+      const currentName = String(signer.name || '').trim();
+      const nextName = match.name || email.split('@')[0];
+      const emailChanged = currentEmail !== email.toLowerCase();
+      const nameChanged = currentName !== nextName;
+      if (!emailChanged && !nameChanged) continue;
 
       bulkUpdates.push({
         recipientId: rid,
         email,
-        name: match.name || email.split('@')[0],
+        name: nextName,
         roleName: signer.roleName,
         routingOrder: signer.routingOrder || String(i + 1),
       });
@@ -1678,11 +1787,18 @@ export class DocusignService {
     }
     const { client, accountId } = await this.getAuthContext(userId);
 
+    await this.assertEnvelopeDraftOrThrow(client, accountId, eid);
+
+    const templateIdFromEnvelope = await this.getTemplateIdFromEnvelope(
+      client,
+      accountId,
+      eid,
+    );
+
     let rolesToApply: SignerRoleInput[] = Array.isArray(roles) ? roles : [];
     if (!rolesToApply.length) {
       const templateId =
-        (await this.getTemplateIdFromEnvelope(client, accountId, eid)) ||
-        DOCUSIGN_DEFAULT_TEMPLATE_ID;
+        templateIdFromEnvelope || DOCUSIGN_DEFAULT_TEMPLATE_ID;
       if (templateId) {
         rolesToApply = await this.buildCrmRolesForEnvelope(
           client,
@@ -1718,6 +1834,7 @@ export class DocusignService {
       accountId,
       eid,
       rolesToApply,
+      templateIdFromEnvelope,
     );
 
     const list = [...new Set(ccEmails.map((e) => String(e).trim()).filter(Boolean))];
@@ -3229,19 +3346,26 @@ export class DocusignService {
     documentId: string,
     fields: PrefillField[],
   ) {
+    const eid = String(documentId || '').trim();
+    if (!eid) {
+      throw new BadRequestException('documentId (envelopeId) is required');
+    }
     const { client, accountId } = await this.getAuthContext(userId);
+    await this.assertEnvelopeDraftOrThrow(client, accountId, eid);
+    const templateId =
+      (await this.getTemplateIdFromEnvelope(client, accountId, eid)) || undefined;
     const result = await this.applyPrefillToEnvelope(
       userId,
       client,
       accountId,
-      documentId,
-      undefined,
+      eid,
+      templateId,
       fields,
     );
-    await this.lockEnvelopeSignerDataTabsWithRetry(client, accountId, documentId);
-    if (!result.applied) {
-      throw new BadRequestException(
-        'No DocuSign form fields matched the provided prefill ids for this envelope.',
+    await this.lockEnvelopeSignerDataTabsWithRetry(client, accountId, eid);
+    if (!result.applied && result.attempted) {
+      console.warn(
+        `[DocuSign] prefill sync: 0/${result.attempted} tab(s) matched on envelope ${eid}`,
       );
     }
     return result;
