@@ -1,4 +1,4 @@
-import { Worker } from 'bullmq';
+import { Worker, type ConnectionOptions } from 'bullmq';
 import Redis from 'ioredis';
 import prisma from '../config/prismaClient';
 import {
@@ -10,13 +10,13 @@ import { processCollectionPaymentUploadJob } from '../services/collectionPayment
 
 let workerInstance: Worker<CollectionPaymentUploadJobData> | null = null;
 
-const createRedisConnection = () =>
+const createRedisConnection = (): ConnectionOptions =>
   new Redis(String(process.env.REDIS_URL || '').trim(), {
     maxRetriesPerRequest: null,
     retryStrategy(times) {
       return Math.min(times * 200, 2000);
     },
-  });
+  }) as ConnectionOptions;
 
 export const startCollectionPaymentUploadWorker = (): void => {
   if (!isCollectionPaymentUploadQueueEnabled()) {

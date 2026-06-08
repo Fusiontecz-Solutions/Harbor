@@ -1,4 +1,4 @@
-import { Queue } from 'bullmq';
+import { Queue, type ConnectionOptions } from 'bullmq';
 import Redis from 'ioredis';
 // Type-only import: keeps the runtime module graph acyclic
 // (applicationApprovalService imports this queue module for value).
@@ -27,27 +27,26 @@ export type ApplicationApprovalJobName = 'process-side-effects';
 
 export type ApplicationApprovalJobData = ApprovalSideEffectPayload;
 
-let queueInstance: Queue<ApplicationApprovalJobData, void, ApplicationApprovalJobName> | null = null;
+let queueInstance: Queue<ApplicationApprovalJobData> | null = null;
 
 const redisUrl = (): string => String(process.env.REDIS_URL || '').trim();
 
-const createRedisConnection = (): Redis =>
+/** BullMQ bundles its own ioredis types; cast avoids duplicate-package TS errors. */
+const createRedisConnection = (): ConnectionOptions =>
     new Redis(redisUrl(), {
         maxRetriesPerRequest: null,
         retryStrategy(times) {
             return Math.min(times * 200, 2_000);
         },
-    });
+    }) as ConnectionOptions;
 
 export const isApplicationApprovalQueueEnabled = (): boolean => Boolean(redisUrl());
 
-export const getApplicationApprovalQueue = ():
-    | Queue<ApplicationApprovalJobData, void, ApplicationApprovalJobName>
-    | null => {
+export const getApplicationApprovalQueue = (): Queue<ApplicationApprovalJobData> | null => {
     if (!isApplicationApprovalQueueEnabled()) return null;
 
     if (!queueInstance) {
-        queueInstance = new Queue<ApplicationApprovalJobData, void, ApplicationApprovalJobName>(
+        queueInstance = new Queue<ApplicationApprovalJobData>(
             APPLICATION_APPROVAL_QUEUE_NAME,
             {
                 connection: createRedisConnection(),
@@ -63,7 +62,7 @@ export const getApplicationApprovalQueue = ():
                     },
                 },
             }
-        );
+        ) as Queue<ApplicationApprovalJobData>;
     }
 
     return queueInstance;

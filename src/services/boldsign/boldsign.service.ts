@@ -27,6 +27,7 @@ import {
   resolveBoldSignWebhookEnvelopeStatus,
 } from './utils/boldsign-webhook';
 import sendMail, { isOutboundSmtpConfigured } from '../../config/nodemailer';
+import { handleContractSigningStatusTransition } from '../contractSigningStatusEffects';
 
 /** Maps webhook / envelope strings to `Contract.status` enum values (Prisma `ContractStatus`). */
 function internalEnvelopeStatusToContractStatusDbValue(
@@ -1901,6 +1902,10 @@ export class BoldSignService {
       where: { envelopeId: String(documentId) },
     });
 
+    const priorStatus = existingDoc?.status
+      ? String(existingDoc.status).trim().toLowerCase()
+      : null;
+
     const status = mergeWithExistingEnvelopeStatus(
       existingDoc?.status,
       incomingResolved,
@@ -1945,5 +1950,20 @@ export class BoldSignService {
       where: { applicationId },
       data: { status: contractStatus as any },
     });
+
+    if (priorStatus !== status) {
+      const documentName =
+        String(existingDoc?.originalName || existingDoc?.title || '').trim() || 'Contract.pdf';
+      void handleContractSigningStatusTransition({
+        applicationId: String(applicationId),
+        priorStatus,
+        newStatus: status,
+        envelopeId: String(documentId),
+        documentName,
+        provider: 'boldsign',
+      }).catch((err) => {
+        console.warn('[BoldSign] contract signing status side-effects failed:', err);
+      });
+    }
   }
 }

@@ -19,7 +19,8 @@ export type ApplicationActivityActionType =
   | 'APPLICATION_REJECTED'
   | 'PAYMENT_MAIL_SENT'
   | 'PAYMENT_MAIL_FAILED'
-  | 'PAYMENT_MAIL_QUEUED';
+  | 'PAYMENT_MAIL_QUEUED'
+  | 'CONTRACT_SIGNING_STATUS';
 
 export interface CreateApplicationActivityLogInput {
   applicationId: string;
