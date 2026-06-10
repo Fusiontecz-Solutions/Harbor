@@ -1953,7 +1953,12 @@ export class BoldSignService {
 
     if (priorStatus !== status) {
       const documentName =
-        String(existingDoc?.originalName || existingDoc?.title || '').trim() || 'Contract.pdf';
+        String(
+          payloadData?.title ??
+            payloadData?.documentName ??
+            body?.document?.title ??
+            '',
+        ).trim() || 'Contract.pdf';
       void handleContractSigningStatusTransition({
         applicationId: String(applicationId),
         priorStatus,
