@@ -295,6 +295,7 @@ model ContractTemplate {
   url          String
   publicId     String
   originalName String?
+  layoutKey    String   @default("contract")
   uploadedById String?  @db.Uuid
   createdAt    DateTime @default(now())
   uploadedBy   User?    @relation(fields: [uploadedById], references: [id])

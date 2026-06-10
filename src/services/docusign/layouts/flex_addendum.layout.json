@@ -1,0 +1,102 @@
+{
+  "layoutVersion": 1,
+  "key": "flex_addendum",
+  "name": "Katan Capital Flex Addendum",
+  "legacyDocuSignTemplateId": "c2a0e972-2cb1-48fe-b4fe-a4088e1056de",
+  "document": {
+    "documentId": "1",
+    "originalFileName": "KATAN_CAPITAL_-_FLEX_ADDENDUM.pdf"
+  },
+  "signers": [
+    {
+      "roleName": "Client",
+      "routingOrder": 1
+    },
+    {
+      "roleName": "Owner 2",
+      "routingOrder": 2
+    }
+  ],
+  "variables": [
+    "client_legal_name",
+    "client_name",
+    "signature_date"
+  ],
+  "placements": [
+    {
+      "id": "p1",
+      "type": "signature",
+      "slot": "signature_p2_425_391",
+      "documentId": "1",
+      "pageNumber": "2",
+      "x": "425",
+      "y": "391",
+      "signerRole": "Receiver",
+      "optional": false,
+      "sourceTabLabel": "Signature e267d21b-4f1e-49a7-9a79-8d1345b23bae",
+      "signerParty": "secondary"
+    },
+    {
+      "id": "p2",
+      "type": "date",
+      "variable": "signature_date",
+      "slot": "date_p1_196_102",
+      "documentId": "1",
+      "pageNumber": "1",
+      "x": "196",
+      "y": "102",
+      "width": "0",
+      "height": "0",
+      "signerRole": "Receiver",
+      "optional": false,
+      "sourceTabLabel": "Date Signed 3912e6f5-69a7-45e0-b215-284d9e284c44"
+    },
+    {
+      "id": "p3",
+      "type": "date",
+      "variable": "signature_date",
+      "slot": "date_p1_158_116",
+      "documentId": "1",
+      "pageNumber": "1",
+      "x": "158",
+      "y": "116",
+      "width": "0",
+      "height": "0",
+      "signerRole": "Receiver",
+      "optional": false,
+      "sourceTabLabel": "Date Signed ab7493c6-1a0b-4cfe-a129-f99b31ec92af"
+    },
+    {
+      "id": "p4",
+      "type": "text",
+      "variable": "client_legal_name",
+      "documentId": "1",
+      "pageNumber": "1",
+      "x": "38",
+      "y": "129",
+      "width": "248",
+      "height": "19",
+      "signerRole": "Receiver",
+      "optional": true,
+      "sourceTabLabel": "client_legal_name"
+    },
+    {
+      "id": "p5",
+      "type": "text",
+      "variable": "client_name",
+      "documentId": "1",
+      "pageNumber": "2",
+      "x": "91",
+      "y": "398",
+      "width": "257",
+      "height": "24",
+      "signerRole": "Receiver",
+      "optional": true,
+      "sourceTabLabel": "client_name"
+    }
+  ],
+  "pdf": {
+    "source": "boldSignTemplate",
+    "fileName": "KATAN_CAPITAL_-_FLEX_ADDENDUM.pdf"
+  }
+}

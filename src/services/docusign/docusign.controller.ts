@@ -317,6 +317,8 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
     const {
       templates,
       templateIds,
+      supplementalLayoutKeys,
+      supplementalDocumentRefs,
       contractTemplateFilters,
       roles,
       prefillFields,
@@ -327,8 +329,14 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
       message,
       autoSend,
       reminderSettings,
+      ownerCount,
+      guarantorCount,
     } = req.body;
 
+    const hasSupplementalLayoutKeys =
+      Array.isArray(supplementalLayoutKeys) && supplementalLayoutKeys.length > 0;
+    const hasSupplemental =
+      Array.isArray(supplementalDocumentRefs) && supplementalDocumentRefs.length > 0;
     const hasTemplates = Array.isArray(templates) && templates.length > 0;
     const hasTemplateIds = Array.isArray(templateIds) && templateIds.length > 0;
     const hasFilters =
@@ -338,11 +346,24 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
         const v = (contractTemplateFilters as Record<string, unknown>)[k];
         return v != null && String(v).trim() !== '';
       });
+    const contractOnlySend =
+      !hasSupplementalLayoutKeys &&
+      !hasSupplemental &&
+      !hasTemplates &&
+      !hasTemplateIds &&
+      !hasFilters;
 
-    if (!hasTemplates && !hasTemplateIds && !hasFilters) {
+    if (
+      !contractOnlySend &&
+      !hasSupplementalLayoutKeys &&
+      !hasSupplemental &&
+      !hasTemplates &&
+      !hasTemplateIds &&
+      !hasFilters
+    ) {
       return res.status(400).json({
         message:
-          'Provide templateIds, templates, or contractTemplateFilters (state/frequency/type).',
+          'Provide supplementalLayoutKeys, supplementalDocumentRefs, templateIds, templates, or contractTemplateFilters (state/frequency/type).',
       });
     }
     if (!roles?.length) {
@@ -352,6 +373,8 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
     const result = await docusignService.mergeAndSendTemplates(userId, {
       templates,
       templateIds,
+      supplementalLayoutKeys,
+      supplementalDocumentRefs,
       contractTemplateFilters,
       roles,
       prefillFields,
@@ -360,6 +383,8 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
       ccEmails: ccEmails || [],
       title,
       message,
+      ownerCount: ownerCount != null ? Number(ownerCount) : undefined,
+      guarantorCount: guarantorCount != null ? Number(guarantorCount) : undefined,
       autoSend: autoSend === false ? false : autoSend === true ? true : undefined,
       reminderSettings,
     });

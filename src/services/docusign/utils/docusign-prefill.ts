@@ -131,7 +131,7 @@ export function buildPrefillValueMap(
   return map;
 }
 
-function lookupPrefillValue(map: Map<string, string>, tabKey: string): string | undefined {
+export function lookupPrefillValue(map: Map<string, string>, tabKey: string): string | undefined {
   const k = normalizeFieldKey(tabKey);
   if (map.has(k)) return map.get(k);
   const noUnderscore = k.replace(/_/g, '');
@@ -139,6 +139,29 @@ function lookupPrefillValue(map: Map<string, string>, tabKey: string): string | 
   const viaAlias = CRM_LABEL_TO_FIELD_ID[k];
   if (viaAlias) {
     const v = map.get(normalizeFieldKey(viaAlias));
+    if (v) return v;
+  }
+  return undefined;
+}
+
+/** DocuSign tab group → property name used when setting prefilled values on create/update. */
+export function tabGroupPrefillProperty(group: string): 'value' | 'numberValue' | 'selected' {
+  if (group === 'numberTabs') return 'numberValue';
+  if (group === 'checkboxTabs') return 'selected';
+  return 'value';
+}
+
+export function resolvePrefillForTab(
+  valueMap: Map<string, string>,
+  tab: DocusignTextTabRef,
+): string | undefined {
+  const candidates = [
+    tab.tabLabel,
+    tab.name,
+    tab.tabId,
+  ].filter(Boolean) as string[];
+  for (const c of candidates) {
+    const v = lookupPrefillValue(valueMap, c);
     if (v) return v;
   }
   return undefined;
@@ -161,13 +184,7 @@ export function matchPrefillFieldsToTextTabs(
   for (const tab of templateTabs) {
     const tabId = tab.tabId ? String(tab.tabId) : '';
     const tabLabel = String(tab.tabLabel || tab.name || '').trim();
-    const candidates = [tabLabel, tab.tabLabel, tab.name, tabId].filter(Boolean) as string[];
-
-    let value: string | undefined;
-    for (const c of candidates) {
-      value = lookupPrefillValue(valueMap, c);
-      if (value) break;
-    }
+    const value = resolvePrefillForTab(valueMap, tab);
     if (!value) continue;
     if (tabId && usedTabIds.has(tabId)) continue;
 

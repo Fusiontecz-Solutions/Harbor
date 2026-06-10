@@ -114,7 +114,8 @@ class ContractController {
       }
 
       const data = await contractService.getByApplicationIdContract(applicationId);
-      if (!data) return res.status(404).json({ success: false, message: 'Contract not found for this applicationId' });
+      // No row yet is normal before "Generate Contract" — not the same as ContractTemplate (global PDF).
+      if (!data) return res.status(200).json({ success: true, data: null });
 
       return res.status(200).json({ success: true, data });
     } catch (error: any) {
