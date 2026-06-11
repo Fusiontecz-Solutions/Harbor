@@ -2,7 +2,7 @@ import { Queue, type ConnectionOptions } from 'bullmq';
 import Redis from 'ioredis';
 // Type-only import: keeps the runtime module graph acyclic
 // (applicationApprovalService imports this queue module for value).
-import type { ApprovalSideEffectPayload } from '../services/applicationApprovalService';
+import type { ApprovalSideEffectPayload } from '../services/business/applicationApprovalService';
 
 /* ============================================================================
  * Application Approval Side-Effects Queue

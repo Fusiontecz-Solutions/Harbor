@@ -1,10 +1,22 @@
 import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
+import { resolveEmailBrandDisplayName } from '../constants/emailBrand';
 
 dotenv.config();
 
 const sendgridApiKey = process.env.SENDGRID_API_KEY?.trim();
 const useSendgrid = Boolean(sendgridApiKey);
+
+/** True when SendGrid API key and a verified from address are configured. */
+export function isSendGridConfigured(): boolean {
+    if (!sendgridApiKey) return false;
+    const from =
+        process.env.SENDGRID_FROM_EMAIL?.trim() ||
+        process.env.SMTP_FROM?.trim() ||
+        process.env.MAIL_FROM?.trim() ||
+        process.env.SENDGRID_AUTH_USER?.trim();
+    return Boolean(from);
+}
 
 /** True when SendGrid API key or classic Gmail SMTP user+pass is configured. */
 export function isOutboundSmtpConfigured(): boolean {
@@ -14,19 +26,14 @@ export function isOutboundSmtpConfigured(): boolean {
     );
 }
 
-const DEFAULT_MAIL_FROM_NAME =
-    process.env.MAIL_FROM_NAME?.trim() ||
-    process.env.SENDGRID_FROM_NAME?.trim() ||
-    'KATAN CAPITAL LLC';
-
 function formatMailFromAddress(email: string): string {
-    return `"${DEFAULT_MAIL_FROM_NAME}" <${email}>`;
+    return `"${resolveEmailBrandDisplayName()}" <${email}>`;
 }
 
 /**
  * Default From header. SendGrid requires a verified sender; use SMTP_FROM,
  * MAIL_FROM, SENDGRID_FROM_EMAIL, or SENDGRID_AUTH_USER (verified address).
- * Display name defaults to KATAN CAPITAL LLC (override with MAIL_FROM_NAME).
+ * Display name defaults to KATAN CAPITAL (Woodmere env values are ignored).
  */
 export function getDefaultMailFrom(): string {
     const explicit =
@@ -90,6 +97,19 @@ interface SendMailOptions {
         contentType?: string;
         contentDisposition?: 'inline' | 'attachment';
     }>;
+}
+
+/** Send mail via SendGrid SMTP only — rejects when SendGrid is not configured. */
+export async function sendSendGridMail(options: SendMailOptions) {
+    if (!isSendGridConfigured()) {
+        throw new Error(
+            'SendGrid is not configured. Set SENDGRID_API_KEY and SENDGRID_FROM_EMAIL (verified sender).',
+        );
+    }
+    if (!useSendgrid) {
+        throw new Error('SENDGRID_API_KEY is required for SendGrid mail delivery.');
+    }
+    return sendMail(options);
 }
 
 const sendMail = async (

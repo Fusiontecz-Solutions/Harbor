@@ -4,7 +4,7 @@ import { resolveCrmFrontendBaseUrl } from '../utils/crmFrontendUrl';
 import { createPublicPortalToken } from './publicPortalTokenService';
 import { emitToUser } from '../socket';
 // Type-only to avoid a runtime cycle (applicationApprovalService -> queue -> worker -> here).
-import type { ApprovalSideEffectPayload } from './applicationApprovalService';
+import type { ApprovalSideEffectPayload } from './business/applicationApprovalService';
 
 /* ============================================================================
  * Application approval side-effects

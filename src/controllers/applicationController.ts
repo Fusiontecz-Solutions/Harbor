@@ -75,7 +75,7 @@ import {
     type BulkImportRowError,
     type BulkImportSummary,
 } from '../services/applicationBulkExcelIngestService';
-import { approveApplication } from '../services/applicationApprovalService';
+import { approveApplication } from '../services/business/applicationApprovalService';
 
 type ApplicationState =
     | 'DRAFT'
@@ -1059,6 +1059,12 @@ class ApplicationController {
                 });
             }
 
+            const requestedDocumentSlug = String(
+                (req.body as { requestedDocumentSlug?: string })?.requestedDocumentSlug || '',
+            )
+                .trim()
+                .toLowerCase();
+
             // Add new files to database
             try {
                 await prisma.applicationFile.createMany({
@@ -1070,6 +1076,7 @@ class ApplicationController {
                         mimeType: f.mimeType,
                         size: f.size,
                         uploadedAt: f.uploadedAt,
+                        ...(requestedDocumentSlug ? { requestedDocumentSlug } : {}),
                     })),
                 });
             } catch (dbError: any) {
@@ -1134,6 +1141,21 @@ class ApplicationController {
                 });
             } catch (logError) {
                 console.error('Failed to create activity log for file upload:', logError);
+            }
+
+            if (requestedDocumentSlug && authUser?.id) {
+                try {
+                    const { notifyRequestersDocumentReceived } = await import(
+                        '../services/documentRequestFulfillmentService'
+                    );
+                    await notifyRequestersDocumentReceived({
+                        applicationUuid: application.id,
+                        documentSlug: requestedDocumentSlug,
+                        uploadedByUserId: String(authUser.id),
+                    });
+                } catch (notifyErr) {
+                    console.error('Failed to notify document request fulfillment:', notifyErr);
+                }
             }
 
             return res.status(200).json({

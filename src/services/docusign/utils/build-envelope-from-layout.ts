@@ -34,6 +34,13 @@ export type BuildEnvelopeFromLayoutOptions = {
   signers: LayoutSignerInput[];
   ownerCount?: number;
   guarantorCount?: number;
+  /**
+   * When true, text/date values are already burned into document PDFs — only signature /
+   * initial / attachment tabs are attached (visible to all recipients including CC).
+   */
+  skipTextDateTabs?: boolean;
+  /** When true, text/date tabs are created locked (use only when sending immediately). */
+  lockDataTabs?: boolean;
 };
 
 export type LayoutPartyCounts = {
@@ -325,6 +332,9 @@ function expandLayoutsWithOwner2Initials(
   if (ownerCount < 2) return layouts;
 
   return layouts.map((layout) => {
+    if (layout.skipOwner2InitialMirror) {
+      return layout;
+    }
     const extras: DocumentLayoutPlacement[] = [];
     for (const placement of layout.placements) {
       if (placement.type !== 'initial') continue;
@@ -412,6 +422,7 @@ function toTextTab(
   placement: DocumentLayoutPlacement,
   value: string,
   envelopeDocumentId: string,
+  lockDataTabs = false,
 ): DocuSignTab {
   const variable = String(placement.variable || '').trim();
   const displayLabel =
@@ -427,10 +438,53 @@ function toTextTab(
     xPosition: placement.x,
     yPosition: placement.y,
     value,
-    locked: 'true',
+    ...(lockDataTabs ? { locked: 'true' } : {}),
+    shared: 'true',
     ...(placement.width ? { width: placement.width } : {}),
     ...(placement.height ? { height: placement.height } : {}),
   };
+}
+
+/** Stamp layout text/date values onto the base PDF for CC email (DocuSign download is often blank). */
+export async function renderFlattenedLayoutPdf(
+  layout: DocumentLayout & { documentBase64: string },
+  values: Record<string, string>,
+  counts: LayoutPartyCounts,
+): Promise<Buffer> {
+  const { PDFDocument, StandardFonts, rgb } = await import('pdf-lib');
+  const pdfDoc = await PDFDocument.load(Buffer.from(layout.documentBase64, 'base64'));
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const pages = pdfDoc.getPages();
+  const expanded = expandPrefillValues(values);
+
+  for (const placement of layout.placements) {
+    if (placement.type !== 'text' && placement.type !== 'date') continue;
+    if (!placementAllowed(placement, counts, expanded)) continue;
+    const text = resolveTextPlacementValue(placement.variable || '', expanded);
+    if (!text) continue;
+
+    const pageIndex = Math.max(0, parseInt(String(placement.pageNumber || '1'), 10) - 1);
+    const page = pages[pageIndex];
+    if (!page) continue;
+
+    const tabHeight = parseFloat(String(placement.height || '19')) || 19;
+    const fontSize = Math.min(11, Math.max(7, Math.round(tabHeight * 0.55)));
+    const { height: pageHeight } = page.getSize();
+    const x = parseFloat(String(placement.x || '0')) || 0;
+    const yTop = parseFloat(String(placement.y || '0')) || 0;
+    const y = pageHeight - yTop - fontSize;
+
+    page.drawText(text, {
+      x,
+      y: Math.max(2, y),
+      size: fontSize,
+      font,
+      color: rgb(0, 0, 0),
+      maxWidth: placement.width ? parseFloat(String(placement.width)) || undefined : undefined,
+    });
+  }
+
+  return Buffer.from(await pdfDoc.save());
 }
 
 function toSignTab(
@@ -596,10 +650,11 @@ export function buildEnvelopeFromLayouts(options: BuildEnvelopeFromLayoutOptions
       const bucket = ensureSigner(roleName);
 
       if (placement.type === 'text' || placement.type === 'date') {
+        if (options.skipTextDateTabs) continue;
         const variable = placement.variable || '';
         const value = resolveTextPlacementValue(variable, values);
         if (!value) continue;
-        const tab = toTextTab(placement, value, envelopeDocId);
+        const tab = toTextTab(placement, value, envelopeDocId, options.lockDataTabs);
         if (placement.type === 'date') bucket.dateTabs.push(tab);
         else bucket.textTabs.push(tab);
         continue;

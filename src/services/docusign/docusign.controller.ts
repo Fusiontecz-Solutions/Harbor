@@ -319,6 +319,7 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
       templateIds,
       supplementalLayoutKeys,
       supplementalDocumentRefs,
+      includeMainContract,
       contractTemplateFilters,
       roles,
       prefillFields,
@@ -375,6 +376,8 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
       templateIds,
       supplementalLayoutKeys,
       supplementalDocumentRefs,
+      includeMainContract:
+        includeMainContract === false ? false : includeMainContract === true ? true : undefined,
       contractTemplateFilters,
       roles,
       prefillFields,

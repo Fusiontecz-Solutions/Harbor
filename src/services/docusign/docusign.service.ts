@@ -74,8 +74,19 @@ import {
   filterSupplementalRefs,
   resolveSupplementalRefsFromDb,
 } from './utils/platform-layout-envelope';
+import {
+  contractHasAchAuthorizationEnvelope,
+  linkAchAuthorizationEnvelopeToContract,
+  mapInternalEnvelopeStatusToAchCapsule,
+  updateAchAuthorizationDocuSignStatus,
+} from './utils/ach-authorization-docusign';
 import { decryptField, isEncrypted } from '../../utils/fieldEncryption';
 import { handleContractSigningStatusTransition } from '../contractSigningStatusEffects';
+import { mergeDefaultContractCcEmails } from '../../utils/contractCcDefaults';
+import {
+  buildDocuSignEnvelopeEmailSubject,
+  normalizeContractCcEmailSubject,
+} from '../../utils/contractEnvelopeEmailSubject';
 
 dotenv.config();
 
@@ -828,6 +839,7 @@ export class DocusignService {
     tabsPath: string,
     group: string,
     updates: Array<{ tabId: string; value: string }>,
+    lockTabs = false,
   ): Promise<number> {
     if (!updates.length) return 0;
     const valueKey = tabGroupPrefillProperty(group);
@@ -837,7 +849,8 @@ export class DocusignService {
       const chunk = updates.slice(i, i + CHUNK_SIZE).map((t) => ({
         tabId: t.tabId,
         [valueKey]: t.value,
-        locked: 'true',
+        ...(lockTabs ? { locked: 'true' } : {}),
+        shared: 'true',
       }));
       await client.put(
         `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/${tabsPath}`,
@@ -1328,7 +1341,7 @@ export class DocusignService {
     if (appId) {
       fields.push({ name: 'crmApplicationId', value: appId, show: 'false' });
     }
-    const cc = [...new Set((ccEmails || []).map((e) => String(e).trim()).filter(Boolean))];
+    const cc = mergeDefaultContractCcEmails(ccEmails);
     if (cc.length) {
       fields.push({ name: 'crmCcEmails', value: cc.join(','), show: 'false' });
     }
@@ -1462,11 +1475,114 @@ export class DocusignService {
       }
     }
     if (removed) {
-      console.log(
-        `[DocuSign] removed ${removed} carbon copy slot(s) on ${envelopeId} (CRM emails CC when sent)`,
-      );
+      console.log(`[DocuSign] removed ${removed} carbon copy slot(s) on ${envelopeId}`);
     }
     return removed;
+  }
+
+  /** Next unused recipientId (signers + CC) — avoids CC id colliding with signer 2. */
+  private nextEnvelopeRecipientId(
+    recipients: {
+      signers?: Array<{ recipientId?: string }>;
+      carbonCopies?: Array<{ recipientId?: string }>;
+      certifiedDeliveries?: Array<{ recipientId?: string }>;
+    } | null | undefined,
+    startAt = 100,
+  ): number {
+    const used = new Set<number>();
+    for (const group of [
+      recipients?.signers,
+      recipients?.carbonCopies,
+      recipients?.certifiedDeliveries,
+    ]) {
+      for (const row of group || []) {
+        const n = parseInt(String(row?.recipientId ?? ''), 10);
+        if (Number.isFinite(n)) used.add(n);
+      }
+    }
+    let id = Math.max(startAt, used.size + 1);
+    while (used.has(id)) id += 1;
+    return id;
+  }
+
+  /**
+   * Attach CRM CC emails as DocuSign carbon copies after prefill (BoldSign parity).
+   * Each CC is granted visibility on every content document so they do not receive an empty envelope.
+   */
+  private async syncEnvelopeCarbonCopies(
+    client: AxiosInstance,
+    accountId: string,
+    envelopeId: string,
+    ccEmails?: string[],
+    signerEmails: string[] = [],
+  ): Promise<number> {
+    await this.removeEnvelopeCarbonCopies(client, accountId, envelopeId);
+
+    const list = mergeDefaultContractCcEmails(ccEmails).filter(
+      (email) =>
+        !signerEmails
+          .map((s) => String(s).trim().toLowerCase())
+          .filter(Boolean)
+          .includes(email.toLowerCase()),
+    );
+    if (!list.length) return 0;
+
+    const recRes = await client.get(
+      `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients`,
+    );
+    const signers = (recRes.data?.signers || []) as Array<{ routingOrder?: string }>;
+    const maxSignerRouting = signers.reduce((max, s) => {
+      const n = parseInt(String(s.routingOrder || '1'), 10);
+      return Number.isFinite(n) ? Math.max(max, n) : max;
+    }, Math.max(1, signers.length));
+    const routingOrder = String(maxSignerRouting + 1);
+
+    let contentDocIds: string[] = [];
+    try {
+      const docsRes = await client.get(
+        `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/documents`,
+      );
+      contentDocIds = this.filterEnvelopeContentDocuments(
+        docsRes.data?.envelopeDocuments || docsRes.data?.documents || [],
+      )
+        .map((d) => String(d.documentId ?? '').trim())
+        .filter(Boolean);
+    } catch (err) {
+      console.warn('[DocuSign] syncEnvelopeCarbonCopies documents list failed:', err);
+    }
+
+    let nextRecipientId = this.nextEnvelopeRecipientId(recRes.data);
+    const carbonCopies = list.map((email) => {
+      const recipientId = String(nextRecipientId++);
+      const row: Record<string, unknown> = {
+        email,
+        name: email.split('@')[0],
+        recipientId,
+        routingOrder,
+      };
+      if (contentDocIds.length) {
+        row.documentVisibility = contentDocIds.map((documentId) => ({
+          recipientId,
+          documentId,
+          visible: 'true',
+        }));
+      }
+      return row;
+    });
+
+    try {
+      await client.put(
+        `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients`,
+        { carbonCopies },
+      );
+      console.log(
+        `[DocuSign] synced ${carbonCopies.length} carbon copy recipient(s) on ${envelopeId}`,
+      );
+      return carbonCopies.length;
+    } catch (err) {
+      this.logDocusignApiError('syncEnvelopeCarbonCopies', err);
+      return 0;
+    }
   }
 
   /**
@@ -1939,8 +2055,8 @@ export class DocusignService {
 
   /**
    * Sync signer emails + CRM CC list before Sender View or send.
-   * CC are NOT added as DocuSign carbon copies (that blocks signer delivery); they are stored
-   * in crmCcEmails and emailed a prefilled PDF when the envelope status becomes sent.
+   * CC are added as DocuSign carbon copies (after prefill) with document visibility, and also
+   * stored in crmCcEmails for a CRM prefilled-PDF email when the envelope is sent.
    */
   async syncEnvelopeCcEmails(
     userId: string,
@@ -2007,9 +2123,7 @@ export class DocusignService {
       templateIdFromEnvelope,
     );
 
-    const list = [...new Set(ccEmails.map((e) => String(e).trim()).filter(Boolean))];
-
-    await this.removeEnvelopeCarbonCopies(client, accountId, eid);
+    const list = mergeDefaultContractCcEmails(ccEmails);
 
     const recAfter = await client.get(
       `/v2.1/accounts/${accountId}/envelopes/${eid}/recipients`,
@@ -2043,7 +2157,16 @@ export class DocusignService {
       }
     }
 
-    await this.lockEnvelopeSignerDataTabsWithRetry(client, accountId, eid);
+    const signerEmailList = signersAfter
+      .map((s) => String(s.email || '').trim())
+      .filter(Boolean);
+    const ccSynced = await this.syncEnvelopeCarbonCopies(
+      client,
+      accountId,
+      eid,
+      list,
+      signerEmailList,
+    );
 
     const envelopeSigners = ((recAfter.data?.signers || []) as Array<{
       roleName?: string;
@@ -2057,10 +2180,11 @@ export class DocusignService {
     return {
       envelopeId: eid,
       ccCount: list.length,
+      ccSynced,
       signersUpdated: updated,
       envelopeSigners,
-      /** CC delivery is via CRM email on send, not DocuSign carbonCopies. */
-      ccDelivery: 'crm_email_on_sent',
+      /** DocuSign carbon copies + CRM prefilled PDF email when envelope is sent. */
+      ccDelivery: 'docusign_carbon_copy_and_crm_email_on_sent',
       crmCcEmails: list,
     };
   }
@@ -2211,7 +2335,7 @@ export class DocusignService {
 
         const row: Record<string, string> = {
           tabLabel,
-          locked: 'true',
+          shared: 'true',
         };
 
         const prefill = resolvePrefillForTab(valueMap, tab as DocusignTextTabRef);
@@ -2275,7 +2399,7 @@ export class DocusignService {
     );
 
     let createTimeLockedTabs: Record<string, Array<Record<string, string>>> = {};
-    if (DOCUSIGN_LOCK_SIGNER_DATA_TABS && templateId && prefillFields?.length) {
+    if (templateId && prefillFields?.length) {
       createTimeLockedTabs = await this.buildCreateTimeLockedTabsForTemplate(
         client,
         accountId,
@@ -2310,7 +2434,7 @@ export class DocusignService {
               ...(t.tabId
                 ? { tabId: t.tabId, tabLabel: t.tabLabel, value: t.value }
                 : { tabLabel: t.tabLabel, value: t.value }),
-              locked: 'true',
+              shared: 'true',
             })),
           };
         }
@@ -2344,10 +2468,11 @@ export class DocusignService {
     if (!desired.length) return [];
 
     const routing = String(Math.max(1, signerCount) + 1);
-    return desired.map((email, i) => ({
+    let nextRecipientId = Math.max(100, signerCount + 1);
+    return desired.map((email) => ({
       email,
       name: email.split('@')[0],
-      recipientId: String(2 + i),
+      recipientId: String(nextRecipientId++),
       routingOrder: routing,
     }));
   }
@@ -2453,6 +2578,11 @@ export class DocusignService {
       title?: string | null;
     } | null,
   ) {
+    if (await contractHasAchAuthorizationEnvelope(envelopeId)) {
+      await updateAchAuthorizationDocuSignStatus(envelopeId, incomingResolved);
+      return incomingResolved;
+    }
+
     const priorStatus = existingDoc?.status
       ? String(existingDoc.status).trim().toLowerCase()
       : null;
@@ -2829,6 +2959,183 @@ export class DocusignService {
     return buf;
   }
 
+  /** Read filled tab values from the envelope for local PDF rendering (CC copy). */
+  private async collectEnvelopePrefillFieldsFromTabs(
+    client: AxiosInstance,
+    accountId: string,
+    envelopeId: string,
+  ): Promise<PrefillField[]> {
+    const out: PrefillField[] = [];
+    const seen = new Set<string>();
+
+    const addTab = (tab: DocusignTextTabRef) => {
+      const value = String(tab.value ?? '').trim();
+      if (!value) return;
+      const rawId = String(tab.name || tab.tabLabel || tab.tabId || '').trim();
+      const id = normalizeFieldKey(rawId);
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      out.push({ id, value });
+    };
+
+    for (const tab of await this.fetchEnvelopeDocumentDataTabs(
+      client,
+      accountId,
+      envelopeId,
+    )) {
+      addTab(tab);
+    }
+
+    try {
+      const rec = await client.get(
+        `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients`,
+      );
+      for (const signer of rec.data?.signers || []) {
+        const recipientId = String(signer.recipientId || '').trim();
+        if (!recipientId) continue;
+        const tabs = await this.fetchEnvelopeSignerDataTabs(
+          client,
+          accountId,
+          envelopeId,
+          recipientId,
+        );
+        for (const tab of tabs) addTab(tab);
+      }
+    } catch (err) {
+      console.warn('[DocuSign] collectEnvelopePrefillFieldsFromTabs recipients failed:', err);
+    }
+
+    return out;
+  }
+
+  /**
+   * Build a flattened contract PDF from platform layout + envelope tab values.
+   * DocuSign's downloadable PDF often omits prefilled signer tabs (CC sees a blank form).
+   */
+  private async buildFlattenedContractPdfForCc(
+    client: AxiosInstance,
+    accountId: string,
+    envelopeId: string,
+  ): Promise<Buffer | null> {
+    try {
+      const { loadLatestContractLayoutPackage } = await import('./utils/platform-layout-envelope');
+      const { prefillFieldsToValueMap, renderFlattenedLayoutPdf } = await import(
+        './utils/build-envelope-from-layout'
+      );
+      const layout = await loadLatestContractLayoutPackage();
+      const fields = await this.collectEnvelopePrefillFieldsFromTabs(
+        client,
+        accountId,
+        envelopeId,
+      );
+      if (!fields.length) return null;
+
+      let ownerCount = 1;
+      try {
+        const rec = await client.get(
+          `/v2.1/accounts/${accountId}/envelopes/${envelopeId}/recipients`,
+        );
+        const signerEmails = new Set(
+          ((rec.data?.signers || []) as Array<{ email?: string }>)
+            .map((s) => String(s.email || '').trim().toLowerCase())
+            .filter(Boolean),
+        );
+        if (signerEmails.size >= 2) ownerCount = 2;
+      } catch {
+        /* default 1 */
+      }
+
+      const values = prefillFieldsToValueMap(fields);
+      return await renderFlattenedLayoutPdf(layout, values, {
+        ownerCount,
+        guarantorCount: ownerCount >= 2 ? 2 : 0,
+      });
+    } catch (err) {
+      console.warn(`[DocuSign] buildFlattenedContractPdfForCc failed for ${envelopeId}:`, err);
+      return null;
+    }
+  }
+
+  private async getEnvelopeEmailSubject(
+    client: AxiosInstance,
+    accountId: string,
+    envelopeId: string,
+  ): Promise<string | null> {
+    try {
+      const res = await client.get(
+        `/v2.1/accounts/${accountId}/envelopes/${envelopeId}`,
+      );
+      const subject = String(res.data?.emailSubject || '').trim();
+      return subject || null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async resolveApplicationClientNameForEmailSubject(
+    applicationId: string,
+  ): Promise<string | null> {
+    try {
+      const contract = await prisma.contract.findFirst({
+        where: { applicationId },
+        orderBy: { createdAt: 'desc' },
+        select: {
+          legalName: true,
+          clientName: true,
+          doingBusinessAs: true,
+        },
+      });
+      const fromContract = String(
+        contract?.legalName || contract?.clientName || contract?.doingBusinessAs || '',
+      ).trim();
+      if (fromContract) return fromContract;
+
+      const app = await prisma.application.findUnique({
+        where: { id: applicationId },
+        select: {
+          dealDisplayName: true,
+          client: {
+            select: { businessName: true },
+          },
+        },
+      });
+      return (
+        String(
+          app?.client?.businessName || app?.dealDisplayName || '',
+        ).trim() || null
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /** Match signer envelope subject (e.g. KATAN CAPITAL LLC - Client Name). */
+  private async resolveCcContractEmailSubject(
+    client: AxiosInstance,
+    accountId: string,
+    envelopeId: string,
+    subjectHint?: string | null,
+    applicationId?: string | null,
+  ): Promise<string> {
+    const hint = normalizeContractCcEmailSubject(subjectHint);
+    if (hint !== 'Contract') return hint;
+
+    const fromEnvelope = await this.getEnvelopeEmailSubject(
+      client,
+      accountId,
+      envelopeId,
+    );
+    if (fromEnvelope) return fromEnvelope;
+
+    const appId = String(applicationId || '').trim();
+    if (appId) {
+      const clientName = await this.resolveApplicationClientNameForEmailSubject(appId);
+      if (clientName) return buildDocuSignEnvelopeEmailSubject(clientName);
+    }
+
+    return hint;
+  }
+
   private async emailPrefilledContractPdfToCcRecipients(
     client: AxiosInstance,
     accountId: string,
@@ -2836,7 +3143,7 @@ export class DocusignService {
     ccEmails: string[] | undefined | null,
     subjectBase: string,
   ): Promise<{ emailed: string[] }> {
-    const list = [...new Set((ccEmails || []).map((e) => String(e).trim()).filter(Boolean))];
+    const list = mergeDefaultContractCcEmails(ccEmails);
     if (!list.length) return { emailed: [] };
 
     if (!isOutboundSmtpConfigured()) {
@@ -2844,18 +3151,31 @@ export class DocusignService {
       return { emailed: [] };
     }
 
-    await this.sleep(5000);
-    const pdf = await this.downloadEnvelopePdfBufferForPreview(
-      client,
-      accountId,
-      envelopeId,
-    );
+    const status = await this.getEnvelopeStatus(client, accountId, envelopeId);
+    const waitMs = status === 'sent' || status === 'completed' ? 4000 : 2000;
+    await this.sleep(waitMs);
+
+    let pdf = await this.buildFlattenedContractPdfForCc(client, accountId, envelopeId);
+    if (!pdf?.length) {
+      pdf = await this.downloadEnvelopePdfBufferForPreview(
+        client,
+        accountId,
+        envelopeId,
+        status,
+      );
+    }
+    if (!pdf?.length && (status === 'sent' || status === 'completed')) {
+      await this.sleep(4000);
+      pdf =
+        (await this.buildFlattenedContractPdfForCc(client, accountId, envelopeId)) ||
+        (await this.downloadEnvelopePdfBuffer(client, accountId, envelopeId, status));
+    }
     if (!pdf?.length) {
       console.warn(`[DocuSign] No PDF for envelope ${envelopeId}; CC email skipped.`);
       return { emailed: [] };
     }
 
-    const subject = subjectBase.trim() ? `${subjectBase.trim()} ` : 'Contract';
+    const subject = normalizeContractCcEmailSubject(subjectBase);
     const emailed: string[] = [];
     for (const to of list) {
       try {
@@ -2889,6 +3209,7 @@ export class DocusignService {
     envelopeId: string,
     ccEmails: string[],
     subjectBase = 'Contract',
+    applicationId?: string | null,
   ): Promise<{ emailed: string[]; skippedReason?: string }> {
     const list = [...new Set(ccEmails.map((e) => String(e).trim()).filter(Boolean))];
     if (!list.length) return { emailed: [], skippedReason: 'no_cc_addresses' };
@@ -2898,12 +3219,19 @@ export class DocusignService {
     if (!isOutboundSmtpConfigured()) {
       return { emailed: [], skippedReason: 'smtp_not_configured' };
     }
+    const subject = await this.resolveCcContractEmailSubject(
+      client,
+      accountId,
+      envelopeId,
+      subjectBase,
+      applicationId,
+    );
     const result = await this.emailPrefilledContractPdfToCcRecipients(
       client,
       accountId,
       envelopeId,
       list,
-      subjectBase,
+      subject,
     );
     if (result.emailed.length) {
       await this.markCcPrefilledPdfEmailed(client, accountId, envelopeId);
@@ -2938,6 +3266,8 @@ export class DocusignService {
     envelopeId: string,
     options: {
       applicationId?: string;
+      /** When false (standalone ACH), link envelope on contract prefill — not main Document row. */
+      linkApplicationDocument?: boolean;
       redirectUrl?: string;
       ccEmails?: string[];
       title?: string;
@@ -2945,13 +3275,19 @@ export class DocusignService {
       templateId?: string;
       autoSend?: boolean;
       createTimePrefillTabCount?: number;
+      /** CRM values are burned into uploaded PDFs — skip signer overlay text tabs. */
+      prefillFlattenedInPdf?: boolean;
       client: AxiosInstance;
       accountId: string;
     },
   ) {
     const appId = String(options.applicationId || '').trim();
-    if (appId) {
+    const ccEmails = mergeDefaultContractCcEmails(options.ccEmails);
+    const linkApplicationDocument = options.linkApplicationDocument !== false;
+    if (appId && linkApplicationDocument) {
       await this.linkEnvelopeToApplication(userId, appId, envelopeId);
+    } else if (appId && !linkApplicationDocument) {
+      await linkAchAuthorizationEnvelopeToContract(appId, envelopeId, 'draft');
     }
 
     let prefillApplied = {
@@ -2960,7 +3296,7 @@ export class DocusignService {
       atCreate: 0,
       atPostCreate: 0,
     };
-    if (options.prefillFields?.length) {
+    if (options.prefillFields?.length && !options.prefillFlattenedInPdf) {
       const post = await this.applyPrefillToEnvelope(
         userId,
         options.client,
@@ -2975,44 +3311,47 @@ export class DocusignService {
         atCreate: options.createTimePrefillTabCount ?? 0,
         atPostCreate: post.applied,
       };
+    } else if (options.prefillFlattenedInPdf) {
+      prefillApplied = {
+        applied: options.createTimePrefillTabCount ?? 0,
+        attempted: options.prefillFields?.length ?? 0,
+        atCreate: 0,
+        atPostCreate: 0,
+      };
     }
 
     const autoSend =
       options.autoSend !== false &&
       (options.autoSend === true || DOCUSIGN_AUTO_SEND_ENVELOPE);
 
-    await this.removeEnvelopeCarbonCopies(
-      options.client,
-      options.accountId,
-      envelopeId,
-    );
-
-    // BoldSign emails CC a prefilled PDF as soon as the document is created/prefilled.
-    let ccPrefilledEmail: { emailed: string[]; skippedReason?: string } | null = null;
-    if (options.ccEmails?.length) {
-      ccPrefilledEmail = await this.emailCcPrefilledPdfOnce(
-        options.client,
-        options.accountId,
-        envelopeId,
-        options.ccEmails,
-        options.title || 'Contract',
-      );
-      if (ccPrefilledEmail.emailed.length) {
-        console.log(
-          `[DocuSign] CC prefilled PDF emailed to ${ccPrefilledEmail.emailed.join(', ')} (envelope ${envelopeId})`,
-        );
-      }
-    }
-
     if (prefillApplied.applied > 0 || prefillApplied.attempted > 0) {
       await this.sleep(autoSend ? 4000 : 5000);
     }
 
-    await this.lockEnvelopeSignerDataTabsWithRetry(
-      options.client,
-      options.accountId,
-      envelopeId,
-    );
+    let ccSynced = 0;
+    if (ccEmails.length) {
+      let signerEmails: string[] = [];
+      try {
+        const rec = await options.client.get(
+          `/v2.1/accounts/${options.accountId}/envelopes/${envelopeId}/recipients`,
+        );
+        signerEmails = ((rec.data?.signers || []) as Array<{ email?: string }>)
+          .map((s) => String(s.email || '').trim())
+          .filter(Boolean);
+      } catch {
+        /* omit */
+      }
+      ccSynced = await this.syncEnvelopeCarbonCopies(
+        options.client,
+        options.accountId,
+        envelopeId,
+        ccEmails,
+        signerEmails,
+      );
+    }
+
+    // CRM emails CC a prefilled PDF when the envelope is sent (not on draft — PDF is often blank).
+    let ccPrefilledEmail: { emailed: string[]; skippedReason?: string } | null = null;
 
     let envelopeSigners: Array<{ roleName?: string; email?: string; name?: string }> = [];
     try {
@@ -3056,6 +3395,16 @@ export class DocusignService {
             where: { envelopeId: String(envelopeId) },
             data: { status: 'sent', sentAt: new Date() } as any,
           });
+        }
+        if (ccEmails.length) {
+          ccPrefilledEmail = await this.emailCcPrefilledPdfOnce(
+            options.client,
+            options.accountId,
+            envelopeId,
+            ccEmails,
+            options.title || 'Contract',
+            appId || null,
+          );
         }
       } catch (sendErr) {
         console.error('[DocuSign] auto-send failed:', sendErr);
@@ -3107,6 +3456,7 @@ export class DocusignService {
         envelopeStatus,
         autoSend,
         envelopeSigners,
+        ccSynced,
         ccPrefilledEmail,
         nextStep:
           envelopeStatus === 'sent'
@@ -3172,6 +3522,7 @@ export class DocusignService {
     userId: string,
     options: {
       supplementalRefs?: string[];
+      includeMainContract?: boolean;
       redirectUrl?: string;
       title?: string;
       message?: string;
@@ -3193,14 +3544,18 @@ export class DocusignService {
 
     let built;
     try {
+      const sendImmediately = options.autoSend === true;
       built = await buildPlatformLayoutEnvelopeDefinition({
         supplementalRefs: options.supplementalRefs,
+        includeMainContract: options.includeMainContract,
         roles: options.roles,
         prefillFields: options.prefillFields,
         ownerCount: options.ownerCount,
         guarantorCount: options.guarantorCount,
         title: options.title,
         message: options.message,
+        flattenPrefillInPdf: sendImmediately,
+        lockDataTabs: sendImmediately,
       });
     } catch (err: any) {
       throw new BadRequestException(err?.message || String(err));
@@ -3225,12 +3580,14 @@ export class DocusignService {
 
       const result = await this.finalizeEnvelopeFlow(userId, envelopeId, {
         applicationId: options.applicationId,
+        linkApplicationDocument: options.includeMainContract !== false,
         redirectUrl: options.redirectUrl,
         ccEmails: options.ccEmails,
         title: options.title,
         prefillFields: options.prefillFields,
         autoSend: options.autoSend,
         createTimePrefillTabCount: built.createTimePrefillTabCount,
+        prefillFlattenedInPdf: built.prefillFlattenedInPdf,
         client,
         accountId,
       });
@@ -3321,6 +3678,7 @@ export class DocusignService {
       templateIds?: string[];
       supplementalLayoutKeys?: string[];
       supplementalDocumentRefs?: string[];
+      includeMainContract?: boolean;
       contractTemplateFilters?: {
         state?: string | null;
         frequency?: string | null;
@@ -3368,6 +3726,7 @@ export class DocusignService {
 
     return this.sendEnvelopeFromPlatformLayouts(userId, {
       supplementalRefs,
+      includeMainContract: options.includeMainContract,
       roles: options.roles,
       prefillFields: options.prefillFields,
       redirectUrl: options.redirectUrl,
@@ -3475,7 +3834,6 @@ export class DocusignService {
       templateId,
       fields,
     );
-    await this.lockEnvelopeSignerDataTabsWithRetry(client, accountId, eid);
     if (!result.applied && result.attempted) {
       console.warn(
         `[DocuSign] prefill sync: 0/${result.attempted} tab(s) matched on envelope ${eid}`,
@@ -3671,6 +4029,7 @@ export class DocusignService {
     envelopeId: string,
     ccEmails: string[],
     subjectBase = 'Contract',
+    applicationId?: string | null,
   ) {
     return this.emailCcPrefilledPdfOnce(
       client,
@@ -3678,6 +4037,7 @@ export class DocusignService {
       envelopeId,
       ccEmails,
       subjectBase,
+      applicationId,
     );
   }
 
@@ -3699,20 +4059,10 @@ export class DocusignService {
         authUserId = owner?.id || '';
       }
       const { client, accountId } = await this.getAuthContext(authUserId);
-      let ccEmails = [
-        ...new Set(
-          (ccEmailsOverride || [])
-            .map((e) => String(e).trim())
-            .filter(Boolean),
-        ),
-      ];
-      if (!ccEmails.length) {
-        ccEmails = await this.getEnvelopeCcEmailsFromApi(
-          client,
-          accountId,
-          envelopeId,
-        );
-      }
+      const fromApi = ccEmailsOverride?.length
+        ? ccEmailsOverride
+        : await this.getEnvelopeCcEmailsFromApi(client, accountId, envelopeId);
+      const ccEmails = mergeDefaultContractCcEmails(fromApi);
       if (!ccEmails.length) {
         return { emailed: [], skippedReason: 'no_cc_addresses' };
       }
@@ -3722,6 +4072,7 @@ export class DocusignService {
         envelopeId,
         ccEmails,
         'Contract',
+        applicationId,
       );
       if (result.emailed.length) {
         console.log(
@@ -3746,7 +4097,7 @@ export class DocusignService {
     }
     const { client, accountId } = await this.getAuthContext(userId);
     const appId = String(options?.applicationId || '').trim();
-    const ccFromRequest = options?.ccEmails || [];
+    const ccFromRequest = mergeDefaultContractCcEmails(options?.ccEmails);
     const priorStatus = await this.getEnvelopeStatus(client, accountId, eid);
 
     await this.syncEnvelopeCcEmails(
@@ -3788,6 +4139,7 @@ export class DocusignService {
       eid,
       ccForEmail,
       options?.title || 'Contract',
+      appId || null,
     );
 
     return {
@@ -3945,14 +4297,21 @@ export class DocusignService {
       );
     }
 
+    const achAuthorization = await contractHasAchAuthorizationEnvelope(envelopeId);
+
     return {
       envelopeId,
       applicationId: appId,
       docusignStatus: dsStatus,
       internalStatus: status,
-      contractStatus: status
-        ? internalEnvelopeStatusToContractStatusDbValue(status)
+      achAuthorization,
+      achAuthorizationStatus: achAuthorization
+        ? mapInternalEnvelopeStatusToAchCapsule(status)
         : null,
+      contractStatus:
+        achAuthorization || !status
+          ? null
+          : internalEnvelopeStatusToContractStatusDbValue(status),
       ccPrefilledEmail,
     };
   }

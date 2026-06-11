@@ -2,6 +2,16 @@
 import type { Request, Response } from 'express';
 import prisma from '../config/prismaClient';
 import { buildAgentApplicationVisibilityWhere } from '../services/applicationService';
+import {
+    sendDocumentRequestEmail,
+} from '../services/emailService';
+import {
+    findFulfilledDocumentForRequest,
+    getDocumentRequestConfig,
+    humanizeDocumentRequestLabels,
+} from '../constants/documentRequestTypes';
+import { loadDocumentRequestFulfillmentContext } from '../services/documentRequestFulfillmentService';
+import { resolveCrmFrontendBaseUrl } from '../utils/crmFrontendUrl';
 
 // Helper to map Prisma Application (with includes) to the API shape previously returned by Mongoose
 const mapApplicationToApi = (app: any) => {
@@ -20,6 +30,7 @@ const mapApplicationToApi = (app: any) => {
         salesRepresentative,
         createdBy,
         client,
+        iso,
         files,
         ...rest
     } = app;
@@ -110,8 +121,23 @@ const mapApplicationToApi = (app: any) => {
         salesRepresentative: mapUserLite(salesRepresentative),
         createdBy: mapUserLite(createdBy),
         client: mappedClient,
+        iso: iso
+            ? {
+                  _id: iso.id,
+                  id: iso.id,
+                  name: iso.name,
+                  email: iso.email || '',
+              }
+            : undefined,
         files: mappedFiles,
     };
+};
+
+const APPLICATION_INCLUDE_FOR_DOCUMENT_REQUEST = {
+    referringAgent: { select: { id: true, firstName: true, lastName: true, email: true } },
+    salesRepresentative: { select: { id: true, firstName: true, lastName: true, email: true } },
+    iso: { select: { id: true, name: true, email: true } },
+    client: true,
 };
 
 // Map Prisma Notification to previous API shape (including nested documentRequestDetails)
@@ -189,62 +215,71 @@ const mapNotificationToApi = (notification: any) => {
 };
 
 class NotificationController {
-    // Send document request notification
+    // Send document request notification (in-app and/or ISO email via SendGrid)
     async sendDocumentRequest(req: Request, res: Response) {
         try {
-            const { applicationId, requestedDocuments, requestAdditional, reason, additionalComments } = req.body;
+            const {
+                applicationId,
+                requestedDocuments,
+                requestAdditional,
+                reason,
+                additionalComments,
+                isoEmail,
+                additionalToEmails,
+                ccEmails,
+            } = req.body;
             const currentUserRole = (req as any).user?.role;
             const isFinalUnderwriter = currentUserRole === 'FINAL_UNDERWRITER';
+            const isIsoEmailRequest = Object.prototype.hasOwnProperty.call(req.body, 'isoEmail');
 
-            // Validate required fields - reason mandatory for Final Underwriter
             if (!applicationId) {
                 return res.status(400).json({
                     success: false,
                     message: 'Application ID is required',
                 });
             }
-            if (isFinalUnderwriter && (!reason || (reason && reason.trim() === ''))) {
+            if (isFinalUnderwriter && (!reason || String(reason).trim() === '')) {
                 return res.status(400).json({
                     success: false,
                     message: 'Reason is required when sending back for documentation',
                 });
             }
 
-            // Ensure requestedDocuments is an array (allow empty array)
-            // Handle cases where requestedDocuments might be undefined, null, or not an array
             let documentsArray: string[] = [];
-            if (requestedDocuments !== undefined && requestedDocuments !== null) {
-                if (Array.isArray(requestedDocuments)) {
-                    documentsArray = requestedDocuments;
-                }
+            if (requestedDocuments !== undefined && requestedDocuments !== null && Array.isArray(requestedDocuments)) {
+                documentsArray = requestedDocuments
+                    .map((d) => String(d || '').trim())
+                    .filter(Boolean);
             }
 
-            // Reason is optional for Underwriter, mandatory for Final Underwriter
-            const reasonText = reason && reason.trim() ? reason.trim() : '';
-            const additionalCommentsText = additionalComments && additionalComments.trim() ? additionalComments.trim() : '';
-            const fullNote = additionalCommentsText ? `${reasonText}\n\nAdditional comments: ${additionalCommentsText}` : reasonText;
+            if (isIsoEmailRequest && documentsArray.length === 0 && !requestAdditional) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Select at least one document type or Request Additional Documents',
+                });
+            }
 
-            // Resolve application by numeric applicationId or UUID id
+            const reasonText = reason && String(reason).trim() ? String(reason).trim() : '';
+            const additionalCommentsText =
+                additionalComments && String(additionalComments).trim()
+                    ? String(additionalComments).trim()
+                    : '';
+            const fullNote = additionalCommentsText
+                ? `${reasonText}\n\nAdditional comments: ${additionalCommentsText}`
+                : reasonText;
+
             const applicationStr = String(applicationId);
             let application = null;
 
             if (/^\d+$/.test(applicationStr)) {
                 application = await prisma.application.findUnique({
                     where: { applicationId: Number(applicationStr) },
-                    include: {
-                        referringAgent: { select: { id: true, firstName: true, lastName: true, email: true } },
-                        salesRepresentative: { select: { id: true, firstName: true, lastName: true, email: true } },
-                        client: true,
-                    },
+                    include: APPLICATION_INCLUDE_FOR_DOCUMENT_REQUEST,
                 });
             } else {
                 application = await prisma.application.findUnique({
                     where: { id: applicationStr },
-                    include: {
-                        referringAgent: { select: { id: true, firstName: true, lastName: true, email: true } },
-                        salesRepresentative: { select: { id: true, firstName: true, lastName: true, email: true } },
-                        client: true,
-                    },
+                    include: APPLICATION_INCLUDE_FOR_DOCUMENT_REQUEST,
                 });
             }
 
@@ -255,7 +290,6 @@ class NotificationController {
                 });
             }
 
-            // Get current user (the one sending the request) first
             const createdBy = (req as any).user?.id;
             if (!createdBy) {
                 return res.status(401).json({
@@ -264,47 +298,40 @@ class NotificationController {
                 });
             }
 
-            // Determine recipient (agent) - prefer referringAgent, fallback to salesRepresentative
-            // If no agent is assigned, use the createdBy user as recipient (for general messages)
-            const recipientId =
-                (application as any).referringAgent?.id ||
-                (application as any).salesRepresentative?.id ||
-                createdBy; // Fallback to the user creating the request
-            
-            if (!recipientId) {
+            const app = application as any;
+            const client = app.client;
+            const clientName =
+                client?.businessName ||
+                `${client?.ownerFirstName || ''} ${client?.ownerLastName || ''}`.trim() ||
+                'Unknown Client';
+            const applicationIdNumber = app.applicationId || 'N/A';
+
+            const primaryIsoEmail = isIsoEmailRequest ? String(isoEmail || '').trim() : '';
+            const extraToEmails = Array.isArray(additionalToEmails)
+                ? additionalToEmails.map((e) => String(e || '').trim()).filter(Boolean)
+                : [];
+            const emailCcList = Array.isArray(ccEmails)
+                ? ccEmails.map((e) => String(e || '').trim()).filter(Boolean)
+                : [];
+            const emailToList = [...(primaryIsoEmail ? [primaryIsoEmail] : []), ...extraToEmails];
+            const uniqueEmailTo = [...new Set(emailToList.map((e) => e.toLowerCase()))].map(
+                (lower) => emailToList.find((e) => e.toLowerCase() === lower) || lower,
+            );
+
+            if (isIsoEmailRequest && uniqueEmailTo.length === 0) {
                 return res.status(400).json({
                     success: false,
-                    message: 'No recipient available for this notification',
+                    message: 'At least one recipient email (ISO To or Additional To) is required',
                 });
             }
 
-            // Get application and client details for the message
-            const clientName = (application as any).client?.business?.name || 
-                             `${(application as any).client?.owner?.firstName || ''} ${(application as any).client?.owner?.lastName || ''}`.trim() ||
-                             'Unknown Client';
-            const applicationIdNumber = (application as any).applicationId || 'N/A';
-
-            // Build notification content
-            const notificationTitle = documentsArray.length > 0
-                ? 'Document Request Required'
-                : isFinalUnderwriter
-                    ? 'Sent Back for Documentation (Final Underwriter)'
-                    : 'Action Required';
-            const notificationMessage = documentsArray.length > 0
-                ? `Document request for Application #${applicationIdNumber} - ${clientName}. Please provide the requested documents.`
-                : fullNote
-                    ? `Action required for Application #${applicationIdNumber} - ${clientName}. ${fullNote}`
-                    : `Action required for Application #${applicationIdNumber} - ${clientName}.`;
-
-            // Collect all recipients: Agent(s) + Underwriters (when Final Underwriter)
-            // Exclude the sender (createdBy) - don't notify yourself
             const recipientIds = new Set<string>();
-            const app = application as any;
             const addIfNotSender = (id: string) => {
                 const sid = String(id);
                 if (sid && sid !== String(createdBy)) recipientIds.add(sid);
             };
-            addIfNotSender(recipientId);
+            const agentRecipientId = app.referringAgent?.id || app.salesRepresentative?.id;
+            if (agentRecipientId) addIfNotSender(agentRecipientId);
             if (app.referringAgentId) addIfNotSender(app.referringAgentId);
             if (app.salesRepresentativeId) addIfNotSender(app.salesRepresentativeId);
             if (isFinalUnderwriter) {
@@ -315,61 +342,101 @@ class NotificationController {
                 underwriters.forEach((u) => addIfNotSender(u.id));
             }
 
-            if (recipientIds.size === 0) {
+            if (recipientIds.size === 0 && uniqueEmailTo.length === 0) {
                 return res.status(400).json({
                     success: false,
                     message: 'No recipient available for this notification',
                 });
             }
 
-            // Create one notification per recipient (so Agent and Underwriters all get notified)
+            const notificationTitle =
+                documentsArray.length > 0
+                    ? 'Document Request Required'
+                    : isFinalUnderwriter
+                      ? 'Sent Back for Documentation (Final Underwriter)'
+                      : 'Action Required';
+            const notificationMessage =
+                documentsArray.length > 0
+                    ? `Document request for Application #${applicationIdNumber} - ${clientName}. Please provide the requested documents.`
+                    : fullNote
+                      ? `Action required for Application #${applicationIdNumber} - ${clientName}. ${fullNote}`
+                      : `Action required for Application #${applicationIdNumber} - ${clientName}.`;
+
             const notificationData = {
                 title: notificationTitle,
                 message: notificationMessage,
                 type: 'document_request',
                 applicationId: application.id,
-                documentRequestedDocuments: (documentsArray || []).map((d) => String(d || '').trim()).filter(Boolean),
+                documentRequestedDocuments: documentsArray,
                 documentRequestAdditional: requestAdditional || false,
                 createdById: createdBy,
             };
+
             let firstNotification: { id: string } | null = null;
-            for (const recId of recipientIds) {
-                const created = await prisma.notification.create({
-                    data: { ...notificationData, recipientId: String(recId) },
-                });
-                if (!firstNotification) firstNotification = created;
+            if (recipientIds.size > 0) {
+                for (const recId of recipientIds) {
+                    const created = await prisma.notification.create({
+                        data: { ...notificationData, recipientId: String(recId) },
+                    });
+                    if (!firstNotification) firstNotification = created;
+                }
             }
 
-            // Update application: note, and queue/state for Final Underwriter
             const appUpdateData: { note?: string; currentQueue?: string; currentState?: string } = {};
             if (fullNote) appUpdateData.note = fullNote;
             if (isFinalUnderwriter) {
                 appUpdateData.currentQueue = 'Underwriting';
                 appUpdateData.currentState = 'In Progress';
             }
-            let applicationToUpdate;
+
             if (Object.keys(appUpdateData).length > 0) {
-                applicationToUpdate = await prisma.application.update({
+                await prisma.application.update({
                     where: { id: application.id },
                     data: appUpdateData,
                 });
-            } else {
-                applicationToUpdate = await prisma.application.findUnique({
-                    where: { id: application.id },
-                });
-            }
-            
-            // Log application update (only if applicationToUpdate exists)
-            if (applicationToUpdate) {
-                console.log('Application note updated and saved successfully:', {
-                    applicationId: applicationToUpdate.applicationId,
-                    note: applicationToUpdate.note,
-                    noteLength: applicationToUpdate.note?.length,
-                    noteValue: applicationToUpdate.note
-                });
             }
 
-            // Best-effort application activity log for document request
+            if (isIsoEmailRequest && app.isoId && primaryIsoEmail) {
+                try {
+                    await prisma.iso.update({
+                        where: { id: app.isoId },
+                        data: { email: primaryIsoEmail },
+                    });
+                } catch (isoUpdateErr) {
+                    console.error('Failed to persist ISO email after document request:', isoUpdateErr);
+                }
+            }
+
+            let emailSent = false;
+            let emailError: string | undefined;
+            const emailedTo: string[] = [];
+            const emailedCc: string[] = [];
+
+            if (isIsoEmailRequest && uniqueEmailTo.length > 0) {
+                const crmBase = resolveCrmFrontendBaseUrl();
+                const businessApplicationId = app.applicationId ?? applicationIdNumber;
+                const viewApplicationUrl = crmBase
+                    ? `${crmBase.replace(/\/$/, '')}/application-details/${businessApplicationId}/documents`
+                    : undefined;
+                const emailResult = await sendDocumentRequestEmail({
+                    to: uniqueEmailTo,
+                    cc: emailCcList,
+                    isoName: app.iso?.name || undefined,
+                    clientName,
+                    applicationNumber: applicationIdNumber,
+                    requestedDocumentLabels: humanizeDocumentRequestLabels(documentsArray),
+                    requestAdditional: Boolean(requestAdditional),
+                    note: reasonText || undefined,
+                    viewApplicationUrl,
+                });
+                emailSent = emailResult.sent;
+                emailError = emailResult.error;
+                if (emailSent) {
+                    emailedTo.push(...uniqueEmailTo);
+                    emailedCc.push(...emailCcList);
+                }
+            }
+
             try {
                 const authUserForLog = {
                     id: createdBy,
@@ -379,6 +446,12 @@ class NotificationController {
                     ? String(authUserForLog.role).toUpperCase().replace(/_/g, ' ')
                     : 'User';
                 const actorName = (req as any).user?.name || '';
+                const recipientLabel = isIsoEmailRequest ? 'the ISO' : 'the client';
+
+                const refreshedForLog = await prisma.application.findUnique({
+                    where: { id: application.id },
+                    select: { currentQueue: true, currentState: true },
+                });
 
                 await prisma.applicationActivityLog.create({
                     data: {
@@ -387,16 +460,20 @@ class NotificationController {
                         userRole: authUserForLog.role as any,
                         actionType: 'DOCUMENT_REQUESTED',
                         actionDescription:
-                            `${roleLabel} ${actorName}`.trim() + ' requested additional documents from the client.',
-                        previousStatus: `${(application as any).currentQueue} / ${(application as any).currentState}`,
-                        currentStatus: `${(applicationToUpdate as any)?.currentQueue ?? (application as any).currentQueue} / ${
-                            (applicationToUpdate as any)?.currentState ?? (application as any).currentState
+                            `${roleLabel} ${actorName}`.trim() +
+                            ` requested additional documents from ${recipientLabel}.`,
+                        previousStatus: `${app.currentQueue} / ${app.currentState}`,
+                        currentStatus: `${refreshedForLog?.currentQueue ?? app.currentQueue} / ${
+                            refreshedForLog?.currentState ?? app.currentState
                         }`,
                         metadata: {
                             requestedDocuments: documentsArray,
                             requestAdditional: requestAdditional || false,
                             reason: reasonText,
                             additionalComments: additionalCommentsText,
+                            emailedTo,
+                            emailedCc,
+                            documentRequestEmailSent: emailSent,
                         } as any,
                     },
                 });
@@ -404,19 +481,15 @@ class NotificationController {
                 console.error('Failed to create application activity log for document request:', logError);
             }
 
-            // Fetch the updated application with all relations for the response
             const updatedApplicationRecord = await prisma.application.findUnique({
                 where: { id: application.id },
                 include: {
-                    referringAgent: { select: { id: true, firstName: true, lastName: true, email: true } },
-                    salesRepresentative: { select: { id: true, firstName: true, lastName: true, email: true } },
+                    ...APPLICATION_INCLUDE_FOR_DOCUMENT_REQUEST,
                     createdBy: { select: { id: true, firstName: true, lastName: true, email: true } },
-                    client: true,
                     files: true,
                 },
             });
 
-            // Populate the notification before sending (use first created for API response)
             const notification = firstNotification;
             const populatedNotificationRecord = notification
                 ? await prisma.notification.findUnique({
@@ -424,23 +497,57 @@ class NotificationController {
                       include: {
                           recipient: { select: { id: true, firstName: true, lastName: true, email: true } },
                           application: {
-                              select: { id: true, applicationId: true, priority: true, type: true, currentQueue: true, currentState: true },
+                              select: {
+                                  id: true,
+                                  applicationId: true,
+                                  priority: true,
+                                  type: true,
+                                  currentQueue: true,
+                                  currentState: true,
+                              },
                           },
                           createdBy: { select: { id: true, firstName: true, lastName: true, email: true } },
                       },
                   })
                 : null;
 
-            const populatedNotification = populatedNotificationRecord ? mapNotificationToApi(populatedNotificationRecord) : null;
+            const populatedNotification = populatedNotificationRecord
+                ? mapNotificationToApi(populatedNotificationRecord)
+                : null;
+            const mappedApplication = updatedApplicationRecord
+                ? mapApplicationToApi(updatedApplicationRecord)
+                : null;
 
-            // Map the updated application to API format
-            const mappedApplication = updatedApplicationRecord ? mapApplicationToApi(updatedApplicationRecord) : null;
+            let message = 'Document request notification sent successfully';
+            if (emailSent && recipientIds.size > 0) {
+                message =
+                    'Document request emailed to ISO and in-app notification sent successfully';
+            } else if (emailSent) {
+                message = 'Document request sent to ISO by email';
+            }
+
+            if (isIsoEmailRequest && uniqueEmailTo.length > 0 && !emailSent) {
+                return res.status(502).json({
+                    success: false,
+                    message: `Document request saved but ISO email was not sent: ${emailError || 'Unknown error'}`,
+                    data: populatedNotification,
+                    application: mappedApplication,
+                    emailSent: false,
+                    emailError: emailError || 'Unknown error',
+                    emailedTo,
+                    emailedCc,
+                });
+            }
 
             return res.status(201).json({
                 success: true,
-                message: 'Document request notification sent successfully',
+                message,
                 data: populatedNotification,
                 application: mappedApplication,
+                emailSent,
+                emailError: emailError || undefined,
+                emailedTo,
+                emailedCc,
             });
         } catch (error: any) {
             console.error('Send document request notification error:', error?.message || error, error?.stack);
@@ -868,6 +975,10 @@ class NotificationController {
                 });
             }
 
+            const fulfillmentContext = await loadDocumentRequestFulfillmentContext(application.id);
+            const applicationFiles = fulfillmentContext?.applicationFiles ?? application.files ?? [];
+            const contractFiles = fulfillmentContext?.contractFiles ?? [];
+
             // Get all document request notifications for this application
             const notificationsRecords = await prisma.notification.findMany({
                 where: {
@@ -875,31 +986,60 @@ class NotificationController {
                     type: 'document_request',
                 },
                 orderBy: { createdAt: 'desc' },
+                include: {
+                    createdBy: {
+                        select: { id: true, firstName: true, lastName: true, email: true },
+                    },
+                },
             });
 
             // Extract all unique requested documents and their status
-            const documentMap = new Map<string, { status: 'Complete' | 'Pending'; createdAt: Date; requestedBy?: any; message?: string }>();
-            const generalRequests: { name: string; status: 'Pending'; createdAt: Date; requestedBy?: any; message?: string }[] = [];
+            const documentMap = new Map<
+                string,
+                {
+                    status: 'Complete' | 'Pending';
+                    createdAt: Date;
+                    requestedBy?: any;
+                    message?: string;
+                    label?: string;
+                    fileUrl?: string;
+                    fileId?: string;
+                    contractUploadKey?: string;
+                }
+            >();
+            const generalRequests: {
+                name: string;
+                status: 'Pending';
+                createdAt: Date;
+                requestedBy?: any;
+                message?: string;
+            }[] = [];
 
             notificationsRecords.forEach((notification: any) => {
                 const requestedDocs = notification.documentRequestedDocuments || [];
 
                 // Specific document requests
-                requestedDocs.forEach((docName: string) => {
-                    const isUploaded = application.files?.some((file: any) => {
-                        const fileName = file.originalName?.toLowerCase() || '';
-                        const docNameLower = docName.toLowerCase();
-                        return fileName.includes(docNameLower) || docNameLower.includes(fileName.split('.')[0]);
+                requestedDocs.forEach((docSlug: string) => {
+                    const config = getDocumentRequestConfig(docSlug);
+                    const fulfilled = findFulfilledDocumentForRequest(docSlug, {
+                        applicationFiles,
+                        contractFiles,
                     });
+                    const isUploaded = fulfilled != null;
 
                     if (
-                        !documentMap.has(docName) ||
-                        (documentMap.get(docName)?.createdAt && notification.createdAt > documentMap.get(docName)!.createdAt)
+                        !documentMap.has(docSlug) ||
+                        (documentMap.get(docSlug)?.createdAt &&
+                            notification.createdAt > documentMap.get(docSlug)!.createdAt)
                     ) {
-                        documentMap.set(docName, {
+                        documentMap.set(docSlug, {
                             status: isUploaded ? 'Complete' : 'Pending',
                             createdAt: notification.createdAt,
                             requestedBy: notification.createdBy,
+                            label: config?.label,
+                            fileUrl: fulfilled?.url,
+                            fileId: fulfilled?.fileId,
+                            contractUploadKey: config?.contractUploadKey,
                         });
                     }
                 });
@@ -919,10 +1059,14 @@ class NotificationController {
             // Convert map to array, then append general requests (Final Underwriter send-back)
             const documents = Array.from(documentMap.entries()).map(([name, data]) => ({
                 name,
+                label: data.label,
                 status: data.status,
                 createdAt: data.createdAt,
                 requestedBy: data.requestedBy,
                 message: data.message,
+                fileUrl: data.fileUrl,
+                fileId: data.fileId,
+                contractUploadKey: data.contractUploadKey,
             }));
 
             // Add general requests (sorted by createdAt desc)

@@ -36,6 +36,8 @@ export type DocumentLayout = {
   key: string;
   name: string;
   description?: string;
+  /** When true, do not mirror primary initials for owner 2 (standalone ACH send). */
+  skipOwner2InitialMirror?: boolean;
   legacyDocuSignTemplateId?: string;
   pdf?: {
     source: 'contractTemplate' | 'boldSignTemplate';

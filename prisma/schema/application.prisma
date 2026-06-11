@@ -263,17 +263,19 @@ model BusinessInfo {
 }
 
 model ApplicationFile {
-  id            String      @id @default(uuid()) @db.Uuid
-  applicationId String      @db.Uuid
-  url           String
-  publicId      String
-  originalName  String?
-  mimeType      String?
-  size          Int?
-  uploadedAt    DateTime    @default(now())
-  application   Application @relation(fields: [applicationId], references: [id])
+  id                    String      @id @default(uuid()) @db.Uuid
+  applicationId         String      @db.Uuid
+  url                   String
+  publicId              String
+  originalName          String?
+  mimeType              String?
+  size                  Int?
+  requestedDocumentSlug String?
+  uploadedAt            DateTime    @default(now())
+  application           Application @relation(fields: [applicationId], references: [id])
 
   @@index([applicationId])
+  @@index([requestedDocumentSlug])
 }
 
 model FundingInfo {

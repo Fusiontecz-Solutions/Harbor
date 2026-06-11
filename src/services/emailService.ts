@@ -1,5 +1,7 @@
+import fs from 'fs';
 import path from 'path';
-import sendMail, { isOutboundSmtpConfigured } from '../config/nodemailer';
+import sendMail, { isOutboundSmtpConfigured, sendSendGridMail } from '../config/nodemailer';
+import { resolveEmailBrandDisplayName } from '../constants/emailBrand';
 import {
   resolveCrmFrontendBaseUrl,
   resolveDecisionLogicInvitationBaseUrl,
@@ -21,10 +23,28 @@ const BRAND_DARK_LOGO_PATH = path.join(BRAND_ASSETS_DIR, 'katan_dark_theme_logo.
 const BRAND_LIGHT_LOGO_CID = 'brand-logo-light@finexusai';
 const BRAND_DARK_LOGO_CID = 'brand-logo-dark@finexusai';
 
+const DEFAULT_BRAND_NAME = resolveEmailBrandDisplayName();
+
+function brandLogoFileExists(filePath: string): boolean {
+    try {
+        return fs.existsSync(filePath);
+    } catch {
+        return false;
+    }
+}
+
+export function hasBrandLogoAssets(): boolean {
+    return (
+        brandLogoFileExists(BRAND_LIGHT_LOGO_PATH) ||
+        brandLogoFileExists(BRAND_DARK_LOGO_PATH)
+    );
+}
+
 /**
  * Inline attachments (Content-ID) for the katan logo. Pass these to
  * `sendMail` whenever the HTML body contains the brand header so the
  * `cid:...` references in the markup resolve to real images.
+ * Skips files that are not on disk so SMTP send does not fail with ENOENT.
  */
 export function buildBrandLogoAttachments(): Array<{
     filename: false;
@@ -33,22 +53,43 @@ export function buildBrandLogoAttachments(): Array<{
     contentType: string;
     contentDisposition: 'inline';
 }> {
-    return [
-        {
+    const attachments: Array<{
+        filename: false;
+        path: string;
+        cid: string;
+        contentType: string;
+        contentDisposition: 'inline';
+    }> = [];
+
+    if (brandLogoFileExists(BRAND_LIGHT_LOGO_PATH)) {
+        attachments.push({
             filename: false,
             path: BRAND_LIGHT_LOGO_PATH,
             cid: BRAND_LIGHT_LOGO_CID,
             contentType: 'image/png',
             contentDisposition: 'inline',
-        },
-        {
+        });
+    }
+
+    if (brandLogoFileExists(BRAND_DARK_LOGO_PATH)) {
+        attachments.push({
             filename: false,
             path: BRAND_DARK_LOGO_PATH,
             cid: BRAND_DARK_LOGO_CID,
             contentType: 'image/png',
             contentDisposition: 'inline',
-        },
-    ];
+        });
+    }
+
+    if (!attachments.length) {
+        // eslint-disable-next-line no-console
+        console.warn(
+            '[email] Brand logo files not found under public/. Emails will use a text header instead. Expected:',
+            BRAND_LIGHT_LOGO_PATH,
+        );
+    }
+
+    return attachments;
 }
 
 /**
@@ -62,6 +103,17 @@ export function buildBrandLogoAttachments(): Array<{
  * `<span>FinexusAI</span>` row used to live.
  */
 function buildBrandHeaderRowHtml(): string {
+    if (!hasBrandLogoAssets()) {
+        return `
+                    <tr>
+                        <td align="center" style="padding: 20px 24px 8px;">
+                            <p style="margin:0; color:#276D9C; font-size:22px; font-weight:700; font-family: Arial, Helvetica, sans-serif; letter-spacing:0.02em;">
+                                ${DEFAULT_BRAND_NAME}
+                            </p>
+                        </td>
+                    </tr>`;
+    }
+
     return `
                     <tr>
                         <td align="center" style="padding: 6px 16px 0; line-height: 0; font-size: 0;">
@@ -1471,5 +1523,143 @@ export async function sendDecisionLogicEmail(
     </div>
   `;
     await sendMail(to, subject, html);
+}
+
+export {
+    DOCUMENT_REQUEST_LABELS,
+    humanizeDocumentRequestLabels,
+} from '../constants/documentRequestTypes';
+
+function humanizeSendGridErrorMessage(error: unknown): string {
+    const raw =
+        (error as { message?: string })?.message ||
+        (error as { response?: string })?.response ||
+        String(error || 'Unknown email error');
+    if (/maximum credits exceeded/i.test(raw) || /\b451\b/.test(raw)) {
+        return 'SendGrid account has exceeded its email credits. Add credits in your SendGrid billing settings and try again.';
+    }
+    return raw;
+}
+
+export interface SendDocumentRequestEmailParams {
+    to: string[];
+    cc?: string[];
+    isoName?: string;
+    clientName: string;
+    applicationNumber: string | number;
+    requestedDocumentLabels: string[];
+    requestAdditional?: boolean;
+    note?: string;
+    viewApplicationUrl?: string;
+}
+
+export function buildDocumentRequestEmailHtml({
+    isoName,
+    clientName,
+    applicationNumber,
+    requestedDocumentLabels,
+    requestAdditional,
+    note,
+    viewApplicationUrl,
+}: Omit<SendDocumentRequestEmailParams, 'to' | 'cc'>): string {
+    const safeIsoName = String(isoName || '').trim() || 'ISO Partner';
+    const safeClientName = String(clientName || '').trim() || 'Client';
+    const safeAppNumber = String(applicationNumber || '').trim() || 'N/A';
+    const applicationHref =
+        viewApplicationUrl && /\/documents$/i.test(viewApplicationUrl.trim())
+            ? viewApplicationUrl.trim()
+            : withApplicationDetailsOverviewHref(viewApplicationUrl);
+
+    const docItems = [...(requestedDocumentLabels || [])];
+    if (requestAdditional) {
+        docItems.push('Additional documents (as discussed)');
+    }
+    const docListHtml =
+        docItems.length > 0
+            ? `<ul style="margin:12px 0; padding-left:20px; color:#374151; font-size:14px; line-height:1.6;">
+                ${docItems.map((label) => `<li style="margin-bottom:6px;">${label}</li>`).join('')}
+               </ul>`
+            : `<p style="margin:12px 0; color:#374151; font-size:14px;">Additional documents are required for this application.</p>`;
+
+    const noteBlock =
+        note && String(note).trim()
+            ? `<p style="margin:16px 0 0; padding:12px 14px; background:#f9fafb; border-left:3px solid #276D9C; color:#374151; font-size:14px; line-height:1.6;"><strong>Note from underwriting:</strong><br/>${String(note).trim().replace(/\n/g, '<br/>')}</p>`
+            : '';
+
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Document Request</title>
+    ${buildBrandHeaderStyles()}
+</head>
+<body style="margin:0; padding:0; background:#f4f7f9; font-family: Arial, Helvetica, sans-serif;">
+    <table border="0" cellpadding="0" cellspacing="0" width="100%">
+        <tr>
+            <td style="padding: 20px 0;">
+                <table align="center" border="0" cellpadding="0" cellspacing="0" width="600" style="background:#ffffff; border:1px solid #e5e7eb;">
+                    ${buildBrandHeaderRowHtml()}
+                    <tr>
+                        <td style="padding: 20px 24px 8px;">
+                            <h2 style="margin:0; color:#111827; font-size:22px;">Document Request</h2>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style="padding: 0 24px 20px; color:#374151; font-size:14px; line-height:1.6;">
+                            <p style="margin: 0 0 12px;">Hi ${safeIsoName},</p>
+                            <p style="margin: 0 0 12px;">
+                                We need additional documents for <strong>${safeClientName}</strong> (Application <strong>#${safeAppNumber}</strong>).
+                            </p>
+                            <p style="margin: 0 0 4px; font-weight:600; color:#111827;">Requested documents:</p>
+                            ${docListHtml}
+                            ${noteBlock}
+                            <p style="margin: 20px 0 0; text-align:center;">
+                                <a href="${applicationHref}" style="display:inline-block; background:#276D9C; color:#ffffff; text-decoration:none; font-weight:600; font-size:14px; padding:12px 24px; border-radius:6px;">Upload requested documents</a>
+                            </p>
+                            <p style="margin: 20px 0 0; font-size:12px; color:#6b7280; line-height:1.5;">
+                                Open the link above, go to the <strong>Documents</strong> tab, and upload each requested item.
+                                Underwriting will be notified automatically when files are received.
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>`;
+}
+
+/** Send ISO document-request email via SendGrid SMTP only. */
+export async function sendDocumentRequestEmail(
+    params: SendDocumentRequestEmailParams,
+): Promise<{ sent: boolean; error?: string }> {
+    const toList = (params.to || []).map((e) => String(e || '').trim()).filter(Boolean);
+    if (!toList.length) {
+        return { sent: false, error: 'No recipient email addresses provided.' };
+    }
+
+    const ccList = (params.cc || []).map((e) => String(e || '').trim()).filter(Boolean);
+    const subject = `Document request — Application #${params.applicationNumber}`;
+    const html = buildDocumentRequestEmailHtml(params);
+
+    try {
+        const attachments = buildBrandLogoAttachments();
+        await sendSendGridMail({
+            to: toList,
+            cc: ccList.length ? ccList : undefined,
+            subject,
+            html,
+            ...(attachments.length ? { attachments } : {}),
+        });
+        return { sent: true };
+    } catch (error) {
+        const errorMessage = humanizeSendGridErrorMessage(error);
+        // eslint-disable-next-line no-console
+        console.error('[email] Document request email send failed:', { to: toList, error });
+        return { sent: false, error: errorMessage };
+    }
 }
 

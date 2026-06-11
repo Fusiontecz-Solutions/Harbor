@@ -1,11 +1,11 @@
 import type { Prisma } from '@prisma/client';
-import prisma from '../config/prismaClient';
-import { createApplicationActivityLog } from './applicationActivityLogService';
-import type { AuthenticatedUser } from './applicationService';
+import prisma from '../../config/prismaClient';
+import { createApplicationActivityLog } from '../applicationActivityLogService';
+import type { AuthenticatedUser } from '../applicationService';
 import {
     enqueueApplicationApprovalSideEffects,
     isApplicationApprovalQueueEnabled,
-} from '../queues/applicationApprovalQueue';
+} from '../../queues/applicationApprovalQueue';
 
 /* ============================================================================
  * Application Approval domain service
@@ -299,7 +299,7 @@ export interface ApprovalSideEffectPayload {
 
 function dispatchApprovalSideEffects(payload: ApprovalSideEffectPayload): void {
     if (isApplicationApprovalQueueEnabled()) {
-        enqueueApplicationApprovalSideEffects(payload).catch((err) => {
+        enqueueApplicationApprovalSideEffects(payload).catch((err: unknown) => {
             console.error(
                 '[applicationApprovalService] enqueue failed; falling back to inline fan-out:',
                 err
@@ -324,7 +324,7 @@ function dispatchApprovalSideEffects(payload: ApprovalSideEffectPayload): void {
 async function runApprovalSideEffectsInline(payload: ApprovalSideEffectPayload): Promise<void> {
     try {
         const { processApplicationApprovalSideEffects } = await import(
-            './applicationApprovalSideEffects'
+            '../applicationApprovalSideEffects'
         );
         await processApplicationApprovalSideEffects(payload);
     } catch (err) {

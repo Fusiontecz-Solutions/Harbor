@@ -13,6 +13,7 @@ import type { DocumentLayout } from './convert-docusign-template-export';
 import {
   buildEnvelopeFromLayouts,
   prefillFieldsToValueMap,
+  renderFlattenedLayoutPdf,
   type LayoutSignerInput,
 } from './build-envelope-from-layout';
 import { fetchPdfAsBase64, resolveTemplateRefForMerge } from './merge-template-resolve';
@@ -242,17 +243,28 @@ export async function resolveSupplementalRefsFromDb(filters: {
 
 export async function buildPlatformLayoutEnvelopeDefinition(options: {
   supplementalRefs?: string[];
+  /** When false, envelope contains only supplemental layouts (e.g. standalone ACH). */
+  includeMainContract?: boolean;
   roles: Array<Record<string, unknown>>;
   prefillFields?: Array<{ id: string; value: string }>;
   ownerCount?: number;
   guarantorCount?: number;
   title?: string;
   message?: string;
+  /** Burn prefill into PDF at create (auto-send). Draft review keeps editable tabs. */
+  flattenPrefillInPdf?: boolean;
+  lockDataTabs?: boolean;
 }) {
-  const layouts: DocumentLayoutWithBase64[] = [await loadLatestContractLayoutPackage()];
-
+  const includeMainContract = options.includeMainContract !== false;
+  const layouts: DocumentLayoutWithBase64[] = [];
+  if (includeMainContract) {
+    layouts.push(await loadLatestContractLayoutPackage());
+  }
   for (const ref of options.supplementalRefs || []) {
     layouts.push(await loadSupplementalLayoutPackage(ref));
+  }
+  if (!layouts.length) {
+    throw new Error('At least one document layout is required.');
   }
 
   const ownerCount = options.ownerCount ?? countOwnersFromRoles(options.roles);
@@ -265,22 +277,56 @@ export async function buildPlatformLayoutEnvelopeDefinition(options: {
     options.guarantorCount ??
     (ownerCount >= 2 ? 2 : countGuarantorsFromRoles(options.roles));
   const values = prefillFieldsToValueMap(options.prefillFields || []);
+  const partyCounts = { ownerCount, guarantorCount };
+
+  const shouldFlatten = options.flattenPrefillInPdf === true;
+  const flattenedLayouts: DocumentLayoutWithBase64[] = [];
+  let flattenedLayoutCount = 0;
+  if (shouldFlatten) {
+    for (const layout of layouts) {
+      try {
+        const buf = await renderFlattenedLayoutPdf(layout, values, partyCounts);
+        if (buf?.length) {
+          flattenedLayouts.push({
+            ...layout,
+            documentBase64: buf.toString('base64'),
+          });
+          flattenedLayoutCount += 1;
+          continue;
+        }
+      } catch (err) {
+        console.warn(
+          `[DocuSign] flatten prefill into PDF failed for layout "${layout.key}":`,
+          err,
+        );
+      }
+      flattenedLayouts.push(layout);
+    }
+  } else {
+    flattenedLayouts.push(...layouts);
+  }
+  const prefillFlattenedInPdf =
+    shouldFlatten && layouts.length > 0 && flattenedLayoutCount === layouts.length;
 
   const envelope = buildEnvelopeFromLayouts({
-    layouts,
+    layouts: flattenedLayouts,
     values,
     signers,
     ownerCount,
     guarantorCount,
+    skipTextDateTabs: prefillFlattenedInPdf,
+    lockDataTabs: options.lockDataTabs === true,
   });
 
-  const createTimePrefillTabCount = envelope.recipients.signers.reduce(
-    (sum, s) =>
-      sum +
-      (s.tabs?.textTabs?.length || 0) +
-      (s.tabs?.dateTabs?.length || 0),
-    0,
-  );
+  const createTimePrefillTabCount = prefillFlattenedInPdf
+    ? 0
+    : envelope.recipients.signers.reduce(
+        (sum, s) =>
+          sum +
+          (s.tabs?.textTabs?.length || 0) +
+          (s.tabs?.dateTabs?.length || 0),
+        0,
+      );
 
   return {
     envelopeDefinition: {
@@ -289,6 +335,7 @@ export async function buildPlatformLayoutEnvelopeDefinition(options: {
       emailBlurb: options.message || '',
     },
     createTimePrefillTabCount,
+    prefillFlattenedInPdf,
     layoutKeys: layouts.map((l) => l.key),
   };
 }

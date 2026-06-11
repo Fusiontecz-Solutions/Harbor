@@ -1126,6 +1126,22 @@ class ContractController {
 
       const data = await contractService.uploadContractDocuments(contractId, reqFiles);
 
+      const uploadedByUserId = String((req as any).user?.id || '').trim();
+      if (uploadedByUserId) {
+        try {
+          const { notifyForContractDocumentUpload } = await import(
+            '../services/documentRequestFulfillmentService'
+          );
+          await notifyForContractDocumentUpload({
+            contractId,
+            contractUploadKeys: Object.keys(reqFiles || {}),
+            uploadedByUserId,
+          });
+        } catch (notifyErr) {
+          console.error('Failed to notify contract document request fulfillment:', notifyErr);
+        }
+      }
+
       return res.status(201).json({
         success: true,
         message: 'Contract documents uploaded successfully',

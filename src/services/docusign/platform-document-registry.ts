@@ -52,6 +52,13 @@ export const PLATFORM_DOCUMENTS: Record<DocumentLayoutKey, PlatformDocumentDefin
     pdfUrlEnvKey: 'PLATFORM_ACH_AUTHORIZATION_PDF_URL',
     localPdfFileName: 'KATAN_CAPITAL_LLC_-_ACH_FORM.pdf',
   },
+  [DOCUMENT_LAYOUT_KEYS.achAuthorizationStandalone]: {
+    layoutKey: DOCUMENT_LAYOUT_KEYS.achAuthorizationStandalone,
+    name: 'Katan LLC ACH Authorization (standalone)',
+    type: 'ach_authorization',
+    pdfUrlEnvKey: 'PLATFORM_ACH_AUTHORIZATION_PDF_URL',
+    localPdfFileName: 'KATAN_CAPITAL_LLC_-_ACH_FORM.pdf',
+  },
 };
 
 /** Supplemental documents available in the addendum picker (excludes main contract). */

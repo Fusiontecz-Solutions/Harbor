@@ -56,7 +56,8 @@ export const DOCUSIGN_SINGLE_SIGNER_ONLY =
   String(process.env.DOCUSIGN_SINGLE_SIGNER_ONLY || 'true').trim().toLowerCase() !== 'false';
 
 /**
- * When true (default), lock text/number/list/etc. tabs on signers so receivers can sign only.
+ * When true (default), lock text/number/list/etc. tabs when the envelope is sent so signers
+ * can only sign. Draft / Sender View review keeps fields editable until send.
  */
 export const DOCUSIGN_LOCK_SIGNER_DATA_TABS =
   String(process.env.DOCUSIGN_LOCK_SIGNER_DATA_TABS || 'true').trim().toLowerCase() !== 'false';
