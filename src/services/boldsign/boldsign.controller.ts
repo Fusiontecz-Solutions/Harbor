@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import { BoldSignService } from './boldsign.service';
 import prisma from '../../config/prismaClient';
 import { verifyWebhookSignature } from './utils/boldsign-webhook';
+import { recordCommunicationAudit } from '../systemActivityLogService';
 
 const boldSignService = new BoldSignService();
 
@@ -81,6 +82,23 @@ export const sendDocumentForSigning = async (req: Request, res: Response) => {
       ccEmails: ccEmails || [],
     });
 
+    try {
+      const applicationId =
+        typeof req.body.applicationId === 'string' ? req.body.applicationId : null;
+      await recordCommunicationAudit(req, {
+        applicationId,
+        channel: 'DOCUMENT',
+        recipientType: 'MERCHANT',
+        recipient: `${signerName} <${signerEmail}>`,
+        subject: title || 'Document for signing',
+        body: message || null,
+        documentName: title || 'Contract document',
+        actionDescription: `Document sent for signing to ${signerName} (${signerEmail})`,
+      });
+    } catch (auditErr) {
+      console.error('[boldsign] audit log failed:', auditErr);
+    }
+
     return res.json(result);
   } catch (error: any) {
     console.error('BoldSign sendDocumentForSigning error:', error);
@@ -158,6 +176,26 @@ export const sendTemplate = async (req: Request, res: Response) => {
       roleRemovalIndices,
       applicationId,
     });
+
+    try {
+      const recipient =
+        roles?.length > 0
+          ? roles.map((r: { name?: string; email?: string }) => `${r.name ?? ''} <${r.email ?? ''}>`).join(', ')
+          : `${signerName} <${signerEmail}>`;
+      await recordCommunicationAudit(req, {
+        applicationId: typeof applicationId === 'string' ? applicationId : null,
+        channel: 'DOCUMENT',
+        recipientType: 'CLIENT',
+        recipient,
+        subject: title || 'BoldSign template',
+        body: message || null,
+        templateName: templateId || title || 'BoldSign template',
+        documentName: title || 'Signing template',
+        actionDescription: `Signing template sent to ${recipient}`,
+      });
+    } catch (auditErr) {
+      console.error('[boldsign sendTemplate] audit log failed:', auditErr);
+    }
 
     return res.json(result);
   } catch (error: any) {

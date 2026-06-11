@@ -1,9 +1,6 @@
 import { Prisma } from '@prisma/client';
 import prisma from '../config/prismaClient';
-import {
-    buildAgentApplicationVisibilitySql,
-    type AuthenticatedUser,
-} from './applicationService';
+import type { AuthenticatedUser } from './applicationService';
 
 export type ApplicationStatsBucket = {
     count: number;
@@ -35,7 +32,7 @@ function normalizeRoleKey(role: string | null | undefined): string {
 }
 
 /** `currentQueue` label for “assigned to my role” dashboard card (must match DB values). */
-function primaryWorkflowQueueForRole(roleRaw: string | null | undefined): string | null {
+export function primaryWorkflowQueueForRole(roleRaw: string | null | undefined): string | null {
     const r = normalizeRoleKey(roleRaw);
     if (r === 'AGENT') return 'Agent';
     if (r === 'UNDERWRITER') return 'Underwriter';
@@ -53,19 +50,19 @@ const stateNorm = Prisma.sql`UPPER(REPLACE(TRIM(COALESCE("currentState", '')), '
 const queueNorm = Prisma.sql`LOWER(REGEXP_REPLACE(TRIM(COALESCE("currentQueue", '')), '[^a-zA-Z0-9]+', '', 'g'))`;
 
 /** Funded: terminal funded marker by queue (normalized) or state (aligned with workflow + legacy Approved+COMPLETED). */
-const fundedPredicate = Prisma.sql`(
+export const fundedPredicate = Prisma.sql`(
   (${queueNorm}) = 'funded'
   OR (${stateNorm}) IN ('FUNDED', 'COMPLETED')
   OR ((${queueNorm}) = 'approved' AND (${stateNorm}) = 'COMPLETED')
 )`;
 
 /** Approved card: `currentState` only — literal approved (API/DB), not CONTRACTS_OUT or other post-approval states. */
-const approvedPredicate = Prisma.sql`(
+export const approvedPredicate = Prisma.sql`(
   (${stateNorm}) = 'APPROVED'
   OR LOWER(TRIM(COALESCE("currentState", ''))) = 'approved'
 )`;
 
-const rejectedPredicate = Prisma.sql`(${queueNorm}) = 'declined'`;
+export const rejectedPredicate = Prisma.sql`(${queueNorm}) = 'declined'`;
 
 /**
  * Pending pipeline: **currentQueue only** (normalized). Aligns with workflow stages that map to
@@ -150,7 +147,7 @@ export function buildUnderwriterStatsClaimSql(
     return Prisma.sql`TRUE`;
 }
 
-function buildStatsWhereSql(
+export function buildStatsWhereSql(
     _roleRaw: string | null | undefined,
     start: Date | null,
     end: Date | null,
@@ -179,7 +176,7 @@ function buildStatsWhereSql(
  * Amount used for dashboard totals when `loanAmount` is unset (common on funded deals
  * where the number lives on `OfferDecision.offer` or `Contract.approvedAmount`).
  */
-const applicationDealAmountSelectSql = Prisma.sql`
+export const applicationDealAmountSelectSql = Prisma.sql`
   COALESCE(
     a."loanAmount",
     od."offer"::double precision,
@@ -231,11 +228,7 @@ export async function aggregateApplicationStats(params: {
         params.underwriterClaim,
         params.authUser?.id ?? null,
     );
-    const agentPred =
-        normalizeRoleKey(params.role) === 'AGENT' && params.authUser?.id
-            ? buildAgentApplicationVisibilitySql(params.authUser.id, 'a')
-            : Prisma.sql`TRUE`;
-    const whereScoped = Prisma.sql`(${whereScopedBase}) AND (${uwClaimPred}) AND (${agentPred})`;
+    const whereScoped = Prisma.sql`(${whereScopedBase}) AND (${uwClaimPred})`;
     const whereWorkflow = whereScoped;
     const assignedQueueLabel = primaryWorkflowQueueForRole(params.role);
     const assignedCountExpr =
@@ -339,11 +332,6 @@ export async function aggregateApplicationMonthlyTrend(params: {
     endDate: Date | null;
 }): Promise<Array<{ name: string; approved: number; funded: number }>> {
     const whereSql = buildStatsWhereSql(params.role, params.startDate, params.endDate, 'a');
-    const agentPred =
-        normalizeRoleKey(params.role) === 'AGENT' && params.authUser?.id
-            ? buildAgentApplicationVisibilitySql(params.authUser.id, 'a')
-            : Prisma.sql`TRUE`;
-    const whereWithAgent = Prisma.sql`(${whereSql}) AND (${agentPred})`;
 
     const query = Prisma.sql`
     WITH base AS (
@@ -353,7 +341,7 @@ export async function aggregateApplicationMonthlyTrend(params: {
       FROM "Application" a
       LEFT JOIN "OfferDecision" od ON od."applicationId" = a.id
       LEFT JOIN "Contract" ct ON ct."applicationId" = a.id
-      WHERE ${whereWithAgent}
+      WHERE ${whereSql}
     )
     SELECT
       (EXTRACT(MONTH FROM "createdAt")::int - 1) AS month_index,

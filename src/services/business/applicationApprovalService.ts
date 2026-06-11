@@ -1,7 +1,7 @@
 import type { Prisma } from '@prisma/client';
-import prisma from '../../config/prismaClient';
-import { createApplicationActivityLog } from '../applicationActivityLogService';
-import type { AuthenticatedUser } from '../applicationService';
+import prisma from '../config/prismaClient';
+import { createApplicationActivityLog } from './applicationActivityLogService';
+import type { AuthenticatedUser } from './applicationService';
 import {
     enqueueApplicationApprovalSideEffects,
     isApplicationApprovalQueueEnabled,
@@ -49,6 +49,8 @@ export interface ApproveApplicationOptions {
     actorName?: string | null;
     /** Optional free-form note/reason the approver supplied (stored in metadata). */
     note?: string | null;
+    /** Optional originating request, used for activity-log context. */
+    req?: Request | null;
     /**
      * When provided, an in-flight approval with the same key returns the cached
      * result instead of re-running the transition. Lets clients safely retry.
@@ -226,6 +228,7 @@ async function runApproval(
             await createApplicationActivityLog({
                 applicationId: existing.id,
                 user: options.actor ?? null,
+                req: options.req ?? null,
                 actionType: 'APPROVED',
                 actionDescription: buildApprovalActivityDescription(options),
                 previousStatus: `${previousQueue ?? ''} / ${previousState ?? ''}`,

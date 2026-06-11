@@ -2,7 +2,6 @@ import express from 'express';
 import multer from 'multer';
 import { authenticateToken } from '../middleware/authMiddleware';
 import { requireRoles } from '../middleware/requireRoles';
-import { forbidRoles } from '../middleware/forbidRoles';
 import applicationController from '../controllers/applicationController';
 import schedulePaymentTrackingController from '../controllers/schedulePaymentTrackingController';
 
@@ -58,11 +57,7 @@ router.post(
 );
 
 // Send approval email to client (non-blocking email send)
-router.post(
-    '/send-approval-email',
-    forbidRoles('AGENT'),
-    applicationController.sendApprovalEmail.bind(applicationController),
-);
+router.post('/send-approval-email', applicationController.sendApprovalEmail.bind(applicationController));
 
 // Funded / funds-released email (OPERATIONS only; non-blocking)
 router.post('/send-funded-email', applicationController.sendFundedEmail.bind(applicationController));
@@ -93,11 +88,7 @@ router.get(
 router.get('/', applicationController.getAll.bind(applicationController));
 
 // Admin dashboard aggregated stats
-router.get(
-    '/admin-dashboard-stats',
-    forbidRoles('AGENT'),
-    applicationController.getAdminDashboardStats.bind(applicationController),
-);
+router.get('/admin-dashboard-stats', applicationController.getAdminDashboardStats.bind(applicationController));
 
 // Get application stats (counts and total amounts by queue/state, role-based)
 router.get('/stats', applicationController.getStats.bind(applicationController));
@@ -105,27 +96,35 @@ router.get('/stats', applicationController.getStats.bind(applicationController))
 // Operations dashboard: single response for all pipeline / queue stat cards (scalable vs N list calls)
 router.get(
     '/operations-dashboard-summary',
-    forbidRoles('AGENT'),
     applicationController.getOperationsDashboardSummary.bind(applicationController),
 );
 router.get(
     '/operations-dashboard-recent-cases',
-    forbidRoles('AGENT'),
     applicationController.getOperationsDashboardRecentCases.bind(applicationController),
 );
 
 // Get monthly trend stats (approved & funded amounts per month)
 router.get('/stats/trend', applicationController.getMonthlyTrend.bind(applicationController));
 
+// Main dashboard aggregates (no bulk application list)
+router.get(
+    '/dashboard-pipeline-funnel',
+    applicationController.getDashboardPipelineFunnel.bind(applicationController),
+);
+router.get(
+    '/dashboard-trend-chart',
+    applicationController.getDashboardTrendChart.bind(applicationController),
+);
+router.get(
+    '/dashboard-recent-applications',
+    applicationController.getDashboardRecentApplications.bind(applicationController),
+);
+
 // Get applications by agent ID (referringAgentId). Query: ?agentId=uuid&page=1&limit=10
 router.get('/by-agent', applicationController.getApplicationsByAgentId.bind(applicationController));
 
 // Get applications by ISO id
-router.get(
-    '/by-iso/:isoId',
-    forbidRoles('AGENT'),
-    applicationController.getByIsoId.bind(applicationController),
-);
+router.get('/by-iso/:isoId', applicationController.getByIsoId.bind(applicationController));
 
 // Get application by MongoDB ObjectId
 router.get('/:id', applicationController.getById.bind(applicationController));
@@ -171,13 +170,13 @@ router.patch('/:id/document-checklist', applicationController.updateDocumentChec
 router.post('/:id/reject', applicationController.rejectApplication.bind(applicationController));
 
 // Approve application (idempotent webhook-style endpoint; works for CRM users + ISO public-portal sessions)
-router.post(
-    '/:id/approve',
-    forbidRoles('AGENT'),
-    applicationController.approve.bind(applicationController),
-);
+router.post('/:id/approve', applicationController.approve.bind(applicationController));
 
 // Application activity logs
+router.get(
+    '/:id/activity-logs/:logId/content',
+    applicationController.getActivityLogContent.bind(applicationController),
+);
 router.get('/:id/activity-logs', applicationController.getActivityLogs.bind(applicationController));
 
 // Payment workspace: mail send history (persisted)
