@@ -1,6 +1,9 @@
 import prisma from '../config/prismaClient';
 import { sendApplicationApprovalEmail, sendOperationsIsoApprovalAlertEmail } from './emailService';
-import { resolveCrmFrontendBaseUrl } from '../utils/crmFrontendUrl';
+import {
+    buildPublicApprovalPortalUrl,
+    resolveCrmFrontendBaseUrl,
+} from '../utils/crmFrontendUrl';
 import { createPublicPortalToken } from './publicPortalTokenService';
 import { emitToUser } from '../socket';
 // Type-only to avoid a runtime cycle (applicationApprovalService -> queue -> worker -> here).
@@ -344,19 +347,19 @@ export async function processApplicationApprovalSideEffects(
     /* -------------------------------- Email ---------------------------------- */
     try {
         const baseUrl = resolveCrmFrontendBaseUrl() || '';
-        const viewApplicationUrl = baseUrl
-            ? `${baseUrl.replace(/\/$/, '')}/applications/${applicationNumber}`
-            : undefined;
 
-        let calculateApprovalUrl: string | undefined;
+        let publicApprovalUrl: string | undefined;
         try {
             const token = await createPublicPortalToken(application.id, { expiresInDays: 90 });
             if (token && baseUrl) {
-                calculateApprovalUrl = `${baseUrl.replace(/\/$/, '')}/public/application/approval/${token}`;
+                publicApprovalUrl = buildPublicApprovalPortalUrl(baseUrl, token);
             }
         } catch (tokenErr) {
             console.error('[approvalSideEffects] portal token generation failed:', tokenErr);
         }
+
+        const viewApplicationUrl = publicApprovalUrl;
+        const calculateApprovalUrl = publicApprovalUrl;
 
         const isoEmail = String(iso?.email ?? '').trim();
         const isoName = String(iso?.name ?? '').trim();

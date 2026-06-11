@@ -1,7 +1,8 @@
+import type { Request } from 'express';
 import type { Prisma } from '@prisma/client';
-import prisma from '../config/prismaClient';
-import { createApplicationActivityLog } from './applicationActivityLogService';
-import type { AuthenticatedUser } from './applicationService';
+import prisma from '../../config/prismaClient';
+import { createApplicationActivityLog } from '../applicationActivityLogService';
+import type { AuthenticatedUser } from '../applicationService';
 import {
     enqueueApplicationApprovalSideEffects,
     isApplicationApprovalQueueEnabled,

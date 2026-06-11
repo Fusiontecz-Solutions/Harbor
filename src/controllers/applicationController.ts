@@ -8,6 +8,7 @@ import path from 'path';
 import {
     mergeApplicationVisibilityWhere,
     getApplicationForUser,
+    resolveApplicationWhere,
     createClientAndApplicationFromPDFBuffer,
     InsufficientParsedPdfError,
     assertReadyToCreateNewClientFromPdf,
@@ -48,6 +49,8 @@ import {
 import { getBalancesForApplicationIds } from '../services/collectionPaymentFinancials';
 import { applyContractCompletedSyncToApplicationRecord } from '../services/contractApplicationWorkflowSync';
 import {
+    buildApplicationApprovalEmailHtml,
+    buildApplicationOfferUpdatedEmailHtml,
     sendApplicationApprovalEmail,
     sendApplicationOfferUpdatedEmail,
     sendApplicationFundedEmail,
@@ -55,8 +58,12 @@ import {
     sendApplicationUnderwritingCompletedClientEmail,
     sendUnderwriterNewApplicationEmail,
 } from '../services/emailService';
+import { recordCommunicationAudit } from '../services/systemActivityLogService';
 import { isOutboundSmtpConfigured } from '../config/nodemailer';
-import { resolveCrmFrontendBaseUrl } from '../utils/crmFrontendUrl';
+import {
+    buildPublicApprovalPortalUrl,
+    resolveCrmFrontendBaseUrl,
+} from '../utils/crmFrontendUrl';
 import { applicationCreateUncheckedData } from '../utils/prisma/applicationCreateUncheckedData';
 import {
     resolveApplicationAttributedUserId,
@@ -88,7 +95,7 @@ import {
     type BulkImportRowError,
     type BulkImportSummary,
 } from '../services/applicationBulkExcelIngestService';
-import { approveApplication } from '../services/applicationApprovalService';
+import { approveApplication } from '../services/business/applicationApprovalService';
 
 type ApplicationState =
     | 'DRAFT'
@@ -2291,33 +2298,34 @@ class ApplicationController {
             };
     }
 
-    // Get single application by MongoDB ObjectId
+    // Get single application by UUID or numeric applicationId
     async getById(req: Request, res: Response) {
         try {
             const { id } = req.params;
             const authUser = getAuthenticatedUser(req);
+            const where = resolveApplicationWhere(String(id ?? ''));
+            if (!where) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Invalid application ID (expected UUID or numeric applicationId).',
+                });
+            }
 
-            // OPERATIONS / SUPER_ADMIN can fetch any application by UUID directly, bypassing visibility filters
+            const applicationInclude = {
+                referringAgent: { select: { id: true, firstName: true, lastName: true, email: true } },
+                salesRepresentative: { select: { id: true, firstName: true, lastName: true, email: true } },
+                createdBy: { select: { id: true, firstName: true, lastName: true, email: true } },
+                client: true,
+                iso: true,
+                files: true,
+                claimedByUnderwriter: { select: { id: true, firstName: true, lastName: true, email: true } },
+            } as const;
+
+            // OPERATIONS / SUPER_ADMIN can fetch any application directly, bypassing visibility filters
             if (authUser?.role === 'OPERATIONS' || authUser?.role === 'SUPER_ADMIN') {
-                const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-                if (!id || !uuidRegex.test(String(id))) {
-                    return res.status(400).json({
-                        success: false,
-                        message: 'Invalid application ID (expected UUID).',
-                    });
-                }
-
                 const applicationRecord = await prisma.application.findUnique({
-                    where: { id },
-                    include: {
-                        referringAgent: { select: { id: true, firstName: true, lastName: true, email: true } },
-                        salesRepresentative: { select: { id: true, firstName: true, lastName: true, email: true } },
-                        createdBy: { select: { id: true, firstName: true, lastName: true, email: true } },
-                        client: true,
-                        iso: true,
-                        files: true,
-                        claimedByUnderwriter: { select: { id: true, firstName: true, lastName: true, email: true } },
-                    },
+                    where,
+                    include: applicationInclude,
                 });
 
                 if (!applicationRecord) {
@@ -2340,25 +2348,10 @@ class ApplicationController {
                 });
             }
 
-            const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-            if (!id || !uuidRegex.test(String(id))) {
-                return res.status(400).json({
-                    success: false,
-                    message: 'Invalid application ID (expected UUID). Use GET /applications/by-agent for agent-filtered list.',
-                });
-            }
             const { application: applicationRecord, forbidden } = await getApplicationForUser(
-                { id },
+                where,
                 authUser,
-                {
-                    referringAgent: { select: { id: true, firstName: true, lastName: true, email: true } },
-                    salesRepresentative: { select: { id: true, firstName: true, lastName: true, email: true } },
-                    createdBy: { select: { id: true, firstName: true, lastName: true, email: true } },
-                    client: true,
-                    iso: true,
-                    files: true,
-                    claimedByUnderwriter: { select: { id: true, firstName: true, lastName: true, email: true } },
-                }
+                applicationInclude,
             );
 
             if (forbidden) {
@@ -5359,11 +5352,7 @@ class ApplicationController {
 
             const baseUrl = resolveCrmFrontendBaseUrl() || '';
 
-            const numericAppId = (application as any).applicationId;
             const fallbackId = (application as any).id;
-            const viewApplicationUrl = baseUrl
-                ? `${baseUrl.replace(/\/$/, '')}/applications/${numericAppId || fallbackId}`
-                : undefined;
 
             if (!fallbackId) {
                 return res.status(500).json({
@@ -5382,10 +5371,11 @@ class ApplicationController {
                 console.error('Approval email: public portal token failed, using application id in link:', tokenErr);
             }
 
-            const feBase = resolveCrmFrontendBaseUrl() || '';
-            const calculateApprovalUrl = feBase
-                ? `${feBase.replace(/\/$/, '')}/public/application/approval/${approvalLinkToken}`
+            const publicApprovalUrl = baseUrl
+                ? buildPublicApprovalPortalUrl(baseUrl, approvalLinkToken)
                 : undefined;
+            const viewApplicationUrl = publicApprovalUrl;
+            const calculateApprovalUrl = publicApprovalUrl;
 
             const isoRecipientName = isoName || isoEmailRaw || merchantGreetingName;
             const recipients: { to: string; clientName: string }[] = [
