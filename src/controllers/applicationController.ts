@@ -8,7 +8,6 @@ import path from 'path';
 import {
     mergeApplicationVisibilityWhere,
     getApplicationForUser,
-    resolveApplicationWhere,
     createClientAndApplicationFromPDFBuffer,
     InsufficientParsedPdfError,
     assertReadyToCreateNewClientFromPdf,
@@ -803,6 +802,22 @@ const sendPreviewOnlyForbidden = (
         return true;
     }
     return false;
+};
+
+const APPLICATION_ROUTE_ID_UUID =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const resolveApplicationWhere = (
+    idParam: string,
+): Prisma.ApplicationWhereUniqueInput | null => {
+    const ref = String(idParam ?? '').trim();
+    if (!ref) return null;
+    if (/^\d+$/.test(ref)) {
+        const numericId = Number(ref);
+        return Number.isFinite(numericId) ? { applicationId: numericId } : null;
+    }
+    if (!APPLICATION_ROUTE_ID_UUID.test(ref)) return null;
+    return { id: ref };
 };
 
 class ApplicationController {

@@ -2,6 +2,7 @@
 
 export type DocumentRequestSlug =
   | 'bank-statements'
+  | 'bank-statements-mtd'
   | 'additional-id'
   | 'business-license'
   | 'proof-of-address'
@@ -26,6 +27,17 @@ export const DOCUMENT_REQUEST_TYPES: DocumentRequestTypeConfig[] = [
     slug: 'bank-statements',
     label: 'Bank Statements - 12 months',
     matchKeywords: ['bank statement', 'bankstatement', 'bank-statement', 'bank statements'],
+  },
+  {
+    slug: 'bank-statements-mtd',
+    label: 'Bank Statements - MTD',
+    matchKeywords: [
+      'bank statement mtd',
+      'bank statements mtd',
+      'mtd bank statement',
+      'bank-statement-mtd',
+      'bank statements - mtd',
+    ],
   },
   {
     slug: 'additional-id',

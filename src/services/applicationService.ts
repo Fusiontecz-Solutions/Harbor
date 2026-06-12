@@ -540,6 +540,8 @@ const applicationService = {
     mergeApplicationVisibilityWhere,
     canUserAccessApplication,
     getApplicationForUser,
+    getApplicationForUserByRef,
+    resolveApplicationWhere,
     createClientAndApplicationFromPDFBuffer,
 };
 
