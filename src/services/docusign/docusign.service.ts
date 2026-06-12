@@ -74,6 +74,7 @@ import {
   filterSupplementalRefs,
   resolveSupplementalRefsFromDb,
 } from './utils/platform-layout-envelope';
+import { applyDocuSignPrefillTabStyle } from './utils/docusign-tab-style';
 import {
   contractHasAchAuthorizationEnvelope,
   contractRowHasAchEnvelope,
@@ -2365,7 +2366,9 @@ export class DocusignService {
             row[outKey] = String(v);
           }
         }
-        rows.push(row);
+        rows.push(
+          applyDocuSignPrefillTabStyle(row, { height: tab.height as string | number | undefined }),
+        );
       }
       if (rows.length) payload[group] = rows;
     }
@@ -2446,12 +2449,14 @@ export class DocusignService {
           tabs = createTimeLockedTabs;
         } else if (textTabs.length) {
           tabs = {
-            textTabs: textTabs.map((t) => ({
-              ...(t.tabId
-                ? { tabId: t.tabId, tabLabel: t.tabLabel, value: t.value }
-                : { tabLabel: t.tabLabel, value: t.value }),
-              shared: 'true',
-            })),
+            textTabs: textTabs.map((t) =>
+              applyDocuSignPrefillTabStyle({
+                ...(t.tabId
+                  ? { tabId: t.tabId, tabLabel: t.tabLabel, value: t.value }
+                  : { tabLabel: t.tabLabel, value: t.value }),
+                shared: 'true',
+              }),
+            ),
           };
         }
       }

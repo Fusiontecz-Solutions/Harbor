@@ -9,6 +9,8 @@ import {
 } from './prefill-layout-bridge';
 import type { PrefillFieldInput } from './docusign-prefill';
 import { DOCUSIGN_DEFAULT_ROLE_NAME } from './docusign-client';
+import { applyDocuSignPrefillTabStyle } from './docusign-tab-style';
+import { embedArialPdfFont } from './embed-arial-pdf-font';
 
 const DOCUSIGN_SECONDARY_SIGNER_ROLE_NAME =
   process.env.DOCUSIGN_SECONDARY_ROLE_NAME || 'Signer';
@@ -430,19 +432,22 @@ function toTextTab(
     String(placement.sourceTabLabel || '').trim() ||
     variable ||
     placement.slot;
-  return {
-    tabLabel: displayLabel,
-    name: variable || undefined,
-    documentId: envelopeDocumentId,
-    pageNumber: placement.pageNumber,
-    xPosition: placement.x,
-    yPosition: placement.y,
-    value,
-    ...(lockDataTabs ? { locked: 'true' } : {}),
-    shared: 'true',
-    ...(placement.width ? { width: placement.width } : {}),
-    ...(placement.height ? { height: placement.height } : {}),
-  };
+  return applyDocuSignPrefillTabStyle(
+    {
+      tabLabel: displayLabel,
+      name: variable || undefined,
+      documentId: envelopeDocumentId,
+      pageNumber: placement.pageNumber,
+      xPosition: placement.x,
+      yPosition: placement.y,
+      value,
+      ...(lockDataTabs ? { locked: 'true' } : {}),
+      shared: 'true',
+      ...(placement.width ? { width: placement.width } : {}),
+      ...(placement.height ? { height: placement.height } : {}),
+    },
+    { height: placement.height },
+  );
 }
 
 /** Stamp layout text/date values onto the base PDF for CC email (DocuSign download is often blank). */
@@ -451,9 +456,9 @@ export async function renderFlattenedLayoutPdf(
   values: Record<string, string>,
   counts: LayoutPartyCounts,
 ): Promise<Buffer> {
-  const { PDFDocument, StandardFonts, rgb } = await import('pdf-lib');
+  const { PDFDocument, rgb } = await import('pdf-lib');
   const pdfDoc = await PDFDocument.load(Buffer.from(layout.documentBase64, 'base64'));
-  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const font = await embedArialPdfFont(pdfDoc);
   const pages = pdfDoc.getPages();
   const expanded = expandPrefillValues(values);
 
