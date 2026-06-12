@@ -427,21 +427,26 @@ export const docusignWebhook = async (req: Request, res: Response) => {
 export const syncDocusignEnvelopeStatus = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?.id;
-    const { applicationId, envelopeId, ccEmails } = req.body || {};
+    const { applicationId, envelopeId, ccEmails, contractId, force } = req.body || {};
     if (!applicationId && !envelopeId) {
       return res.status(400).json({
         message: 'applicationId or envelopeId is required',
       });
     }
+    const contractIdNum = Number(contractId);
     const result = await docusignService.syncEnvelopeStatusFromDocusign(userId, {
       applicationId,
       envelopeId,
       ccEmails: Array.isArray(ccEmails) ? ccEmails : undefined,
+      contractId:
+        Number.isFinite(contractIdNum) && contractIdNum > 0 ? contractIdNum : undefined,
+      force: force === true,
     });
     return res.json(result);
-  } catch (error: any) {
-    return res.status(error.status || 500).json({
-      message: error?.message || 'Failed to sync envelope status',
+  } catch (error: unknown) {
+    const { status, message } = formatDocusignRouteError(error);
+    return res.status(status).json({
+      message: message || 'Failed to sync envelope status',
     });
   }
 };

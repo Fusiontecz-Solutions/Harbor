@@ -76,6 +76,9 @@ import {
 } from './utils/platform-layout-envelope';
 import {
   contractHasAchAuthorizationEnvelope,
+  contractRowHasAchEnvelope,
+  ensureAchAuthorizationEnvelopeLinked,
+  findApplicationIdByAchEnvelopeId,
   linkAchAuthorizationEnvelopeToContract,
   mapInternalEnvelopeStatusToAchCapsule,
   updateAchAuthorizationDocuSignStatus,
@@ -89,6 +92,19 @@ import {
 } from '../../utils/contractEnvelopeEmailSubject';
 
 dotenv.config();
+
+/** Short-lived cache so UI polling does not hammer DocuSign GET /envelopes (429). */
+const envelopeStatusSyncCache = new Map<
+  string,
+  { syncedAt: number; payload: Record<string, unknown> }
+>();
+const ENVELOPE_STATUS_SYNC_MIN_INTERVAL_MS = 25_000;
+
+export function invalidateEnvelopeStatusSyncCache(envelopeId?: string): void {
+  const eid = String(envelopeId || '').trim();
+  if (eid) envelopeStatusSyncCache.delete(eid);
+  else envelopeStatusSyncCache.clear();
+}
 
 class UnauthorizedException extends Error {
   status = 401;
@@ -2577,9 +2593,14 @@ export class DocusignService {
       originalName?: string | null;
       title?: string | null;
     } | null,
+    achHints?: { contractId?: number },
   ) {
-    if (await contractHasAchAuthorizationEnvelope(envelopeId)) {
-      await updateAchAuthorizationDocuSignStatus(envelopeId, incomingResolved);
+    const achLookup = {
+      applicationId: applicationId ?? undefined,
+      contractId: achHints?.contractId,
+    };
+    if (await contractRowHasAchEnvelope(envelopeId, achLookup)) {
+      await updateAchAuthorizationDocuSignStatus(envelopeId, incomingResolved, achLookup);
       return incomingResolved;
     }
 
@@ -3868,17 +3889,26 @@ export class DocusignService {
   }
 
   async voidDocument(userId: string, documentId: string, reason: string) {
+    const envelopeId = String(documentId || '').trim();
     const { client, accountId } = await this.getAuthContext(userId);
-    await client.put(`/v2.1/accounts/${accountId}/envelopes/${documentId}`, {
+    await client.put(`/v2.1/accounts/${accountId}/envelopes/${envelopeId}`, {
       status: 'voided',
       voidedReason: reason || 'Voided by user',
     });
+    invalidateEnvelopeStatusSyncCache(envelopeId);
+
+    const isAchEnvelope = await contractHasAchAuthorizationEnvelope(envelopeId);
+    if (isAchEnvelope) {
+      await updateAchAuthorizationDocuSignStatus(envelopeId, 'revoked');
+      return { success: true, achAuthorization: true };
+    }
+
     const existingDoc = await prisma.document.findFirst({
-      where: { envelopeId: documentId },
+      where: { envelopeId },
       select: { applicationId: true },
     });
     await prisma.document.updateMany({
-      where: { envelopeId: documentId },
+      where: { envelopeId },
       data: { status: 'revoked' },
     });
     const appId = existingDoc?.applicationId
@@ -3887,7 +3917,7 @@ export class DocusignService {
     if (appId) {
       await this.syncContractSigningStatus(appId, 'revoked');
     }
-    return { success: true };
+    return { success: true, achAuthorization: false };
   }
 
   async getDocumentProperties(userId: string, documentId: string) {
@@ -4198,6 +4228,11 @@ export class DocusignService {
       applicationId = existingDoc.applicationId;
     }
 
+    if (!applicationId) {
+      const achAppId = await findApplicationIdByAchEnvelopeId(envelopeId);
+      if (achAppId) applicationId = achAppId;
+    }
+
     if (!existingDoc && !applicationId) {
       console.warn('[DocuSign] webhook: envelope not linked to CRM application', {
         envelopeId,
@@ -4240,7 +4275,13 @@ export class DocusignService {
   /** Poll DocuSign for current envelope status (fallback when Connect misses events). */
   async syncEnvelopeStatusFromDocusign(
     userId: string,
-    options: { applicationId?: string; envelopeId?: string; ccEmails?: string[] },
+    options: {
+      applicationId?: string;
+      envelopeId?: string;
+      ccEmails?: string[];
+      contractId?: number;
+      force?: boolean;
+    },
   ) {
     let envelopeId = String(options.envelopeId || '').trim();
     const applicationId = String(options.applicationId || '').trim();
@@ -4254,10 +4295,37 @@ export class DocusignService {
       );
     }
 
+    const forceRefresh = options.force === true;
+    const cached = envelopeStatusSyncCache.get(envelopeId);
+    if (
+      !forceRefresh &&
+      cached &&
+      Date.now() - cached.syncedAt < ENVELOPE_STATUS_SYNC_MIN_INTERVAL_MS
+    ) {
+      return { ...cached.payload, cached: true };
+    }
+
     const { client, accountId } = await this.getAuthContext(userId);
-    const res = await client.get(
-      `/v2.1/accounts/${accountId}/envelopes/${envelopeId}`,
-    );
+    let res: { data?: { status?: string } };
+    try {
+      res = await client.get(
+        `/v2.1/accounts/${accountId}/envelopes/${envelopeId}`,
+      );
+    } catch (err: unknown) {
+      const httpStatus = (err as { response?: { status?: number } })?.response
+        ?.status;
+      if (httpStatus === 429 && cached) {
+        return { ...cached.payload, cached: true, rateLimited: true };
+      }
+      if (httpStatus === 429) {
+        const rateErr = new Error(
+          'DocuSign rate limit reached. Wait a few seconds and try again.',
+        ) as Error & { status?: number };
+        rateErr.status = 429;
+        throw rateErr;
+      }
+      throw err;
+    }
     const dsStatus = res.data?.status;
     const incomingResolved = mapDocusignEnvelopeStatus(dsStatus);
     if (!incomingResolved) {
@@ -4272,11 +4340,26 @@ export class DocusignService {
 
     const priorStatus = String(existingDoc?.status || '').toLowerCase();
     const appId = applicationId || existingDoc?.applicationId || null;
+    const contractIdHint = Number(options.contractId);
+    await ensureAchAuthorizationEnvelopeLinked(envelopeId, incomingResolved, {
+      applicationId: appId ?? applicationId,
+      contractId:
+        Number.isFinite(contractIdHint) && contractIdHint > 0
+          ? contractIdHint
+          : undefined,
+    });
+    const achHints = {
+      contractId:
+        Number.isFinite(contractIdHint) && contractIdHint > 0
+          ? contractIdHint
+          : undefined,
+    };
     const status = await this.applySigningStatusUpdate(
       envelopeId,
       incomingResolved,
       appId,
       existingDoc,
+      achHints,
     );
 
     let ccPrefilledEmail: { emailed: string[]; skippedReason?: string } = {
@@ -4297,9 +4380,12 @@ export class DocusignService {
       );
     }
 
-    const achAuthorization = await contractHasAchAuthorizationEnvelope(envelopeId);
+    const achAuthorization = await contractRowHasAchEnvelope(envelopeId, {
+      applicationId: appId ?? applicationId,
+      contractId: achHints.contractId,
+    });
 
-    return {
+    const payload = {
       envelopeId,
       applicationId: appId,
       docusignStatus: dsStatus,
@@ -4314,6 +4400,11 @@ export class DocusignService {
           : internalEnvelopeStatusToContractStatusDbValue(status),
       ccPrefilledEmail,
     };
+    envelopeStatusSyncCache.set(envelopeId, {
+      syncedAt: Date.now(),
+      payload,
+    });
+    return payload;
   }
 
   /** @deprecated Legacy PDF+tabs path — use sendTemplate / mergeAndSendTemplates */
