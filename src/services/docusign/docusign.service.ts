@@ -84,6 +84,7 @@ import {
   mapInternalEnvelopeStatusToAchCapsule,
   updateAchAuthorizationDocuSignStatus,
 } from './utils/ach-authorization-docusign';
+import { archiveMainContractEnvelopeToHistory } from './utils/contract-send-history';
 import { decryptField, isEncrypted } from '../../utils/fieldEncryption';
 import { handleContractSigningStatusTransition } from '../contractSigningStatusEffects';
 import { mergeDefaultContractCcEmails } from '../../utils/contractCcDefaults';
@@ -2518,16 +2519,36 @@ export class DocusignService {
       );
     }
 
+    const newEnvelopeId = String(envelopeId).trim();
+    const existingDoc = await prisma.document.findUnique({
+      where: { applicationId },
+      select: {
+        envelopeId: true,
+        status: true,
+        sentAt: true,
+        completedAt: true,
+      },
+    });
+    const priorEnvelopeId = String(existingDoc?.envelopeId ?? '').trim();
+    if (priorEnvelopeId && priorEnvelopeId !== newEnvelopeId) {
+      await archiveMainContractEnvelopeToHistory(applicationId, {
+        envelopeId: priorEnvelopeId,
+        status: String(existingDoc?.status ?? 'draft'),
+        sentAt: existingDoc?.sentAt,
+        completedAt: existingDoc?.completedAt,
+      });
+    }
+
     await prisma.document.upsert({
       where: { applicationId },
       create: {
         applicationId,
-        envelopeId: String(envelopeId),
+        envelopeId: newEnvelopeId,
         status: 'draft',
         userId: userRecord.userId,
       },
       update: {
-        envelopeId: String(envelopeId),
+        envelopeId: newEnvelopeId,
         status: 'draft',
         sentAt: null,
         completedAt: null,
