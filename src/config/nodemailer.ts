@@ -1,5 +1,6 @@
 import fs from 'fs';
 import nodemailer from 'nodemailer';
+import { resolveEmailBrandDisplayName } from '../constants/emailBrand';
 
 const sendgridApiKey = process.env.SENDGRID_API_KEY?.trim();
 const useSendgrid = Boolean(sendgridApiKey);
@@ -57,7 +58,6 @@ function getMailFromDisplayName(): string {
     }
     return DEFAULT_DISPLAY_NAME;
 }
-
 /** Strip optional `"Name"` wrapper and extract the bare email from a From value. */
 function extractEmailAddress(raw: string): string {
     const trimmed = raw.trim();

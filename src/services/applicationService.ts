@@ -128,19 +128,33 @@ export async function getApplicationForUser(
     return { application, forbidden: false };
 }
 
+const APPLICATION_UUID_REGEX =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Map route `:id` to a Prisma unique key (numeric `applicationId` or UUID `id`). */
+export function resolveApplicationWhere(
+    idParam: string,
+): Prisma.ApplicationWhereUniqueInput | null {
+    const ref = String(idParam ?? '').trim();
+    if (!ref) return null;
+    if (/^\d+$/.test(ref)) {
+        const numericId = Number(ref);
+        return Number.isFinite(numericId) ? { applicationId: numericId } : null;
+    }
+    if (!APPLICATION_UUID_REGEX.test(ref)) return null;
+    return { id: ref };
+}
+
 /** Resolve application by UUID or numeric `applicationId` with agent visibility enforced. */
 export async function getApplicationForUserByRef(
     applicationRef: string,
     user: AuthenticatedUser | null | undefined,
     include?: PrismaTypes.ApplicationInclude,
 ): Promise<{ application: ApplicationWithRelations | null; forbidden: boolean }> {
-    const ref = String(applicationRef ?? '').trim();
-    if (!ref) {
+    const where = resolveApplicationWhere(applicationRef);
+    if (!where) {
         return { application: null, forbidden: false };
     }
-    const where: PrismaTypes.ApplicationWhereUniqueInput = /^\d+$/.test(ref)
-        ? { applicationId: Number(ref) }
-        : { id: ref };
     return getApplicationForUser(where, user, include);
 }
 
@@ -526,6 +540,8 @@ const applicationService = {
     mergeApplicationVisibilityWhere,
     canUserAccessApplication,
     getApplicationForUser,
+    getApplicationForUserByRef,
+    resolveApplicationWhere,
     createClientAndApplicationFromPDFBuffer,
 };
 

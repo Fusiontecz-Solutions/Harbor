@@ -272,6 +272,7 @@ model ApplicationFile {
   originalName          String?
   mimeType              String?
   size                  Int?
+  requestedDocumentSlug String?
   uploadedAt            DateTime    @default(now())
   requestedDocumentSlug String?
   application           Application @relation(fields: [applicationId], references: [id])
@@ -299,6 +300,7 @@ model ContractTemplate {
   url          String
   publicId     String
   originalName String?
+  layoutKey    String   @default("contract")
   uploadedById String?  @db.Uuid
   createdAt    DateTime @default(now())
   layoutKey    String   @default("contract")

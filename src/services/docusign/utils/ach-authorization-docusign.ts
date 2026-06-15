@@ -1,0 +1,297 @@
+import type { Prisma } from '@prisma/client';
+import prisma from '../../../config/prismaClient';
+import { mergeWithExistingEnvelopeStatus } from './docusign-webhook';
+
+/** Stored on `Contract.contractPrefillOverrides` — separate from main contract envelope. */
+export const ACH_AUTHORIZATION_DOCUSIGN_KEY = 'achAuthorizationDocuSign';
+
+export type AchAuthorizationDocuSignCapsuleStatus =
+  | 'DRAFT'
+  | 'SENT'
+  | 'VIEWED'
+  | 'SIGNED'
+  | 'VOIDED';
+
+export type AchAuthorizationDocuSignMeta = {
+  envelopeId: string;
+  status: AchAuthorizationDocuSignCapsuleStatus;
+  sentAt?: string | null;
+  updatedAt?: string | null;
+};
+
+function achCapsuleToInternal(status: AchAuthorizationDocuSignCapsuleStatus): string {
+  switch (status) {
+    case 'SIGNED':
+      return 'completed';
+    case 'VIEWED':
+      return 'viewed';
+    case 'SENT':
+      return 'sent';
+    case 'VOIDED':
+      return 'revoked';
+    default:
+      return 'draft';
+  }
+}
+
+export function mapInternalEnvelopeStatusToAchCapsule(
+  internalStatus: unknown,
+): AchAuthorizationDocuSignCapsuleStatus {
+  const k = String(internalStatus ?? '')
+    .trim()
+    .toLowerCase();
+  if (k === 'voided' || k === 'revoked' || k === 'declined' || k === 'expired') {
+    return 'VOIDED';
+  }
+  if (k === 'completed' || k === 'signed') return 'SIGNED';
+  if (k === 'viewed' || k === 'delivered') return 'VIEWED';
+  if (k === 'sent' || k === 'processing') return 'SENT';
+  return 'DRAFT';
+}
+
+export function parseAchAuthorizationDocuSignFromPrefill(
+  raw: unknown,
+): AchAuthorizationDocuSignMeta | null {
+  if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const blob = (raw as Record<string, unknown>)[ACH_AUTHORIZATION_DOCUSIGN_KEY];
+  if (blob == null || typeof blob !== 'object' || Array.isArray(blob)) return null;
+  const o = blob as Record<string, unknown>;
+  const envelopeId = String(o.envelopeId ?? '').trim();
+  if (!envelopeId) return null;
+  const statusRaw = String(o.status ?? 'DRAFT').trim().toUpperCase();
+  const status: AchAuthorizationDocuSignCapsuleStatus =
+    statusRaw === 'SENT' ||
+    statusRaw === 'VIEWED' ||
+    statusRaw === 'SIGNED' ||
+    statusRaw === 'VOIDED'
+      ? statusRaw
+      : 'DRAFT';
+  return {
+    envelopeId,
+    status,
+    sentAt: o.sentAt != null ? String(o.sentAt) : null,
+    updatedAt: o.updatedAt != null ? String(o.updatedAt) : null,
+  };
+}
+
+export function mergeAchAuthorizationDocuSignIntoPrefill(
+  baseRaw: unknown,
+  patch: Partial<AchAuthorizationDocuSignMeta> & { envelopeId: string },
+): Record<string, unknown> {
+  const base =
+    baseRaw && typeof baseRaw === 'object' && !Array.isArray(baseRaw)
+      ? { ...(baseRaw as Record<string, unknown>) }
+      : {};
+  const prior = parseAchAuthorizationDocuSignFromPrefill(base) ?? {
+    envelopeId: patch.envelopeId,
+    status: 'DRAFT' as const,
+  };
+  const status = patch.status ?? prior.status;
+  const now = new Date().toISOString();
+  const meta: AchAuthorizationDocuSignMeta = {
+    envelopeId: String(patch.envelopeId || prior.envelopeId).trim(),
+    status,
+    sentAt:
+      patch.sentAt !== undefined
+        ? patch.sentAt
+        : status === 'VOIDED'
+          ? null
+          : status === 'SENT' || status === 'VIEWED' || status === 'SIGNED'
+            ? (prior.sentAt ?? now)
+            : (prior.sentAt ?? null),
+    updatedAt: patch.updatedAt ?? now,
+  };
+  return {
+    ...base,
+    [ACH_AUTHORIZATION_DOCUSIGN_KEY]: meta,
+  };
+}
+
+export async function contractHasAchAuthorizationEnvelope(envelopeId: string): Promise<boolean> {
+  const eid = String(envelopeId || '').trim();
+  if (!eid) return false;
+  const count = await prisma.contract.count({
+    where: {
+      contractPrefillOverrides: {
+        path: [ACH_AUTHORIZATION_DOCUSIGN_KEY, 'envelopeId'],
+        equals: eid,
+      },
+    },
+  });
+  return count > 0;
+}
+
+export async function findApplicationIdByAchEnvelopeId(
+  envelopeId: string,
+): Promise<string | null> {
+  const eid = String(envelopeId || '').trim();
+  if (!eid) return null;
+  const contract = await prisma.contract.findFirst({
+    where: {
+      contractPrefillOverrides: {
+        path: [ACH_AUTHORIZATION_DOCUSIGN_KEY, 'envelopeId'],
+        equals: eid,
+      },
+    },
+    select: { applicationId: true },
+    orderBy: { id: 'desc' },
+  });
+  const appId = contract?.applicationId ? String(contract.applicationId).trim() : '';
+  return appId || null;
+}
+
+async function loadContractsForAchLink(
+  applicationId: string,
+  contractId?: number,
+): Promise<Array<{ id: number; contractPrefillOverrides: unknown }>> {
+  const numericContractId = Number(contractId);
+  if (Number.isFinite(numericContractId) && numericContractId > 0) {
+    const byId = await prisma.contract.findUnique({
+      where: { id: numericContractId },
+      select: { id: true, contractPrefillOverrides: true },
+    });
+    if (byId) return [byId];
+  }
+
+  const appId = String(applicationId || '').trim();
+  if (!appId) return [];
+
+  return prisma.contract.findMany({
+    where: { applicationId: appId },
+    select: { id: true, contractPrefillOverrides: true },
+    orderBy: { id: 'desc' },
+    take: 1,
+  });
+}
+
+export async function linkAchAuthorizationEnvelopeToContract(
+  applicationId: string,
+  envelopeId: string,
+  internalStatus = 'draft',
+  contractId?: number,
+): Promise<boolean> {
+  const eid = String(envelopeId || '').trim();
+  if (!eid) return false;
+
+  const contracts = await loadContractsForAchLink(applicationId, contractId);
+  if (!contracts.length) {
+    console.warn('[ACH DocuSign] no contract row to link ACH envelope', {
+      applicationId,
+      contractId,
+      envelopeId: eid,
+    });
+    return false;
+  }
+
+  const capsule = mapInternalEnvelopeStatusToAchCapsule(internalStatus);
+  const now = new Date().toISOString();
+
+  for (const contract of contracts) {
+    const merged = mergeAchAuthorizationDocuSignIntoPrefill(contract.contractPrefillOverrides, {
+      envelopeId: eid,
+      status: capsule,
+      sentAt: capsule === 'SENT' || capsule === 'VIEWED' || capsule === 'SIGNED' ? now : null,
+      updatedAt: now,
+    });
+    await prisma.contract.update({
+      where: { id: contract.id },
+      data: { contractPrefillOverrides: merged as Prisma.InputJsonValue },
+    });
+  }
+  return true;
+}
+
+export async function ensureAchAuthorizationEnvelopeLinked(
+  envelopeId: string,
+  internalStatus: string,
+  hints: { applicationId?: string; contractId?: number },
+): Promise<boolean> {
+  const eid = String(envelopeId || '').trim();
+  if (!eid) return false;
+  if (await contractHasAchAuthorizationEnvelope(eid)) return true;
+  return linkAchAuthorizationEnvelopeToContract(
+    hints.applicationId ?? '',
+    eid,
+    internalStatus,
+    hints.contractId,
+  );
+}
+
+export async function contractRowHasAchEnvelope(
+  envelopeId: string,
+  hints?: { applicationId?: string; contractId?: number },
+): Promise<boolean> {
+  const eid = String(envelopeId || '').trim();
+  if (!eid) return false;
+  if (await contractHasAchAuthorizationEnvelope(eid)) return true;
+  if (!hints?.applicationId && !hints?.contractId) return false;
+  const rows = await loadContractsForAchLink(hints.applicationId ?? '', hints.contractId);
+  return rows.some(
+    (row) =>
+      parseAchAuthorizationDocuSignFromPrefill(row.contractPrefillOverrides)?.envelopeId === eid,
+  );
+}
+
+async function findContractsForAchEnvelopeUpdate(
+  envelopeId: string,
+  hints?: { applicationId?: string; contractId?: number },
+): Promise<Array<{ id: number; contractPrefillOverrides: unknown }>> {
+  const eid = String(envelopeId || '').trim();
+  let contracts: Array<{ id: number; contractPrefillOverrides: unknown }> =
+    await prisma.contract.findMany({
+      where: {
+        contractPrefillOverrides: {
+          path: [ACH_AUTHORIZATION_DOCUSIGN_KEY, 'envelopeId'],
+          equals: eid,
+        },
+      },
+      select: { id: true, contractPrefillOverrides: true },
+    });
+  if (!contracts.length && hints && (hints.applicationId || hints.contractId)) {
+    const candidates = await loadContractsForAchLink(
+      hints.applicationId ?? '',
+      hints.contractId,
+    );
+    contracts = candidates.filter(
+      (row) =>
+        parseAchAuthorizationDocuSignFromPrefill(row.contractPrefillOverrides)?.envelopeId === eid,
+    );
+  }
+  return contracts;
+}
+
+export async function updateAchAuthorizationDocuSignStatus(
+  envelopeId: string,
+  internalStatus: string,
+  hints?: { applicationId?: string; contractId?: number },
+): Promise<boolean> {
+  const eid = String(envelopeId || '').trim();
+  if (!eid) return false;
+
+  const incomingCapsule = mapInternalEnvelopeStatusToAchCapsule(internalStatus);
+  const now = new Date().toISOString();
+
+  const contracts = await findContractsForAchEnvelopeUpdate(eid, hints);
+
+  if (!contracts.length) return false;
+
+  for (const contract of contracts) {
+    const prior = parseAchAuthorizationDocuSignFromPrefill(contract.contractPrefillOverrides);
+    const priorInternal = prior ? achCapsuleToInternal(prior.status) : null;
+    const mergedInternal = mergeWithExistingEnvelopeStatus(priorInternal, internalStatus);
+    const status = mergedInternal
+      ? mapInternalEnvelopeStatusToAchCapsule(mergedInternal)
+      : incomingCapsule;
+
+    const merged = mergeAchAuthorizationDocuSignIntoPrefill(contract.contractPrefillOverrides, {
+      envelopeId: eid,
+      status,
+      updatedAt: now,
+    });
+    await prisma.contract.update({
+      where: { id: contract.id },
+      data: { contractPrefillOverrides: merged as Prisma.InputJsonValue },
+    });
+  }
+  return true;
+}

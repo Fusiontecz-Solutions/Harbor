@@ -21,6 +21,8 @@ import { ADDENDUM_DOCUMENT_CONFIG } from './addendum-document-config';
 import { EPO_DOCUMENT_CONFIG } from './epo-document-config';
 import { ACH_DOCUMENT_CONFIG } from './ach-document-config';
 
+import { mergeDefaultContractCcEmails } from '../../utils/contractCcDefaults';
+import { normalizeContractCcEmailSubject } from '../../utils/contractEnvelopeEmailSubject';
 import {
   mergeWithExistingEnvelopeStatus,
   parseWebhookPayload,
@@ -191,9 +193,7 @@ function buildBoldSignPrefillCanonicalIdMap(data: unknown): Map<string, string> 
 function boldSignDocumentCCList(
   ccEmails?: string[] | null,
 ): Array<{ EmailAddress: string }> | undefined {
-  const list = (ccEmails || [])
-    .map((e) => String(e ?? '').trim())
-    .filter(Boolean);
+  const list = mergeDefaultContractCcEmails(ccEmails);
   if (!list.length) return undefined;
   return list.map((email) => ({ EmailAddress: email }));
 }
@@ -1167,7 +1167,7 @@ export class BoldSignService {
     subjectBase: string,
     userId: string,
   ): Promise<{ emailed: string[] }> {
-    const list = [...new Set((ccEmails || []).map((e) => String(e ?? '').trim()).filter(Boolean))];
+    const list = mergeDefaultContractCcEmails(ccEmails);
     if (!list.length) return { emailed: [] };
 
     if (!isOutboundSmtpConfigured()) {
@@ -1186,7 +1186,7 @@ export class BoldSignService {
       return { emailed: [] };
     }
 
-    const subject = subjectBase.trim() ? `${subjectBase.trim()} ` : 'Contract';
+    const subject = normalizeContractCcEmailSubject(subjectBase);
     const html = ``;
 
     const emailed: string[] = [];
@@ -1555,6 +1555,8 @@ export class BoldSignService {
       applicationId?: string;
       useLegacyMergeApi?: boolean;
       ccEmails?: string[];
+      /** Email subject for CC prefilled PDF (matches signer envelope subject). */
+      title?: string;
     },
   ) {
     if (!options?.roles?.length) {
@@ -1677,7 +1679,7 @@ export class BoldSignService {
         ccPrefilledEmailMergeResult = await this.emailPrefilledContractPdfToCcRecipients(
           String(documentId),
           options.ccEmails,
-          'Contract',
+          options.title || 'Contract',
           userId,
         );
       }
@@ -1953,12 +1955,7 @@ export class BoldSignService {
 
     if (priorStatus !== status) {
       const documentName =
-        String(
-          payloadData?.title ??
-            payloadData?.documentName ??
-            body?.document?.title ??
-            '',
-        ).trim() || 'Contract.pdf';
+        String(payloadData?.title || payloadData?.documentTitle || '').trim() || 'Contract.pdf';
       void handleContractSigningStatusTransition({
         applicationId: String(applicationId),
         priorStatus,

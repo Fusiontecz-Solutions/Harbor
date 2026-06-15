@@ -45,6 +45,8 @@ function normalizeToOrigin(raw: string): string | undefined {
 function pickExplicitFrontendUrlEnv(): string | undefined {
     const candidates = [
         process.env.FRONTEND_URL,
+        process.env.PUBLIC_FRONTEND_URL,
+        process.env.APP_FRONTEND_URL,
     ];
     for (const raw of candidates) {
         const t = String(raw || '').trim();
@@ -55,19 +57,40 @@ function pickExplicitFrontendUrlEnv(): string | undefined {
     return undefined;
 }
 
+/** First non-localhost origin from env candidates (safe for outbound email links). */
+function pickFirstPublicFrontendOrigin(
+    candidates: Array<string | undefined>,
+): string | undefined {
+    for (const raw of candidates) {
+        const t = String(raw || '').trim();
+        if (!t) continue;
+        const normalized = normalizeToOrigin(t);
+        if (!normalized) continue;
+        try {
+            if (isLocalHostname(new URL(normalized).hostname)) continue;
+        } catch {
+            continue;
+        }
+        return normalized;
+    }
+    return undefined;
+}
+
 /**
  * Absolute origin for links in emails (must be the **frontend** host where `/public/...` routes exist).
  *
  * Resolution order (applies in both dev and prod so a single env flip controls email links):
  *   1. Explicit override: `FRONTEND_URL` / `PUBLIC_FRONTEND_URL` / `APP_FRONTEND_URL`.
- *   2. **Local (`NODE_ENV` ≠ `production`):** `LOCAL_FRONTEND_URL` / `DEV_FRONTEND_URL`,
+ *   2. Public origin from `CRM_API_URL`, `PUBLIC_SITE_ORIGIN`, `DOCUSIGN_SENDER_RETURN_URL`, etc.
+ *      (used even when `NODE_ENV` is development so approval emails never default to localhost
+ *      when a deployed frontend is configured).
+ *   3. **Local (`NODE_ENV` ≠ `production`):** `LOCAL_FRONTEND_URL` / `DEV_FRONTEND_URL`,
  *      otherwise `http://localhost:5173`.
- *   3. **Production:** origin derived from `CRM_API_URL`, then `PUBLIC_SITE_ORIGIN`,
- *      `APP_APPLICATION_URL`, `CLIENT_PORTAL_URL`, etc.
+ *   4. **Production:** `APP_LOGIN_URL` and other fallbacks.
  *
  * To switch the approval-email link between local and live, set `FRONTEND_URL` in `.env`:
  *   - Local:  `FRONTEND_URL=http://localhost:5173`
- *   - Live:   `FRONTEND_URL=https://www.barclays.finexusai.com`
+ *   - Live:   `FRONTEND_URL=https://www.katan.finexusai.com`
  */
 /**
  * Base URL for Decision Logic email links (`/decision-logic?token=...`).
@@ -97,43 +120,50 @@ export function resolveDecisionLogicInvitationBaseUrl(): string {
   );
 }
 
+/** Public ISO approval portal — no CRM login required (`/public/application/approval/:token`). */
+export function buildPublicApprovalPortalUrl(
+  baseUrl: string,
+  token: string,
+): string {
+  const origin = String(baseUrl || '').trim().replace(/\/$/, '');
+  const secret = String(token || '').trim();
+  return `${origin}/public/application/approval/${secret}`;
+}
+
+/** Public document-request upload portal — no CRM login required (`/public/application/documents/:token`). */
+export function buildPublicDocumentRequestPortalUrl(
+  baseUrl: string,
+  token: string,
+): string {
+  const origin = String(baseUrl || '').trim().replace(/\/$/, '');
+  const secret = String(token || '').trim();
+  return `${origin}/public/application/documents/${secret}`;
+}
+
 export function resolveCrmFrontendBaseUrl(): string | undefined {
   const inProd = process.env.NODE_ENV === 'production';
 
   const explicit = pickExplicitFrontendUrlEnv();
   if (explicit) return explicit;
 
+  const fromCrmApi = tryPublicOriginFromCrmApiUrl();
+  const publicOrigin = pickFirstPublicFrontendOrigin([
+    fromCrmApi,
+    process.env.PUBLIC_SITE_ORIGIN,
+    process.env.APP_APPLICATION_URL,
+    process.env.CLIENT_PORTAL_URL,
+    process.env.DOCUSIGN_SENDER_RETURN_URL,
+    process.env.VITE_APP_URL,
+    process.env.APP_BASE_URL,
+  ]);
+  if (publicOrigin) return publicOrigin;
+
   if (!inProd) {
     const devLocal = String(
       process.env.LOCAL_FRONTEND_URL || process.env.DEV_FRONTEND_URL || '',
     ).trim();
     const normalized = devLocal ? normalizeToOrigin(devLocal) : undefined;
-    return normalized && normalized.length > 0 ? normalized : 'http://localhost:5173';
-  }
-
-  const fromCrmApi = tryPublicOriginFromCrmApiUrl();
-
-  const candidates: Array<string | undefined> = [
-    fromCrmApi,
-    process.env.PUBLIC_SITE_ORIGIN,
-    process.env.APP_APPLICATION_URL,
-    process.env.FRONTEND_URL,
-    process.env.CLIENT_PORTAL_URL,
-    process.env.VITE_APP_URL,
-    process.env.APP_BASE_URL,
-  ];
-
-  for (const c of candidates) {
-    if (!c || String(c).trim() === '') continue;
-    const normalized = normalizeToOrigin(c);
-    if (!normalized) continue;
-    try {
-      const host = new URL(normalized).hostname;
-      if (isLocalHostname(host)) continue;
-    } catch {
-      continue;
-    }
-    return normalized;
+    return normalized && normalized.length > 0 ? normalized : 'https://www.katan.finexusai.com/';
   }
 
   let raw: string | undefined;

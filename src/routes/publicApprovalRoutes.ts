@@ -19,6 +19,17 @@ router.get(
   publicApprovalController.getPortalStatusByToken.bind(publicApprovalController)
 );
 
+// Public: document request portal (register before the generic `/:token` handler)
+router.get(
+  '/application/:token/document-request',
+  publicApprovalController.getDocumentRequestPortalByToken.bind(publicApprovalController)
+);
+
+router.post(
+  '/application/:token/document-request/upload',
+  publicApprovalController.uploadDocumentRequestByToken.bind(publicApprovalController)
+);
+
 // Public: open approval by token (no auth required)
 router.get(
   '/application/:token',

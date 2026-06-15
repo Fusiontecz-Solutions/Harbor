@@ -317,6 +317,9 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
     const {
       templates,
       templateIds,
+      supplementalLayoutKeys,
+      supplementalDocumentRefs,
+      includeMainContract,
       contractTemplateFilters,
       roles,
       prefillFields,
@@ -327,8 +330,14 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
       message,
       autoSend,
       reminderSettings,
+      ownerCount,
+      guarantorCount,
     } = req.body;
 
+    const hasSupplementalLayoutKeys =
+      Array.isArray(supplementalLayoutKeys) && supplementalLayoutKeys.length > 0;
+    const hasSupplemental =
+      Array.isArray(supplementalDocumentRefs) && supplementalDocumentRefs.length > 0;
     const hasTemplates = Array.isArray(templates) && templates.length > 0;
     const hasTemplateIds = Array.isArray(templateIds) && templateIds.length > 0;
     const hasFilters =
@@ -338,11 +347,24 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
         const v = (contractTemplateFilters as Record<string, unknown>)[k];
         return v != null && String(v).trim() !== '';
       });
+    const contractOnlySend =
+      !hasSupplementalLayoutKeys &&
+      !hasSupplemental &&
+      !hasTemplates &&
+      !hasTemplateIds &&
+      !hasFilters;
 
-    if (!hasTemplates && !hasTemplateIds && !hasFilters) {
+    if (
+      !contractOnlySend &&
+      !hasSupplementalLayoutKeys &&
+      !hasSupplemental &&
+      !hasTemplates &&
+      !hasTemplateIds &&
+      !hasFilters
+    ) {
       return res.status(400).json({
         message:
-          'Provide templateIds, templates, or contractTemplateFilters (state/frequency/type).',
+          'Provide supplementalLayoutKeys, supplementalDocumentRefs, templateIds, templates, or contractTemplateFilters (state/frequency/type).',
       });
     }
     if (!roles?.length) {
@@ -352,6 +374,10 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
     const result = await docusignService.mergeAndSendTemplates(userId, {
       templates,
       templateIds,
+      supplementalLayoutKeys,
+      supplementalDocumentRefs,
+      includeMainContract:
+        includeMainContract === false ? false : includeMainContract === true ? true : undefined,
       contractTemplateFilters,
       roles,
       prefillFields,
@@ -360,6 +386,8 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
       ccEmails: ccEmails || [],
       title,
       message,
+      ownerCount: ownerCount != null ? Number(ownerCount) : undefined,
+      guarantorCount: guarantorCount != null ? Number(guarantorCount) : undefined,
       autoSend: autoSend === false ? false : autoSend === true ? true : undefined,
       reminderSettings,
     });
@@ -399,21 +427,26 @@ export const docusignWebhook = async (req: Request, res: Response) => {
 export const syncDocusignEnvelopeStatus = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?.id;
-    const { applicationId, envelopeId, ccEmails } = req.body || {};
+    const { applicationId, envelopeId, ccEmails, contractId, force } = req.body || {};
     if (!applicationId && !envelopeId) {
       return res.status(400).json({
         message: 'applicationId or envelopeId is required',
       });
     }
+    const contractIdNum = Number(contractId);
     const result = await docusignService.syncEnvelopeStatusFromDocusign(userId, {
       applicationId,
       envelopeId,
       ccEmails: Array.isArray(ccEmails) ? ccEmails : undefined,
+      contractId:
+        Number.isFinite(contractIdNum) && contractIdNum > 0 ? contractIdNum : undefined,
+      force: force === true,
     });
     return res.json(result);
-  } catch (error: any) {
-    return res.status(error.status || 500).json({
-      message: error?.message || 'Failed to sync envelope status',
+  } catch (error: unknown) {
+    const { status, message } = formatDocusignRouteError(error);
+    return res.status(status).json({
+      message: message || 'Failed to sync envelope status',
     });
   }
 };

@@ -114,7 +114,8 @@ class ContractController {
       }
 
       const data = await contractService.getByApplicationIdContract(applicationId);
-      if (!data) return res.status(404).json({ success: false, message: 'Contract not found for this applicationId' });
+      // No row yet is normal before "Generate Contract" — not the same as ContractTemplate (global PDF).
+      if (!data) return res.status(200).json({ success: true, data: null });
 
       return res.status(200).json({ success: true, data });
     } catch (error: any) {
@@ -1124,6 +1125,22 @@ class ContractController {
       }
 
       const data = await contractService.uploadContractDocuments(contractId, reqFiles);
+
+      const uploadedByUserId = String((req as any).user?.id || '').trim();
+      if (uploadedByUserId) {
+        try {
+          const { notifyForContractDocumentUpload } = await import(
+            '../services/documentRequestFulfillmentService'
+          );
+          await notifyForContractDocumentUpload({
+            contractId,
+            contractUploadKeys: Object.keys(reqFiles || {}),
+            uploadedByUserId,
+          });
+        } catch (notifyErr) {
+          console.error('Failed to notify contract document request fulfillment:', notifyErr);
+        }
+      }
 
       return res.status(201).json({
         success: true,

@@ -1,12 +1,13 @@
 import type { Request } from 'express';
 import type { Prisma } from '@prisma/client';
-import prisma from '../config/prismaClient';
-import { createApplicationActivityLog } from './applicationActivityLogService';
-import type { AuthenticatedUser } from './applicationService';
+import prisma from '../../config/prismaClient';
+import { createApplicationActivityLog } from '../applicationActivityLogService';
+import type { AuthenticatedUser } from '../applicationService';
 import {
     APPLICATION_QUEUE_CONTRACT_PENDING,
     APPLICATION_STATE_CONTRACT_PENDING,
 } from './contractApplicationWorkflowSync';
+} from '../../queues/applicationApprovalQueue';
 
 /* ============================================================================
  * Application Approval domain service
@@ -408,6 +409,7 @@ export interface ApprovalSideEffectPayload {
 function dispatchApprovalSideEffects(payload: ApprovalSideEffectPayload): void {
     /**
      * Always fan out inline so in-app notifications are never blocked by a
+        enqueueApplicationApprovalSideEffects(payload).catch((err: unknown) => {
      * Redis/BullMQ outage (REDIS_URL is set locally but Redis is not running,
      * worker failed to start, etc.).
      */
@@ -426,7 +428,7 @@ function dispatchApprovalSideEffects(payload: ApprovalSideEffectPayload): void {
 async function runApprovalSideEffectsInline(payload: ApprovalSideEffectPayload): Promise<void> {
     try {
         const { processApplicationApprovalSideEffects } = await import(
-            './applicationApprovalSideEffects'
+            '../applicationApprovalSideEffects'
         );
         await processApplicationApprovalSideEffects(payload);
     } catch (err) {
