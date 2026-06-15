@@ -15,6 +15,7 @@ import { startCollectionPaymentUploadWorker } from './workers/collectionPaymentU
 import { startApplicationApprovalWorker } from './workers/applicationApprovalWorker';
 import { verifySuperAdminProxy } from './middleware/verifySuperAdminProxy';
 import { activityLogger } from './middleware/activityLogger';
+import { getDefaultMailFrom, isSendGridConfigured } from './config/nodemailer';
 
 process.on('uncaughtException', (err) => {
   console.error('[process] uncaughtException:', err?.stack || err);
@@ -69,6 +70,13 @@ app.use((req, res, next) => {
 });
 
 cloudinaryConnect();
+console.log(
+  `[mail] Outbound sender: ${getDefaultMailFrom()} (SendGrid: ${isSendGridConfigured() ? 'yes' : 'no'})`,
+);
+const sendgridWebhookBase = process.env.SENDGRID_WEBHOOK_URL?.trim().replace(/\/$/, '');
+if (sendgridWebhookBase) {
+  console.log(`[mail] SendGrid event webhook (configure in SendGrid dashboard): ${sendgridWebhookBase}/sendgrid/webhook`);
+}
 console.log('Starting CRM Email Bot...');
 startCronJob();
 startSuperAdminPlatformCronJob();

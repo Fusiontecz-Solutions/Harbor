@@ -1,8 +1,11 @@
-import type { PaymentMailLogStatus } from '@prisma/client';
 import type { Request } from 'express';
+import type { PaymentMailLog, PaymentMailLogStatus } from '@prisma/client';
 import prisma from '../config/prismaClient';
+import { resolveMailLogDisplayStatus } from './sendgridWebhookService';
+import { resolveAuditLogUserId } from '../middleware/authMiddleware';
 import type { AuthenticatedUser } from './applicationService';
 import { createApplicationActivityLog } from './applicationActivityLogService';
+import { inferRecipientTypeFromCategory } from './outboundCommunicationService';
 
 const STATUS_MAP: Record<string, PaymentMailLogStatus> = {
   queued: 'QUEUED',
@@ -26,6 +29,268 @@ export function fromPrismaMailLogStatus(status: PaymentMailLogStatus): 'queued' 
   }
 }
 
+/** Delivery statuses from SendGrid webhooks (stored on linked activity log metadata). */
+export type PaymentMailDeliveryStatus =
+  | 'delivered'
+  | 'opened'
+  | 'clicked'
+  | 'deferred'
+  | 'bounced'
+  | 'dropped'
+  | 'spam'
+  | 'unsubscribed'
+  | 'failed';
+
+export type PaymentMailLogApiStatus = 'queued' | 'sent' | 'failed' | PaymentMailDeliveryStatus;
+
+export function resolvePaymentMailDisplayStatus(
+  prismaStatus: PaymentMailLogStatus,
+  deliveryStatus?: string | null,
+  delivery?: PaymentMailLogDeliveryMeta | null,
+): PaymentMailLogApiStatus {
+  const fromTimeline = delivery ? statusFromDeliveryTimeline(delivery) : null;
+  const normalized = (fromTimeline ?? deliveryStatus)?.trim().toLowerCase();
+  if (normalized && normalized !== 'sent' && normalized !== 'processed') {
+    return normalized as PaymentMailLogApiStatus;
+  }
+  return fromPrismaMailLogStatus(prismaStatus);
+}
+
+function statusFromDeliveryTimeline(delivery: PaymentMailLogDeliveryMeta): string {
+  return resolveMailLogDisplayStatus({
+    status: (delivery.status as 'sent') ?? 'sent',
+    statusRank: 0,
+    lastEvent: delivery.lastEvent ?? '',
+    lastEventAt: delivery.lastEventAt ?? '',
+    sentAt: delivery.sentAt,
+    deliveredAt: delivery.deliveredAt,
+    openedAt: delivery.openedAt,
+    clickedAt: delivery.clickedAt,
+    bouncedAt: delivery.bouncedAt,
+    openCount: delivery.openCount ?? 0,
+    clickCount: delivery.clickCount ?? 0,
+    processedEventIds: [],
+  });
+}
+
+export type PaymentMailLogDeliveryMeta = {
+  status?: string;
+  sentAt?: string;
+  deliveredAt?: string;
+  openedAt?: string;
+  clickedAt?: string;
+  bouncedAt?: string;
+  openCount?: number;
+  clickCount?: number;
+  bounceReason?: string;
+  lastEvent?: string;
+  lastEventAt?: string;
+  lastClickedUrl?: string;
+};
+
+export function formatPaymentMailLogApiRow(
+  log: PaymentMailLog,
+  opts?: {
+    deliveryStatus?: string | null;
+    attachments?: string[];
+    delivery?: PaymentMailLogDeliveryMeta | null;
+  },
+) {
+  const deliveryStatus = opts?.deliveryStatus ?? null;
+  return {
+    id: log.id,
+    at: log.createdAt?.toISOString() ?? new Date().toISOString(),
+    dealKey: log.dealKey,
+    applicationId: log.applicationId,
+    templateName: log.templateName,
+    category: log.category,
+    recipient: log.recipient,
+    subject: log.subject,
+    body: log.body ?? undefined,
+    status: resolvePaymentMailDisplayStatus(log.status, deliveryStatus, opts?.delivery ?? null),
+    attachments: opts?.attachments?.length ? opts.attachments : undefined,
+    delivery: opts?.delivery ?? undefined,
+  };
+}
+
+function extractAttachmentNamesFromMetadata(metadata: unknown): string[] {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return [];
+  const meta = metadata as Record<string, unknown>;
+  const names: string[] = [];
+  const push = (value: unknown) => {
+    if (typeof value === 'string' && value.trim()) names.push(value.trim());
+  };
+
+  push(meta.documentName);
+  if (meta.hasLetterPdf === true) push('Letter PDF');
+
+  if (Array.isArray(meta.attachments)) {
+    for (const item of meta.attachments) {
+      if (typeof item === 'string') push(item);
+      else if (item && typeof item === 'object') {
+        const row = item as Record<string, unknown>;
+        push(row.filename);
+        push(row.name);
+        push(row.originalName);
+      }
+    }
+  }
+
+  return [...new Set(names)];
+}
+
+function deliveryMetaFromActivityMetadata(metadata: unknown): {
+  status: string | null;
+  delivery: PaymentMailLogDeliveryMeta | null;
+  attachments: string[];
+} {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    return { status: null, delivery: null, attachments: [] };
+  }
+  const meta = metadata as Record<string, unknown>;
+  const deliveryRaw = meta.delivery;
+  let delivery: PaymentMailLogDeliveryMeta | null = null;
+  let status: string | null = null;
+
+  if (deliveryRaw && typeof deliveryRaw === 'object' && !Array.isArray(deliveryRaw)) {
+    delivery = { ...(deliveryRaw as PaymentMailLogDeliveryMeta) };
+    status = statusFromDeliveryTimeline(delivery);
+  }
+
+  if (!status) {
+    const metaStatus = meta.status;
+    if (typeof metaStatus === 'string' && metaStatus.trim()) {
+      status = metaStatus.trim().toLowerCase();
+    }
+  }
+
+  if (delivery && status) {
+    delivery = { ...delivery, status };
+  }
+
+  return {
+    status,
+    delivery,
+    attachments: extractAttachmentNamesFromMetadata(meta),
+  };
+}
+
+export async function enrichPaymentMailLogsForApi(logs: PaymentMailLog[]) {
+  if (!logs.length) return [];
+
+  const applicationId = logs[0]?.applicationId;
+  if (!applicationId) {
+    return logs.map((log) => formatPaymentMailLogApiRow(log));
+  }
+
+  const activityLogs = await prisma.applicationActivityLog.findMany({
+    where: { applicationId },
+    orderBy: { createdAt: 'desc' },
+    select: { metadata: true },
+  });
+
+  const enrichmentByPaymentLogId = new Map<
+    string,
+    { status: string | null; delivery: PaymentMailLogDeliveryMeta | null; attachments: string[] }
+  >();
+
+  for (const row of activityLogs) {
+    const meta = row.metadata;
+    if (!meta || typeof meta !== 'object' || Array.isArray(meta)) continue;
+    const paymentMailLogId = (meta as Record<string, unknown>).paymentMailLogId;
+    if (typeof paymentMailLogId !== 'string' || enrichmentByPaymentLogId.has(paymentMailLogId)) {
+      continue;
+    }
+    enrichmentByPaymentLogId.set(paymentMailLogId, deliveryMetaFromActivityMetadata(meta));
+  }
+
+  return logs.map((log) => {
+    const enrichment = enrichmentByPaymentLogId.get(log.id);
+    const attachments = [
+      ...new Set(
+        [
+          ...(enrichment?.attachments ?? []),
+          log.templateName?.trim() ? log.templateName.trim() : '',
+        ].filter(Boolean),
+      ),
+    ];
+    const delivery = enrichment?.delivery ?? null;
+    return formatPaymentMailLogApiRow(log, {
+      deliveryStatus: enrichment?.status ?? null,
+      delivery,
+      attachments,
+    });
+  });
+}
+
+export async function insertPaymentMailLogRecord(
+  applicationId: string,
+  user: AuthenticatedUser | null,
+  input: CreatePaymentMailLogInput,
+  req?: Request | null,
+) {
+  const prismaStatus = toPrismaMailLogStatus(input.status);
+  if (!prismaStatus) {
+    throw new Error('Invalid payment mail log status');
+  }
+
+  const createdById = await resolveAuditLogUserId(req, { user, applicationId });
+
+  return prisma.paymentMailLog.create({
+    data: {
+      applicationId,
+      dealKey: input.dealKey,
+      templateName: input.templateName,
+      category: input.category,
+      recipient: input.recipient,
+      subject: input.subject,
+      body: input.body?.trim() ? input.body : null,
+      status: prismaStatus,
+      createdById,
+    },
+  });
+}
+
+export async function markPaymentMailLogFailed(
+  paymentMailLogId: string,
+  input: Pick<CreatePaymentMailLogInput, 'dealKey' | 'templateName' | 'category' | 'recipient' | 'subject'>,
+) {
+  const log = await prisma.paymentMailLog.update({
+    where: { id: paymentMailLogId },
+    data: { status: 'FAILED' },
+  });
+
+  const summary = `Failed to send ${input.category} "${input.templateName}" to ${input.recipient}`;
+  const activityLog = await prisma.applicationActivityLog.findFirst({
+    where: {
+      metadata: {
+        path: ['paymentMailLogId'],
+        equals: paymentMailLogId,
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  if (activityLog) {
+    const prior =
+      activityLog.metadata &&
+      typeof activityLog.metadata === 'object' &&
+      !Array.isArray(activityLog.metadata)
+        ? (activityLog.metadata as Record<string, unknown>)
+        : {};
+    await prisma.applicationActivityLog.update({
+      where: { id: activityLog.id },
+      data: {
+        actionType: 'PAYMENT_MAIL_FAILED',
+        actionDescription: summary,
+        metadata: { ...prior, status: 'failed' } as object,
+      },
+    });
+  }
+
+  return log;
+}
+
 export interface CreatePaymentMailLogInput {
   dealKey: string;
   templateName: string;
@@ -36,7 +301,7 @@ export interface CreatePaymentMailLogInput {
   status: 'queued' | 'sent' | 'failed';
 }
 
-async function assertApplicationMailLogAccess(applicationId: string, user: AuthenticatedUser | null) {
+export async function assertApplicationMailLogAccess(applicationId: string, user: AuthenticatedUser | null) {
   const application = await prisma.application.findUnique({
     where: { id: applicationId },
     select: {
@@ -86,6 +351,8 @@ export async function createPaymentMailLog(
     return { forbidden: false, notFound: false, log: null, badRequest: true as const };
   }
 
+  const createdById = await resolveAuditLogUserId(req, { user, applicationId });
+
   const log = await prisma.paymentMailLog.create({
     data: {
       applicationId,
@@ -96,7 +363,7 @@ export async function createPaymentMailLog(
       subject: input.subject,
       body: input.body?.trim() ? input.body : null,
       status: prismaStatus,
-      createdById: user?.id ?? null,
+      createdById,
     },
   });
 
@@ -121,9 +388,14 @@ export async function createPaymentMailLog(
     previousStatus: null,
     currentStatus: access.application.currentState ?? 'Unknown',
     metadata: {
+      category: 'COMMUNICATION',
+      channel: 'TEMPLATE',
+      recipientType: inferRecipientTypeFromCategory(input.category),
+      recipientName: input.recipient,
       paymentMailLogId: log.id,
+      viewType: 'payment_mail',
       templateName: input.templateName,
-      category: input.category,
+      categoryLabel: input.category,
       recipient: input.recipient,
       subject: input.subject,
       status: input.status,

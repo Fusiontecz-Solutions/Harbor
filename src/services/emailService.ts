@@ -137,6 +137,170 @@ function buildBrandHeaderStyles(): string {
     </style>`;
 }
 
+/** Katan Capital purple & blue palette — approval / offer-update client emails. */
+const KATAN_EMAIL_THEME = {
+    bgBody: '#f5f4f8',
+    bgCard: '#ffffff',
+    borderCard: '#e1dae6',
+    purpleDeep: '#7a33a8',
+    purpleAmethyst: '#a364c9',
+    blueSky: '#1bb2e9',
+    textPrimary: '#4b3658',
+    textMuted: '#5a4b64',
+    textDisabled: '#bca6cc',
+    trackerLineInactive: '#cbd5e1',
+    trackerBgInactive: '#f1ecf6',
+    gradientHero: 'linear-gradient(135deg, #7a33a8 0%, #a364c9 50%, #1bb2e9 100%)',
+    gradientCta: 'linear-gradient(to right, #a364c9, #1bb2e9)',
+} as const;
+
+/**
+ * Logo shown above the hero banner on ISO "Application Approved" and "Offer Updated"
+ * emails (white card background — use a dark logo URL).
+ *
+ * Set in `.env`:
+ *   ISO_EMAIL_LOGO_URL=https://res.cloudinary.com/.../black_logo.svg
+ *
+ * Per-template overrides (optional):
+ *   APPROVAL_BANNER_LOGO_URL=...
+ *   OFFER_UPDATED_BANNER_LOGO_URL=...
+ *
+ * When empty, falls back to the inline katan brand header (CID attachments).
+ */
+const DEFAULT_ISO_EMAIL_LOGO_URL =
+    'https://res.cloudinary.com/dfy6ahsqz/image/upload/v1780324705/white_logo_d8bsb1.svg';
+
+export const ISO_EMAIL_LOGO_URL =
+    String(process.env.ISO_EMAIL_LOGO_URL || '').trim() || DEFAULT_ISO_EMAIL_LOGO_URL;
+
+export const APPROVAL_BANNER_LOGO_URL =
+    String(process.env.APPROVAL_BANNER_LOGO_URL || '').trim() || ISO_EMAIL_LOGO_URL;
+
+export const OFFER_UPDATED_BANNER_LOGO_URL =
+    String(process.env.OFFER_UPDATED_BANNER_LOGO_URL || '').trim() || ISO_EMAIL_LOGO_URL;
+
+/** Logo row on white, then purple gradient title strip — approval / offer-update emails. */
+function buildKatanCapitalEmailHeaderHtml(
+    logoUrl: string | undefined,
+    title: string,
+    subtitle: string,
+): string {
+    const t = KATAN_EMAIL_THEME;
+    const url = String(logoUrl || '').trim();
+    const logoRow = url
+        ? `
+                    <tr>
+                        <td align="center" style="padding: 24px 20px 16px; background-color: ${t.bgCard};">
+                            <img src="${url}" alt="katan" width="180" style="display: block; margin: 0 auto; max-width: 180px; width: 180px; height: auto; border: 0; outline: none;" />
+                        </td>
+                    </tr>`
+        : buildBrandHeaderRowHtml();
+
+    return `
+                    ${logoRow}
+                    <tr>
+                        <td style="padding: 0 20px 4px;">
+                            <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background: ${t.gradientHero}; background-color: ${t.purpleDeep}; border-radius: 8px;">
+                                <tr>
+                                    <td align="center" style="padding: 28px 24px; color: #ffffff;">
+                                        <div style="font-size: 22px; font-weight: bold; letter-spacing: 1px; margin-bottom: 5px;">${title}</div>
+                                        <div style="font-size: 14px; opacity: 0.9;">${subtitle}</div>
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>`;
+}
+
+type KatanEmailTrackerStep = { label: string; complete: boolean };
+
+function buildKatanCapitalEmailTracker(steps: KatanEmailTrackerStep[]): string {
+    const t = KATAN_EMAIL_THEME;
+    return steps
+        .map((step, index) => {
+            const isLast = index === steps.length - 1;
+            const connector = isLast
+                ? ''
+                : `<tr><td align="center" style="padding: 5px 0;"><div style="width: 0px; border-left: 2px dotted ${step.complete ? t.purpleAmethyst : t.trackerLineInactive}; height: 35px;"></div></td></tr>`;
+            const circleBg = step.complete ? t.purpleDeep : t.trackerBgInactive;
+            const circleColor = step.complete ? '#ffffff' : t.textDisabled;
+            const labelColor = step.complete ? t.textPrimary : t.textDisabled;
+            return `
+            <tr><td align="center"><div style="width: 32px; height: 32px; background: ${circleBg}; border-radius: 50%; color: ${circleColor}; line-height: 32px; font-size: 16px;">${step.complete ? '&#10003;' : 'X'}</div></td></tr>
+            <tr><td align="center" style="font-size: 11px; padding: 5px 0; color: ${labelColor}; line-height: 1.2;">${step.label}</td></tr>
+            ${connector}`;
+        })
+        .join('');
+}
+
+function buildKatanCapitalCtaButton(href: string, label: string): string {
+    const t = KATAN_EMAIL_THEME;
+    return `
+        <table border="0" cellpadding="0" cellspacing="0" style="margin: 20px 0 25px 0;">
+            <tr>
+                <td align="center" style="border-radius: 5px; background: ${t.gradientCta}; background-color: ${t.purpleAmethyst};">
+                    <a href="${href}" style="display: inline-block; padding: 12px 25px; color: #ffffff; font-size: 16px; font-weight: bold; text-decoration: none;">${label}</a>
+                </td>
+            </tr>
+        </table>`;
+}
+
+function buildKatanCapitalClientEmailHtml({
+    pageTitle,
+    heroTitle,
+    heroSubtitle,
+    trackerSteps,
+    bodyHtml,
+    bannerLogoUrl,
+}: {
+    pageTitle: string;
+    heroTitle: string;
+    heroSubtitle: string;
+    trackerSteps: KatanEmailTrackerStep[];
+    bodyHtml: string;
+    bannerLogoUrl?: string;
+}): string {
+    const t = KATAN_EMAIL_THEME;
+    const emailHeader = buildKatanCapitalEmailHeaderHtml(bannerLogoUrl, heroTitle, heroSubtitle);
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <title>${pageTitle}</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    ${buildBrandHeaderStyles()}
+</head>
+<body style="margin: 0; padding: 0; background-color: ${t.bgBody}; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;">
+    <table border="0" cellpadding="0" cellspacing="0" width="100%">
+        <tr>
+            <td style="padding: 20px 0;">
+                <table align="center" border="0" cellpadding="0" cellspacing="0" width="600" style="background-color: ${t.bgCard}; border: 1px solid ${t.borderCard};">
+                    ${emailHeader}
+                    <tr>
+                        <td style="padding: 30px 20px;">
+                            <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                                <tr>
+                                    <td width="110" valign="top" align="center">
+                                        <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                                            ${buildKatanCapitalEmailTracker(trackerSteps)}
+                                        </table>
+                                    </td>
+                                    <td valign="top" style="padding-left: 25px;">
+                                        ${bodyHtml}
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>`;
+}
+
 /**
  * Href values in these templates (`viewApplicationUrl`, `publicPortalUrl`, `calculateApprovalUrl`, etc.)
  * are supplied by callers (e.g. `applicationController`) using `resolveCrmFrontendBaseUrl()` from `../utils/crmFrontendUrl`.
@@ -203,237 +367,69 @@ export interface ApplicationApprovalEmailParams {
     companyName: string;
     viewApplicationUrl?: string;
     calculateApprovalUrl?: string;
+    /** Optional logo URL above the hero banner (overrides APPROVAL_BANNER_LOGO_URL). */
+    bannerLogoUrl?: string;
+    /** SendGrid webhook correlation id (`ocid` custom arg). */
+    trackingId?: string;
 }
-
-const buildStatusStep = (
-    label: string,
-    position: 'first' | 'middle' | 'last',
-    isActive: boolean,
-    isCompleted: boolean
-): string => {
-    const circleColor = isCompleted || isActive ? '#1E88E5' : '#E5E7EB';
-    const circleBorder = isActive ? '2px solid #1E88E5' : '2px solid #E5E7EB';
-    const circleBackground = isActive ? '#ffffff' : circleColor;
-    const textColor = isActive || isCompleted ? '#111827' : '#9CA3AF';
-
-    const connectorTop = position !== 'first'
-        ? `<tr>
-          <td width="40" align="center">
-              <table width="2" border="0" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
-                  <tr>
-                      <td style="background-color:#E5E7EB; height:20px; font-size:0; line-height:0;">&nbsp;</td>
-                  </tr>
-              </table>
-          </td>
-          <td>&nbsp;</td>
-      </tr>`
-        : '';
-
-    const connectorBottom = position !== 'last'
-        ? `<tr>
-          <td width="40" align="center">
-              <table width="2" border="0" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
-                  <tr>
-                      <td style="background-color:#E5E7EB; height:20px; font-size:0; line-height:0;">&nbsp;</td>
-                  </tr>
-              </table>
-          </td>
-          <td>&nbsp;</td>
-      </tr>`
-        : '';
-
-    return `
-    ${connectorTop}
-    <tr>
-        <td width="40" align="center" valign="middle">
-            <table width="26" height="26" border="0" cellspacing="0" cellpadding="0" style="border-radius:50%; border:${circleBorder}; background-color:${circleBackground};">
-                <tr>
-                    <td align="center" valign="middle" style="font-size:14px; line-height:14px; color:${isCompleted || isActive ? '#1E88E5' : '#9CA3AF'};">
-                        ${isCompleted ? '&#10003;' : isActive ? '&#9679;' : '&nbsp;'}
-                    </td>
-                </tr>
-            </table>
-        </td>
-        <td align="left" valign="middle" style="font-family:Arial,Helvetica,sans-serif; font-size:14px; line-height:20px; color:${textColor}; padding-left:8px;">
-            ${label}
-        </td>
-    </tr>
-    ${connectorBottom}
-  `;
-};
 
 export const buildApplicationApprovalEmailHtml = ({
     clientName,
     companyName,
-    viewApplicationUrl,
     calculateApprovalUrl,
-}: Omit<ApplicationApprovalEmailParams, 'to'>): string => {
+    bannerLogoUrl,
+}: Omit<ApplicationApprovalEmailParams, 'to' | 'viewApplicationUrl'>): string => {
     const safeClientName = clientName || 'Valued Client';
     const safeCompanyName = companyName || 'your company';
+    const t = KATAN_EMAIL_THEME;
 
-    const steps: Array<{ label: string; key: string }> = [
-        { label: 'Application Submitted', key: 'submitted' },
-        { label: 'Underwriting', key: 'underwriting' },
-        { label: 'Approved', key: 'approved' },
-        { label: 'Contract', key: 'Contract' },
-        { label: 'Final Call', key: 'finalCall' },
-        { label: 'Funded', key: 'funded' },
-    ];
-
-    const currentKey = 'approved';
-
-    const stepsHtml = steps
-        .map((step, index) => {
-            const position: 'first' | 'middle' | 'last' =
-                index === 0 ? 'first' : index === steps.length - 1 ? 'last' : 'middle';
-            const isCompleted = ['submitted', 'underwriting'].includes(step.key);
-            const isActive = step.key === currentKey;
-            return buildStatusStep(step.label, position, isActive, isCompleted);
-        })
-        .join('');
-
-    const buttonHtml = viewApplicationUrl
-        ? `<tr>
-            <td align="center" style="padding:24px 0 8px 0;">
-                <a href="${viewApplicationUrl}"
-                   style="display:inline-block; padding:12px 24px; background-color:#1E88E5; color:#ffffff; text-decoration:none; font-family:Arial,Helvetica,sans-serif; font-size:14px; font-weight:bold; border-radius:4px;">
-                    View Your Application
-                </a>
-            </td>
-        </tr>`
-        : '';
-
-    return `
-<!DOCTYPE html>
-<html>
-<head>
-    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
-    <title>Application Approved</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    ${buildBrandHeaderStyles()}
-</head>
-<body style="margin: 0; padding: 0; background-color: #f4f7f9; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;">
-    <table border="0" cellpadding="0" cellspacing="0" width="100%">
-        <tr>
-            <td style="padding: 20px 0;">
-                <table align="center" border="0" cellpadding="0" cellspacing="0" width="600" style="background-color: #ffffff; border: 1px solid #dddddd;">
-                    
-                    ${buildBrandHeaderRowHtml()}
-
-                    <tr>
-                        <td style="padding: 0 20px;">
-                            <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background: linear-gradient(to right, #3b7ab0, #1a4a7c); background-color: #1a4a7c; border-radius: 8px;">
-                                <tr>
-                                    <td width="100" align="center" style="padding: 30px 0 30px 20px;">
-                                        <div style="width: 70px; height: 70px; border: 2px solid #ffffff; border-radius: 50%; line-height: 70px; text-align: center; font-size: 35px; color: #ffffff;">📄</div>
-                                    </td>
-                                    <td style="padding: 30px 20px; color: #ffffff;">
-                                        <div style="font-size: 22px; font-weight: bold; letter-spacing: 1px; margin-bottom: 5px;">APPLICATION APPROVED</div>
-                                        <div style="font-size: 14px; opacity: 0.9;">Congratulations! Your application has been successfully processed.</div>
-                                    </td>
-                                </tr>
-                            </table>
-                        </td>
-                    </tr>
-
-                    <tr>
-                        <td style="padding: 30px 20px;">
-                            <table border="0" cellpadding="0" cellspacing="0" width="100%">
-                                <tr>
-                                    <td width="110" valign="top" align="center">
-                                        <table border="0" cellpadding="0" cellspacing="0" width="100%">
-                                            <tr><td align="center"><div style="width: 32px; height: 32px; background: #0b71a9; border-radius: 50%; color: #ffffff; line-height: 32px; font-size: 16px;">✓</div></td></tr>
-                                            <tr><td align="center" style="font-size: 11px; padding: 5px 0; color: #333; line-height: 1.2;">Application<br/>Submitted</td></tr>
-                                            <tr><td align="center" style="padding: 5px 0;"><div style="width: 0px; border-left: 2px dotted #0b71a9; height: 35px;"></div></td></tr>
-                                            <tr><td align="center"><div style="width: 32px; height: 32px; background: #0b71a9; border-radius: 50%; color: #ffffff; line-height: 32px; font-size: 16px;">✓</div></td></tr>
-                                            <tr><td align="center" style="font-size: 11px; padding: 5px 0; color: #333;">Underwriting</td></tr>
-                                            <tr><td align="center" style="padding: 5px 0;"><div style="width: 0px; border-left: 2px dotted #0b71a9; height: 35px;"></div></td></tr>
-                                            <tr><td align="center"><div style="width: 32px; height: 32px; background: #0b71a9; border-radius: 50%; color: #ffffff; line-height: 32px; font-size: 16px;">✓</div></td></tr>
-                                            <tr><td align="center" style="font-size: 11px; padding: 5px 0; color: #333;">Approved</td></tr>
-                                            <tr><td align="center" style="padding: 5px 0;"><div style="width: 0px; border-left: 2px dotted #cccccc; height: 35px;"></div></td></tr>
-                                            <tr><td align="center"><div style="width: 32px; height: 32px; background: #cccccc; border-radius: 50%; color: #ffffff; line-height: 32px; font-size: 16px;">X</div></td></tr>
-                                            <tr><td align="center" style="font-size: 11px; padding: 5px 0; color: #888;">Contract</td></tr>
-                                            <tr><td align="center" style="padding: 5px 0;"><div style="width: 0px; border-left: 2px dotted #cccccc; height: 35px;"></div></td></tr>
-                                            <tr><td align="center"><div style="width: 32px; height: 32px; background: #cccccc; border-radius: 50%; color: #ffffff; line-height: 32px; font-size: 16px;">X</div></td></tr>
-                                            <tr><td align="center" style="font-size: 11px; padding: 5px 0; color: #888;">Funding Call</td></tr>
-                                            <tr><td align="center" style="padding: 5px 0;"><div style="width: 0px; border-left: 2px dotted #cccccc; height: 35px;"></div></td></tr>
-                                            <tr><td align="center"><div style="width: 32px; height: 32px; background: #cccccc; border-radius: 50%; color: #ffffff; line-height: 32px; font-size: 16px;">X</div></td></tr>
-                                            <tr><td align="center" style="font-size: 11px; padding: 5px 0; color: #888;">Funded</td></tr>
-                                        </table>
-                                    </td>
-
-                                    <td valign="top" style="padding-left: 25px;">
-                                        <p style="margin: 0 0 15px 0; font-size: 16px; color: #444;">Hi ${safeClientName}!</p>
-                                        
-                                        <p style="font-size: 15px; color: #666; line-height: 1.5;">
-                                            We are pleased to inform you that your application for 
-                                            <strong style="color: #0b71a9;">'${safeCompanyName}'</strong> 
-                                            has been pre-approved for a katan Advance!
-                                        </p>
-
-                                        <p style="font-size: 14px; color: #666; line-height: 1.5;">
-                                            Please click on the button below to calculate your approvals. You do not need a katan Advance CRM login to use our calculator! Everyone on your team will have immediate access via this email.
-                                        </p>
-
-                                        <table border="0" cellpadding="0" cellspacing="0" style="margin: 20px 0;">
-                                            <tr>
-                                                <td align="center" bgcolor="#3b7ab0" style="border-radius: 5px;">
-                                                    <a href="${calculateApprovalUrl || '#'}" style="display: inline-block; padding: 12px 25px; color: #ffffff; font-size: 16px; font-weight: bold; text-decoration: none;">Calculate your Approval</a>
-                                                </td>
-                                            </tr>
-                                        </table>
-
-                                        <h4 style="margin: 30px 0 10px 0; font-size: 15px; color: #333; text-decoration: underline;">REQUIRED STIPS FOR FUNDING</h4>
-                                        <table border="0" cellpadding="0" cellspacing="0" width="100%">
-                                            <tr>
-                                                <td width="50%" valign="top" style="font-size: 12px; color: #444; padding-right: 10px;">
-                                                    <strong>Provide with signed contracts:</strong>
-                                                    <ul style="padding-left: 15px; margin-top: 8px; color: #0b71a9;">
-                                                        <li><span style="color: #444;">Void Check</span></li>
-                                                        <li><span style="color: #444;">Driver's License</span></li>
-                                                    </ul>
-                                                </td>
-                                                <td width="50%" valign="top" style="font-size: 12px; color: #444;">
-                                                    <strong>Abc Company will take care of:</strong>
-                                                    <ul style="padding-left: 15px; margin-top: 8px; color: #0b71a9;">
-                                                        <li><span style="color: #444;">Merchant Interview</span></li>
-                                                        <li><span style="color: #444;">Decision Logic/Bank Login</span></li>
-                                                        <li><span style="color: #444;">Recent Bank Statements</span></li>
-                                                    </ul>
-                                                </td>
-                                            </tr>
-                                        </table>
-
-                                        <p style="font-size: 14px; color: #0b71a9; margin-top: 30px; font-weight: bold;">To view your application in katan Advance CRM, click on the button below.</p>
-                                        <table border="0" cellpadding="0" cellspacing="0" style="margin-bottom: 25px;">
-                                            <tr>
-                                                <td align="center" bgcolor="#3b7ab0" style="border-radius: 5px;">
-                                                    <a href="${viewApplicationUrl || '#'}" style="display: inline-block; padding: 10px 20px; color: #ffffff; font-size: 14px; font-weight: bold; text-decoration: none;">View your Application</a>
-                                                </td>
-                                            </tr>
-                                        </table>
-
-                                        <p style="font-size: 13px; color: #777; margin-top: 20px; line-height: 1.4;">If you need more information or have any questions/comments, contact your representative directly or leave a comment in the portal by clicking on the button below.</p>
-                                        
-                                        <table border="0" cellpadding="0" cellspacing="0">
-                                            <tr>
-                                                <td align="center" bgcolor="#3b7ab0" style="border-radius: 5px;">
-                                                    <a href="#" style="display: inline-block; padding: 10px 20px; color: #ffffff; font-size: 14px; font-weight: bold; text-decoration: none;">Write Comment</a>
-                                                </td>
-                                            </tr>
-                                        </table>
-                                    </td>
-                                </tr>
-                            </table>
-                        </td>
-                    </tr>
-                </table>
-            </td>
-        </tr>
-    </table>
-</body>
-</html>
-`
+    return buildKatanCapitalClientEmailHtml({
+        pageTitle: 'Application Approved',
+        heroTitle: 'APPLICATION APPROVED',
+        heroSubtitle: 'Congratulations! Your application has been successfully processed.',
+        bannerLogoUrl: bannerLogoUrl || APPROVAL_BANNER_LOGO_URL,
+        trackerSteps: [
+            { label: 'Application<br/>Submitted', complete: true },
+            { label: 'Underwriting', complete: true },
+            { label: 'Approved', complete: true },
+            { label: 'Contract', complete: false },
+            { label: 'Funding Call', complete: false },
+            { label: 'Funded', complete: false },
+        ],
+        bodyHtml: `
+            <p style="margin: 0 0 15px 0; font-size: 16px; color: ${t.textPrimary};">Hi ${safeClientName}!</p>
+            <p style="font-size: 15px; color: ${t.textMuted}; line-height: 1.5;">
+                We are pleased to inform you that your application for
+                <strong style="color: ${t.purpleDeep};">'${safeCompanyName}'</strong>
+                has been pre-approved for a katan Advance!
+            </p>
+            <p style="font-size: 14px; color: ${t.textMuted}; line-height: 1.5;">
+                Please click the button below to calculate your approvals. You do not need a katan Advance CRM login to use our calculator — everyone on your team will have immediate access via this email.
+            </p>
+            ${buildKatanCapitalCtaButton(calculateApprovalUrl || '#', 'Calculate your Approval')}
+            <h4 style="margin: 30px 0 10px 0; font-size: 15px; color: ${t.textPrimary}; text-decoration: underline;">REQUIRED STIPS FOR FUNDING</h4>
+            <table border="0" cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                    <td width="50%" valign="top" style="font-size: 12px; color: ${t.textPrimary}; padding-right: 10px;">
+                        <strong>Provide with signed contracts:</strong>
+                        <ul style="padding-left: 15px; margin-top: 8px; color: ${t.purpleAmethyst};">
+                            <li><span style="color: ${t.textMuted};">Void Check</span></li>
+                            <li><span style="color: ${t.textMuted};">Driver's License</span></li>
+                        </ul>
+                    </td>
+                    <td width="50%" valign="top" style="font-size: 12px; color: ${t.textPrimary};">
+                        <strong>Abc Company will take care of:</strong>
+                        <ul style="padding-left: 15px; margin-top: 8px; color: ${t.purpleAmethyst};">
+                            <li><span style="color: ${t.textMuted};">Merchant Interview</span></li>
+                            <li><span style="color: ${t.textMuted};">Decision Logic/Bank Login</span></li>
+                            <li><span style="color: ${t.textMuted};">Recent Bank Statements</span></li>
+                        </ul>
+                    </td>
+                </tr>
+            </table>
+            <p style="font-size: 13px; color: ${t.textMuted}; margin-top: 30px; line-height: 1.4;">If you need more information or have any questions, please contact your representative directly.</p>
+        `,
+    });
 };
 
 /** @returns true when SMTP accepted the message; false if disabled, invalid `to`, or send failed */
@@ -441,8 +437,9 @@ export async function sendApplicationApprovalEmail({
     to,
     clientName,
     companyName,
-    viewApplicationUrl,
     calculateApprovalUrl,
+    bannerLogoUrl,
+    trackingId,
 }: ApplicationApprovalEmailParams): Promise<boolean> {
     const toTrimmed = String(to || '').trim();
     if (!toTrimmed) {
@@ -464,8 +461,8 @@ export async function sendApplicationApprovalEmail({
     const html = buildApplicationApprovalEmailHtml({
         clientName,
         companyName,
-        viewApplicationUrl,
         calculateApprovalUrl,
+        bannerLogoUrl,
     });
 
     try {
@@ -474,6 +471,8 @@ export async function sendApplicationApprovalEmail({
             subject,
             html,
             attachments: buildBrandLogoAttachments(),
+            trackingId,
+            categories: ['approval'],
         });
         return true;
     } catch (error) {
@@ -543,6 +542,7 @@ export async function sendOperationsIsoApprovalAlertEmail({
                             </p>
                             <p style="margin: 0 0 16px;">
                                 <strong>ISO</strong> approved application <strong>#${safeApplicationNumber}</strong>.
+                                The deal has been moved to the <strong>Contract Pending</strong> stage.
                                 Now you can proceed to generate contract.
                             </p>
                         </td>
@@ -576,127 +576,58 @@ export interface ApplicationOfferUpdatedEmailParams {
     companyName: string;
     viewApplicationUrl?: string;
     calculateApprovalUrl?: string;
+    /** Optional logo URL above the hero banner (overrides OFFER_UPDATED_BANNER_LOGO_URL). */
+    bannerLogoUrl?: string;
+    /** SendGrid webhook correlation id (`ocid` custom arg). */
+    trackingId?: string;
 }
 
 export const buildApplicationOfferUpdatedEmailHtml = ({
     clientName,
     companyName,
-    viewApplicationUrl,
     calculateApprovalUrl,
-}: Omit<ApplicationOfferUpdatedEmailParams, 'to'>): string => {
+    bannerLogoUrl,
+}: Omit<ApplicationOfferUpdatedEmailParams, 'to' | 'viewApplicationUrl'>): string => {
     const safeClientName = clientName || 'Valued Client';
     const safeCompanyName = companyName || 'your company';
+    const t = KATAN_EMAIL_THEME;
 
-    return `
-<!DOCTYPE html>
-<html>
-<head>
-    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
-    <title>Offer Updated</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    ${buildBrandHeaderStyles()}
-</head>
-<body style="margin: 0; padding: 0; background-color: #f4f7f9; font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;">
-    <table border="0" cellpadding="0" cellspacing="0" width="100%">
-        <tr>
-            <td style="padding: 20px 0;">
-                <table align="center" border="0" cellpadding="0" cellspacing="0" width="600" style="background-color: #ffffff; border: 1px solid #dddddd;">
-                    
-                    ${buildBrandHeaderRowHtml()}
-
-                    <tr>
-                        <td style="padding: 0 20px;">
-                            <table border="0" cellpadding="0" cellspacing="0" width="100%" style="background: linear-gradient(to right, #3b7ab0, #1a4a7c); background-color: #1a4a7c; border-radius: 8px;">
-                                <tr>
-                                    <td width="100" align="center" style="padding: 30px 0 30px 20px;">
-                                        <div style="width: 70px; height: 70px; border: 2px solid #ffffff; border-radius: 50%; line-height: 70px; text-align: center; font-size: 35px; color: #ffffff;">📄</div>
-                                    </td>
-                                    <td style="padding: 30px 20px; color: #ffffff;">
-                                        <div style="font-size: 22px; font-weight: bold; letter-spacing: 1px; margin-bottom: 5px;">OFFER UPDATED</div>
-                                        <div style="font-size: 14px; opacity: 0.9;">Your offer values have been updated based on the latest approval mail comment.</div>
-                                    </td>
-                                </tr>
-                            </table>
-                        </td>
-                    </tr>
-
-                    <tr>
-                        <td style="padding: 30px 20px;">
-                            <table border="0" cellpadding="0" cellspacing="0" width="100%">
-                                <tr>
-                                    <td width="110" valign="top" align="center">
-                                        <table border="0" cellpadding="0" cellspacing="0" width="100%">
-                                            <tr><td align="center"><div style="width: 32px; height: 32px; background: #0b71a9; border-radius: 50%; color: #ffffff; line-height: 32px; font-size: 16px;">✓</div></td></tr>
-                                            <tr><td align="center" style="font-size: 11px; padding: 5px 0; color: #333; line-height: 1.2;">Application<br/>Submitted</td></tr>
-                                            <tr><td align="center" style="padding: 5px 0;"><div style="width: 0px; border-left: 2px dotted #0b71a9; height: 35px;"></div></td></tr>
-                                            <tr><td align="center"><div style="width: 32px; height: 32px; background: #0b71a9; border-radius: 50%; color: #ffffff; line-height: 32px; font-size: 16px;">✓</div></td></tr>
-                                            <tr><td align="center" style="font-size: 11px; padding: 5px 0; color: #333;">Underwriting</td></tr>
-                                            <tr><td align="center" style="padding: 5px 0;"><div style="width: 0px; border-left: 2px dotted #0b71a9; height: 35px;"></div></td></tr>
-                                            <tr><td align="center"><div style="width: 32px; height: 32px; background: #0b71a9; border-radius: 50%; color: #ffffff; line-height: 32px; font-size: 16px;">✓</div></td></tr>
-                                            <tr><td align="center" style="font-size: 11px; padding: 5px 0; color: #333;">Approved</td></tr>
-                                            <tr><td align="center" style="padding: 5px 0;"><div style="width: 0px; border-left: 2px dotted #0b71a9; height: 35px;"></div></td></tr>
-                                            <tr><td align="center"><div style="width: 32px; height: 32px; background: #0b71a9; border-radius: 50%; color: #ffffff; line-height: 32px; font-size: 16px;">✓</div></td></tr>
-                                            <tr><td align="center" style="font-size: 11px; padding: 5px 0; color: #333;">Offer Updated</td></tr>
-                                            <tr><td align="center" style="padding: 5px 0;"><div style="width: 0px; border-left: 2px dotted #cccccc; height: 35px;"></div></td></tr>
-                                            <tr><td align="center"><div style="width: 32px; height: 32px; background: #cccccc; border-radius: 50%; color: #ffffff; line-height: 32px; font-size: 16px;">X</div></td></tr>
-                                            <tr><td align="center" style="font-size: 11px; padding: 5px 0; color: #888;">Final Call</td></tr>
-                                            <tr><td align="center" style="padding: 5px 0;"><div style="width: 0px; border-left: 2px dotted #cccccc; height: 35px;"></div></td></tr>
-                                            <tr><td align="center"><div style="width: 32px; height: 32px; background: #cccccc; border-radius: 50%; color: #ffffff; line-height: 32px; font-size: 16px;">X</div></td></tr>
-                                            <tr><td align="center" style="font-size: 11px; padding: 5px 0; color: #888;">Funded</td></tr>
-                                        </table>
-                                    </td>
-
-                                    <td valign="top" style="padding-left: 25px;">
-                                        <p style="margin: 0 0 15px 0; font-size: 16px; color: #444;">Hi ${safeClientName}!</p>
-                                        
-                                        <p style="font-size: 15px; color: #666; line-height: 1.5;">
-                                            Your offer values for
-                                            <strong style="color: #0b71a9;">'${safeCompanyName}'</strong>
-                                            are now updated as mentioned in the last approval mail comment.
-                                        </p>
-
-                                        <p style="font-size: 14px; color: #666; line-height: 1.5;">
-                                            Please review the updated offer details and recalculate approval values if needed.
-                                        </p>
-
-                                        <table border="0" cellpadding="0" cellspacing="0" style="margin: 20px 0;">
-                                            <tr>
-                                                <td align="center" bgcolor="#3b7ab0" style="border-radius: 5px;">
-                                                    <a href="${calculateApprovalUrl || '#'}" style="display: inline-block; padding: 12px 25px; color: #ffffff; font-size: 16px; font-weight: bold; text-decoration: none;">Review Updated Offer</a>
-                                                </td>
-                                            </tr>
-                                        </table>
-
-                                        <p style="font-size: 14px; color: #0b71a9; margin-top: 24px; font-weight: bold;">To view your application in katan Advance CRM, click the button below.</p>
-                                        <table border="0" cellpadding="0" cellspacing="0" style="margin-bottom: 25px;">
-                                            <tr>
-                                                <td align="center" bgcolor="#3b7ab0" style="border-radius: 5px;">
-                                                    <a href="${viewApplicationUrl || '#'}" style="display: inline-block; padding: 10px 20px; color: #ffffff; font-size: 14px; font-weight: bold; text-decoration: none;">View your Application</a>
-                                                </td>
-                                            </tr>
-                                        </table>
-
-                                        <p style="font-size: 13px; color: #777; margin-top: 20px; line-height: 1.4;">If you have questions, please reply to the latest approval mail comment thread or contact your representative.</p>
-                                    </td>
-                                </tr>
-                            </table>
-                        </td>
-                    </tr>
-                </table>
-            </td>
-        </tr>
-    </table>
-</body>
-</html>
-`;
+    return buildKatanCapitalClientEmailHtml({
+        pageTitle: 'Offer Updated',
+        heroTitle: 'OFFER UPDATED',
+        heroSubtitle: 'Your offer values have been updated based on the latest approval mail comment.',
+        bannerLogoUrl: bannerLogoUrl || OFFER_UPDATED_BANNER_LOGO_URL,
+        trackerSteps: [
+            { label: 'Application<br/>Submitted', complete: true },
+            { label: 'Underwriting', complete: true },
+            { label: 'Approved', complete: true },
+            { label: 'Offer Updated', complete: true },
+            { label: 'Final Call', complete: false },
+            { label: 'Funded', complete: false },
+        ],
+        bodyHtml: `
+            <p style="margin: 0 0 15px 0; font-size: 16px; color: ${t.textPrimary};">Hi ${safeClientName}!</p>
+            <p style="font-size: 15px; color: ${t.textMuted}; line-height: 1.5;">
+                Your offer values for
+                <strong style="color: ${t.purpleDeep};">'${safeCompanyName}'</strong>
+                are now updated as mentioned in the last approval mail comment.
+            </p>
+            <p style="font-size: 14px; color: ${t.textMuted}; line-height: 1.5;">
+                Please review the updated offer details and recalculate approval values if needed.
+            </p>
+            ${buildKatanCapitalCtaButton(calculateApprovalUrl || '#', 'Review Updated Offer')}
+            <p style="font-size: 13px; color: ${t.textMuted}; margin-top: 20px; line-height: 1.4;">If you have questions, please reply to the latest approval mail comment thread or contact your representative.</p>
+        `,
+    });
 };
 
 export async function sendApplicationOfferUpdatedEmail({
     to,
     clientName,
     companyName,
-    viewApplicationUrl,
     calculateApprovalUrl,
+    bannerLogoUrl,
+    trackingId,
 }: ApplicationOfferUpdatedEmailParams): Promise<boolean> {
     const toTrimmed = String(to || '').trim();
     if (!toTrimmed) {
@@ -718,8 +649,8 @@ export async function sendApplicationOfferUpdatedEmail({
     const html = buildApplicationOfferUpdatedEmailHtml({
         clientName,
         companyName,
-        viewApplicationUrl,
         calculateApprovalUrl,
+        bannerLogoUrl,
     });
 
     try {
@@ -728,6 +659,8 @@ export async function sendApplicationOfferUpdatedEmail({
             subject,
             html,
             attachments: buildBrandLogoAttachments(),
+            trackingId,
+            categories: ['offer-updated'],
         });
         return true;
     } catch (error) {

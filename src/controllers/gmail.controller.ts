@@ -514,6 +514,7 @@ export async function sendCompose(req: Request, res: Response): Promise<void> {
                 metadata: {
                     cc: cc ?? null,
                     hasLetterPdf: Boolean(letterPdfBuffer),
+                    attachments: letterPdfName ? [letterPdfName] : undefined,
                 },
             });
         } catch (auditErr) {

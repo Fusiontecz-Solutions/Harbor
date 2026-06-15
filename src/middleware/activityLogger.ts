@@ -1,6 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
 import { recordGenericAudit } from '../services/systemActivityLogService';
-import { buildAuditDescription } from '../utils/auditDescription';
 
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -12,6 +11,7 @@ const SKIP_PATH_PREFIXES = [
   '/notifications',
   '/chat',
   '/team-chat',
+  '/sendgrid',
 ];
 
 function shouldSkip(path: string, method: string): boolean {
@@ -57,13 +57,13 @@ export function activityLogger(req: Request, res: Response, next: NextFunction):
 
     const action = deriveAction(method);
     const entity = deriveEntity(pathOnly);
-    const description = buildAuditDescription(action, entity, pathOnly);
+    const description = `${action} ${entity} via ${method} ${pathOnly}`;
 
     void recordGenericAudit(req, {
       action,
       entity,
       description,
-    }).catch((err) => {
+    }).catch((err: any) => {
       console.error('[activityLogger] failed to record audit:', err);
     });
   });

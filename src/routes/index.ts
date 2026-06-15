@@ -46,6 +46,8 @@ import avochatoVoiceRoutes from './avochatoVoiceRoutes';
 import avochatoMessagingRoutes from './avochatoMessagingRoutes';
 import superAdminPlatformRoutes from './superAdminPlatformRoutes';
 import activityLogRoutes from './activityLogRoutes';
+import sendgridWebhookRoutes from './sendgridWebhookRoutes';
+import mailRoutes from './mailRoutes';
 
 router.use('/auth', authRoutes);
 router.use('/roles', roleRoutes);
@@ -92,6 +94,8 @@ router.use('/avochato-voice', avochatoVoiceRoutes);
 router.use('/avochato-messaging', avochatoMessagingRoutes);
 router.use('/super-admin-platform', superAdminPlatformRoutes);
 router.use('/activity-logs', activityLogRoutes);
+router.use('/sendgrid', sendgridWebhookRoutes);
+router.use('/mail', mailRoutes);
 
 // router.get('/google/test', async (req, res) => {
 //   try {

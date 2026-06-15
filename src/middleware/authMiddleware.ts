@@ -11,7 +11,7 @@ declare global {
                 name: string;
                 email: string;
                 role: string;
-                publicApprovalActor?: 'CLIENT';
+                publicApprovalActor?: 'CLIENT' | 'ISO';
             };
         }
     }
@@ -223,7 +223,7 @@ export const authenticateToken = async (
             name: string;
             email: string;
             role: string;
-            publicApprovalActor?: 'CLIENT';
+            publicApprovalActor?: 'CLIENT' | 'ISO';
         };
 
         // Check if token exists in AccessToken table and is not expired
