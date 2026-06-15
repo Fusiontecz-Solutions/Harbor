@@ -164,84 +164,84 @@ model DocumentRequest {
   documents     FileMetadata[] @relation("DocumentRequestFiles")
 }
 
-  model Application {
-    id                       String                        @id @default(uuid()) @db.Uuid
-    applicationId            Int                           @unique @default(autoincrement())
-    priority                 String
-    type                     String                        @default("New")
-    referringAgentId         String?                       @db.Uuid
-    salesRepresentativeId    String                        @db.Uuid
-    clientId                 String                        @db.Uuid
-    createdById              String?                       @db.Uuid
-    loanAmount               Float?
-    note                     String?                       @default("")
-    currentQueue             String                        @default("New")
-    documentChecklistChecked String[]                      @default([])
-    createdAt                DateTime                      @default(now())
-    updatedAt                DateTime                      @updatedAt
-    currentState             String                        @default("Draft")
-    isoId                    String?                       @db.Uuid
-    commissionPercentage     Float                         @default(0)
-    commissionAmount         Float?
-    dealDisplayName          String?
-    dealId                   String?
-    status                   String?
-    claimedByUnderwriterId   String?                       @db.Uuid
-    claimedAt                DateTime?
-    category                 String?
-    organization             String?
-    claimedByUnderwriter     User?                         @relation("ApplicationClaimedByUnderwriter", fields: [claimedByUnderwriterId], references: [id])
-    client                   Client                        @relation(fields: [clientId], references: [id])
-    createdBy                User?                         @relation("ApplicationCreatedBy", fields: [createdById], references: [id])
-    iso                      Iso?                          @relation(fields: [isoId], references: [id])
-    referringAgent           User?                         @relation("ApplicationReferringAgent", fields: [referringAgentId], references: [id])
-    salesRepresentative      User                          @relation("ApplicationSalesRep", fields: [salesRepresentativeId], references: [id])
-    ApplicationActivityLog   ApplicationActivityLog[]
-    files                    ApplicationFile[]
-    questionResponses        ApplicationQuestionResponse[]
-    BankAnalysis             BankAnalysis[]
-    bankDetails              BankDetail[]
-    businessInfo             BusinessInfo?
-    ClientBankInfo           ClientBankInfo[]
-    CollectionPayment        CollectionPayment[]
-    comments                 Comment[]
-    complianceChecks         ComplianceCheck[]
-    contract                 Contract?
-    conversations            Conversation[]
-    disclosures              Disclosure?
-    document                 Document?
-    documentRequests         DocumentRequest[]
-    FinalAnswer              FinalAnswer[]
-    fundings                 Funding?
-    FundingCall              FundingCall[]
-    FundingInfo              FundingInfo?
-    isoApplicationPayouts    IsoApplicationPayout[]
-    isoCommissionSchedules   IsoCommissionSchedule[]
-    months                   Month[]
-    notes                    Note[]
-    notifications            Notification[]
-    OfferDecision            OfferDecision?
-    offers                   Offers[]
-    paymentMailLogs          PaymentMailLog[]
-    positions                Position[]
-    PublicApprovalToken      PublicApprovalToken[]
-    SchedulePaymentTracking  SchedulePaymentTracking[]
-    scheduledRePayments      ScheduledRePayment[]
-    termsOffers              TermsOffer[]
-    outbound_communications  outbound_communications[]
-    syndicator               Syndicator[]                  @relation("ApplicationSyndicators")
+model Application {
+  id                       String                        @id @default(uuid()) @db.Uuid
+  applicationId            Int                           @unique @default(autoincrement())
+  priority                 String
+  type                     String                        @default("New")
+  referringAgentId         String?                       @db.Uuid
+  salesRepresentativeId    String                        @db.Uuid
+  clientId                 String                        @db.Uuid
+  createdById              String?                       @db.Uuid
+  loanAmount               Float?
+  note                     String?                       @default("")
+  currentQueue             String                        @default("New")
+  documentChecklistChecked String[]                      @default([])
+  createdAt                DateTime                      @default(now())
+  updatedAt                DateTime                      @updatedAt
+  currentState             String                        @default("Draft")
+  isoId                    String?                       @db.Uuid
+  commissionPercentage     Float                         @default(0)
+  commissionAmount         Float?
+  dealDisplayName          String?
+  dealId                   String?
+  status                   String?
+  claimedByUnderwriterId   String?                       @db.Uuid
+  claimedAt                DateTime?
+  category                 String?
+  organization             String?
+  claimedByUnderwriter     User?                         @relation("ApplicationClaimedByUnderwriter", fields: [claimedByUnderwriterId], references: [id])
+  client                   Client                        @relation(fields: [clientId], references: [id])
+  createdBy                User?                         @relation("ApplicationCreatedBy", fields: [createdById], references: [id])
+  iso                      Iso?                          @relation(fields: [isoId], references: [id])
+  referringAgent           User?                         @relation("ApplicationReferringAgent", fields: [referringAgentId], references: [id])
+  salesRepresentative      User                          @relation("ApplicationSalesRep", fields: [salesRepresentativeId], references: [id])
+  ApplicationActivityLog   ApplicationActivityLog[]
+  files                    ApplicationFile[]
+  questionResponses        ApplicationQuestionResponse[]
+  BankAnalysis             BankAnalysis[]
+  bankDetails              BankDetail[]
+  businessInfo             BusinessInfo?
+  ClientBankInfo           ClientBankInfo[]
+  CollectionPayment        CollectionPayment[]
+  comments                 Comment[]
+  complianceChecks         ComplianceCheck[]
+  contract                 Contract?
+  conversations            Conversation[]
+  disclosures              Disclosure?
+  document                 Document?
+  documentRequests         DocumentRequest[]
+  FinalAnswer              FinalAnswer[]
+  fundings                 Funding?
+  FundingCall              FundingCall[]
+  FundingInfo              FundingInfo?
+  isoApplicationPayouts    IsoApplicationPayout[]
+  isoCommissionSchedules   IsoCommissionSchedule[]
+  months                   Month[]
+  notes                    Note[]
+  notifications            Notification[]
+  OfferDecision            OfferDecision?
+  offers                   Offers[]
+  paymentMailLogs          PaymentMailLog[]
+  positions                Position[]
+  PublicApprovalToken      PublicApprovalToken[]
+  SchedulePaymentTracking  SchedulePaymentTracking[]
+  scheduledRePayments      ScheduledRePayment[]
+  termsOffers              TermsOffer[]
+  outbound_communications  outbound_communications[]
+  syndicator               Syndicator[]                  @relation("ApplicationSyndicators")
 
-    @@index([isoId])
-    @@index([dealId])
-    @@index([currentQueue, currentState])
-    @@index([createdAt])
-    @@index([currentQueue, createdAt])
-    @@index([referringAgentId])
-    @@index([createdById])
-    @@index([claimedByUnderwriterId])
-    @@index([currentQueue, claimedByUnderwriterId])
-    @@index([category])
-  }
+  @@index([isoId])
+  @@index([dealId])
+  @@index([currentQueue, currentState])
+  @@index([createdAt])
+  @@index([currentQueue, createdAt])
+  @@index([referringAgentId])
+  @@index([createdById])
+  @@index([claimedByUnderwriterId])
+  @@index([currentQueue, claimedByUnderwriterId])
+  @@index([category])
+}
 
 /// Per-application DocuSign / contract business fields (1:1 with Application)
 model BusinessInfo {
@@ -265,17 +265,19 @@ model BusinessInfo {
 }
 
 model ApplicationFile {
-  id            String      @id @default(uuid()) @db.Uuid
-  applicationId String      @db.Uuid
-  url           String
-  publicId      String
-  originalName  String?
-  mimeType      String?
-  size          Int?
-  uploadedAt    DateTime    @default(now())
-  application   Application @relation(fields: [applicationId], references: [id])
+  id                    String      @id @default(uuid()) @db.Uuid
+  applicationId         String      @db.Uuid
+  url                   String
+  publicId              String
+  originalName          String?
+  mimeType              String?
+  size                  Int?
+  uploadedAt            DateTime    @default(now())
+  requestedDocumentSlug String?
+  application           Application @relation(fields: [applicationId], references: [id])
 
   @@index([applicationId])
+  @@index([requestedDocumentSlug])
 }
 
 model FundingInfo {
@@ -299,6 +301,7 @@ model ContractTemplate {
   originalName String?
   uploadedById String?  @db.Uuid
   createdAt    DateTime @default(now())
+  layoutKey    String   @default("contract")
   uploadedBy   User?    @relation(fields: [uploadedById], references: [id])
 
   @@index([uploadedById])
