@@ -4,8 +4,12 @@ import prisma from '../config/prismaClient';
 import {
   createPublicPortalToken,
   isPublicPortalTokenTableReady,
+  resolvePortalToken,
   sha256Hex,
 } from '../services/publicPortalTokenService';
+import { buildDocumentRequestListForApplication } from '../services/documentRequestListService';
+import uploadService from '../services/uploadService';
+import { notifyRequestersDocumentReceived } from '../services/documentRequestFulfillmentService';
 
 // For public pages we only return the minimal fields Approval needs.
 const mapApplicationForApproval = (app: any) => {
@@ -439,6 +443,194 @@ class PublicApprovalController {
       });
     } catch (error) {
       console.error('PublicApprovalController.createApprovalSession error:', error);
+      return res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+  }
+
+  /** Public: document request portal — list requested documents (no login). */
+  async getDocumentRequestPortalByToken(req: Request, res: Response) {
+    try {
+      const token = req.params.token;
+      if (!token) {
+        return res.status(400).json({ success: false, message: 'Token is required' });
+      }
+
+      const resolved = await resolvePortalToken(token);
+      if (!resolved) {
+        const tokenHash = sha256Hex(token);
+        const tokenRecord = await prisma.publicApprovalToken.findUnique({
+          where: { tokenHash },
+        });
+        if (tokenRecord?.expiresAt && tokenRecord.expiresAt < new Date()) {
+          return res.status(410).json({
+            success: false,
+            code: 'TOKEN_EXPIRED',
+            message: 'Link expired',
+            expiresAt: tokenRecord.expiresAt,
+          });
+        }
+        return res.status(404).json({
+          success: false,
+          code: 'TOKEN_NOT_FOUND',
+          message: 'Link not found',
+        });
+      }
+
+      const appRecord = await prisma.application.findUnique({
+        where: { id: resolved.applicationId },
+        include: { client: true },
+      });
+
+      if (!appRecord) {
+        return res.status(404).json({
+          success: false,
+          code: 'APPLICATION_NOT_FOUND',
+          message: 'Application not found',
+        });
+      }
+
+      const client = appRecord.client;
+      const clientName =
+        client?.businessName ||
+        `${client?.ownerFirstName || ''} ${client?.ownerLastName || ''}`.trim() ||
+        'Client';
+
+      const documents = await buildDocumentRequestListForApplication(appRecord.id);
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          application: {
+            id: appRecord.id,
+            applicationId: appRecord.applicationId,
+            clientName,
+          },
+          documents,
+          expiresAt: resolved.expiresAt,
+        },
+      });
+    } catch (error) {
+      console.error('PublicApprovalController.getDocumentRequestPortalByToken error:', error);
+      return res.status(500).json({ success: false, message: 'Internal server error' });
+    }
+  }
+
+  /** Public: upload a requested document via portal token (no login). */
+  async uploadDocumentRequestByToken(req: Request, res: Response) {
+    try {
+      const token = req.params.token;
+      if (!token) {
+        return res.status(400).json({ success: false, message: 'Token is required' });
+      }
+
+      const resolved = await resolvePortalToken(token);
+      if (!resolved) {
+        const tokenHash = sha256Hex(token);
+        const tokenRecord = await prisma.publicApprovalToken.findUnique({
+          where: { tokenHash },
+        });
+        if (tokenRecord?.expiresAt && tokenRecord.expiresAt < new Date()) {
+          return res.status(410).json({
+            success: false,
+            code: 'TOKEN_EXPIRED',
+            message: 'Link expired',
+            expiresAt: tokenRecord.expiresAt,
+          });
+        }
+        return res.status(404).json({
+          success: false,
+          code: 'TOKEN_NOT_FOUND',
+          message: 'Link not found',
+        });
+      }
+
+      const requestedDocumentSlug = String(
+        (req.body as { requestedDocumentSlug?: string })?.requestedDocumentSlug || '',
+      )
+        .trim()
+        .toLowerCase();
+
+      if (!requestedDocumentSlug) {
+        return res.status(400).json({
+          success: false,
+          message: 'requestedDocumentSlug is required',
+        });
+      }
+
+      const reqFiles = (req as any).files;
+      const rawFile = reqFiles?.file ?? reqFiles?.files;
+      const file = Array.isArray(rawFile) ? rawFile[0] : rawFile;
+
+      if (!file) {
+        return res.status(400).json({
+          success: false,
+          message: 'No file uploaded',
+        });
+      }
+
+      const application = await prisma.application.findUnique({
+        where: { id: resolved.applicationId },
+        select: {
+          id: true,
+          applicationId: true,
+          salesRepresentativeId: true,
+          createdById: true,
+        },
+      });
+
+      if (!application) {
+        return res.status(404).json({
+          success: false,
+          message: 'Application not found',
+        });
+      }
+
+      const folder = 'ih-crm/applications';
+      const uploadResult = await uploadService.uploadFile(file, folder);
+
+      if (!uploadResult.success || !uploadResult.data) {
+        return res.status(500).json({
+          success: false,
+          message: uploadResult.message || uploadResult.error || 'Failed to upload file',
+        });
+      }
+
+      await prisma.applicationFile.create({
+        data: {
+          applicationId: application.id,
+          url: uploadResult.data.secure_url,
+          publicId: uploadResult.data.public_id,
+          originalName: uploadResult.fileName || file.name,
+          mimeType: uploadResult.data.format,
+          size: uploadResult.data.bytes,
+          requestedDocumentSlug,
+        },
+      });
+
+      const uploaderUserId =
+        application.salesRepresentativeId || application.createdById || '';
+
+      if (uploaderUserId) {
+        try {
+          await notifyRequestersDocumentReceived({
+            applicationUuid: application.id,
+            documentSlug: requestedDocumentSlug,
+            uploadedByUserId: uploaderUserId,
+          });
+        } catch (notifyErr) {
+          console.error('Public document upload notify failed:', notifyErr);
+        }
+      }
+
+      const documents = await buildDocumentRequestListForApplication(application.id);
+
+      return res.status(200).json({
+        success: true,
+        message: 'File uploaded successfully',
+        data: { documents },
+      });
+    } catch (error) {
+      console.error('PublicApprovalController.uploadDocumentRequestByToken error:', error);
       return res.status(500).json({ success: false, message: 'Internal server error' });
     }
   }

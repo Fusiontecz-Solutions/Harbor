@@ -88,6 +88,7 @@ export const DOCUMENT_REQUEST_TYPES: DocumentRequestTypeConfig[] = [
 export const DOCUMENT_REQUEST_LABELS: Record<string, string> = Object.fromEntries(
   DOCUMENT_REQUEST_TYPES.map((t) => [t.slug, t.label]),
 );
+DOCUMENT_REQUEST_LABELS['additional-documents'] = 'Additional documents (as discussed)';
 
 export function getDocumentRequestConfig(slug: string): DocumentRequestTypeConfig | undefined {
   const key = String(slug || '').trim().toLowerCase();

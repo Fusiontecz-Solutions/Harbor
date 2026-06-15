@@ -130,6 +130,16 @@ export function buildPublicApprovalPortalUrl(
   return `${origin}/public/application/approval/${secret}`;
 }
 
+/** Public document-request upload portal — no CRM login required (`/public/application/documents/:token`). */
+export function buildPublicDocumentRequestPortalUrl(
+  baseUrl: string,
+  token: string,
+): string {
+  const origin = String(baseUrl || '').trim().replace(/\/$/, '');
+  const secret = String(token || '').trim();
+  return `${origin}/public/application/documents/${secret}`;
+}
+
 export function resolveCrmFrontendBaseUrl(): string | undefined {
   const inProd = process.env.NODE_ENV === 'production';
 

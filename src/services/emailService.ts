@@ -1566,7 +1566,9 @@ export function buildDocumentRequestEmailHtml({
     const safeClientName = String(clientName || '').trim() || 'Client';
     const safeAppNumber = String(applicationNumber || '').trim() || 'N/A';
     const applicationHref =
-        viewApplicationUrl && /\/documents$/i.test(viewApplicationUrl.trim())
+        viewApplicationUrl &&
+        (/\/documents(?:\/[^/?#]+)?$/i.test(viewApplicationUrl.trim()) ||
+            /\/public\/application\/documents\//i.test(viewApplicationUrl.trim()))
             ? viewApplicationUrl.trim()
             : withApplicationDetailsOverviewHref(viewApplicationUrl);
 
@@ -1619,7 +1621,7 @@ export function buildDocumentRequestEmailHtml({
                                 <a href="${applicationHref}" style="display:inline-block; background:#276D9C; color:#ffffff; text-decoration:none; font-weight:600; font-size:14px; padding:12px 24px; border-radius:6px;">Upload requested documents</a>
                             </p>
                             <p style="margin: 20px 0 0; font-size:12px; color:#6b7280; line-height:1.5;">
-                                Open the link above, go to the <strong>Documents</strong> tab, and upload each requested item.
+                                Open the link above to upload each requested document. No login is required.
                                 Underwriting will be notified automatically when files are received.
                             </p>
                         </td>

@@ -6,12 +6,14 @@ import {
     sendDocumentRequestEmail,
 } from '../services/emailService';
 import {
-    findFulfilledDocumentForRequest,
-    getDocumentRequestConfig,
     humanizeDocumentRequestLabels,
 } from '../constants/documentRequestTypes';
-import { loadDocumentRequestFulfillmentContext } from '../services/documentRequestFulfillmentService';
-import { resolveCrmFrontendBaseUrl } from '../utils/crmFrontendUrl';
+import { buildDocumentRequestListForApplication } from '../services/documentRequestListService';
+import { createPublicPortalToken } from '../services/publicPortalTokenService';
+import {
+    buildPublicDocumentRequestPortalUrl,
+    resolveCrmFrontendBaseUrl,
+} from '../utils/crmFrontendUrl';
 
 // Helper to map Prisma Application (with includes) to the API shape previously returned by Mongoose
 const mapApplicationToApi = (app: any) => {
@@ -380,6 +382,13 @@ class NotificationController {
                     });
                     if (!firstNotification) firstNotification = created;
                 }
+            } else {
+                // ISO email-only (or no other in-app recipient): still persist so the
+                // public upload portal and RequestedDocumentsPanel can list the request.
+                const created = await prisma.notification.create({
+                    data: { ...notificationData, recipientId: String(createdBy) },
+                });
+                firstNotification = created;
             }
 
             const appUpdateData: { note?: string; currentQueue?: string; currentState?: string } = {};
@@ -414,10 +423,26 @@ class NotificationController {
 
             if (isIsoEmailRequest && uniqueEmailTo.length > 0) {
                 const crmBase = resolveCrmFrontendBaseUrl();
-                const businessApplicationId = app.applicationId ?? applicationIdNumber;
-                const viewApplicationUrl = crmBase
-                    ? `${crmBase.replace(/\/$/, '')}/application-details/${businessApplicationId}/documents`
-                    : undefined;
+                let viewApplicationUrl: string | undefined;
+                if (crmBase) {
+                    try {
+                        const portalToken = await createPublicPortalToken(application.id, {
+                            expiresInDays: 90,
+                        });
+                        if (portalToken) {
+                            viewApplicationUrl = buildPublicDocumentRequestPortalUrl(
+                                crmBase,
+                                portalToken,
+                            );
+                        }
+                    } catch (tokenErr) {
+                        console.error('Document request portal token generation failed:', tokenErr);
+                    }
+                    if (!viewApplicationUrl) {
+                        const businessApplicationId = app.applicationId ?? applicationIdNumber;
+                        viewApplicationUrl = `${crmBase.replace(/\/$/, '')}/application-details/${businessApplicationId}/documents`;
+                    }
+                }
                 const emailResult = await sendDocumentRequestEmail({
                     to: uniqueEmailTo,
                     cc: emailCcList,
@@ -975,112 +1000,7 @@ class NotificationController {
                 });
             }
 
-            const fulfillmentContext = await loadDocumentRequestFulfillmentContext(application.id);
-            const applicationFiles = fulfillmentContext?.applicationFiles ?? application.files ?? [];
-            const contractFiles = fulfillmentContext?.contractFiles ?? [];
-
-            // Get all document request notifications for this application
-            const notificationsRecords = await prisma.notification.findMany({
-                where: {
-                    applicationId: application.id,
-                    type: 'document_request',
-                },
-                orderBy: { createdAt: 'desc' },
-                include: {
-                    createdBy: {
-                        select: { id: true, firstName: true, lastName: true, email: true },
-                    },
-                },
-            });
-
-            // Extract all unique requested documents and their status
-            const documentMap = new Map<
-                string,
-                {
-                    status: 'Complete' | 'Pending';
-                    createdAt: Date;
-                    requestedBy?: any;
-                    message?: string;
-                    label?: string;
-                    fileUrl?: string;
-                    fileId?: string;
-                    contractUploadKey?: string;
-                }
-            >();
-            const generalRequests: {
-                name: string;
-                status: 'Pending';
-                createdAt: Date;
-                requestedBy?: any;
-                message?: string;
-            }[] = [];
-
-            notificationsRecords.forEach((notification: any) => {
-                const requestedDocs = notification.documentRequestedDocuments || [];
-
-                // Specific document requests
-                requestedDocs.forEach((docSlug: string) => {
-                    const config = getDocumentRequestConfig(docSlug);
-                    const fulfilled = findFulfilledDocumentForRequest(docSlug, {
-                        applicationFiles,
-                        contractFiles,
-                    });
-                    const isUploaded = fulfilled != null;
-
-                    if (
-                        !documentMap.has(docSlug) ||
-                        (documentMap.get(docSlug)?.createdAt &&
-                            notification.createdAt > documentMap.get(docSlug)!.createdAt)
-                    ) {
-                        documentMap.set(docSlug, {
-                            status: isUploaded ? 'Complete' : 'Pending',
-                            createdAt: notification.createdAt,
-                            requestedBy: notification.createdBy,
-                            label: config?.label,
-                            fileUrl: fulfilled?.url,
-                            fileId: fulfilled?.fileId,
-                            contractUploadKey: config?.contractUploadKey,
-                        });
-                    }
-                });
-
-                // General "Sent Back for Documentation" requests (no specific docs - e.g. from Final Underwriter)
-                if (requestedDocs.length === 0 && notification.message) {
-                    generalRequests.push({
-                        name: 'Sent Back for Documentation',
-                        status: 'Pending',
-                        createdAt: notification.createdAt,
-                        requestedBy: notification.createdBy,
-                        message: notification.message,
-                    });
-                }
-            });
-
-            // Convert map to array, then append general requests (Final Underwriter send-back)
-            const documents = Array.from(documentMap.entries()).map(([name, data]) => ({
-                name,
-                label: data.label,
-                status: data.status,
-                createdAt: data.createdAt,
-                requestedBy: data.requestedBy,
-                message: data.message,
-                fileUrl: data.fileUrl,
-                fileId: data.fileId,
-                contractUploadKey: data.contractUploadKey,
-            }));
-
-            // Add general requests (sorted by createdAt desc)
-            generalRequests
-                .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-                .forEach((req) => {
-                    documents.push({
-                        name: req.name,
-                        status: req.status,
-                        createdAt: req.createdAt,
-                        requestedBy: req.requestedBy,
-                        message: req.message,
-                    });
-                });
+            const documents = await buildDocumentRequestListForApplication(application.id);
 
             return res.status(200).json({
                 success: true,
