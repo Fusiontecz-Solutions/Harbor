@@ -38,7 +38,17 @@ app.use(
   })
 );
 // Middleware
-app.use(express.json({ limit: '50mb' }));
+// Capture the raw request body so webhook signature verification (e.g. SendGrid
+// "Signed Event Webhook" ECDSA check) can hash the exact bytes SendGrid signed.
+// Without this, req.rawBody is undefined and signed webhooks are rejected.
+app.use(
+  express.json({
+    limit: '50mb',
+    verify: (req, _res, buf) => {
+      (req as Request & { rawBody?: Buffer }).rawBody = buf;
+    },
+  })
+);
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // File upload middleware - handles multipart/form-data (req.files) for most routes.

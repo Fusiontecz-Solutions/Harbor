@@ -102,8 +102,6 @@ model BoldSignTemplate {
   createdAt                DateTime                          @default(now())
   frequency                String?
   id                       String                            @id @default(uuid()) @db.Uuid
-  layoutKey                String?
-  pdfUrl                   String?
   contractTemplateMappings ContractDocumentTemplateMapping[]
 }
 

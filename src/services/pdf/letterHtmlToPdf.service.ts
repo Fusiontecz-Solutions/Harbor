@@ -26,6 +26,19 @@ const LETTER_PDF_PAGE_HEIGHT_MM = (() => {
     return Number.isFinite(n) && n > 0 ? n : 340;
 })();
 
+/** Minimum PDF page height (mm) — avoids zero-height sheets on empty markup. */
+const LETTER_PDF_MIN_HEIGHT_MM = 20;
+
+/** Max single-page PDF height (mm). Very long letters may be clipped if exceeded. */
+const LETTER_PDF_MAX_HEIGHT_MM = (() => {
+    const n = Number(process.env.LETTER_PDF_MAX_HEIGHT_MM ?? '1500');
+    return Number.isFinite(n) && n > 0 ? n : 1500;
+})();
+
+function pxToMm(px: number): number {
+    return (px * 25.4) / 96;
+}
+
 function mmToCssPx(mm: number): number {
     return Math.round((mm * 96) / 25.4);
 }
@@ -146,6 +159,26 @@ function buildLetterPdfDocument(innerHtml: string): string {
   table {
     border-collapse: collapse;
   }
+
+  /* Branded ISO / approval emails: remove grey body gutters and 600px centered card */
+  body,
+  body[style],
+  body > table,
+  body > table > tbody > tr > td {
+    background: #ffffff !important;
+    background-color: #ffffff !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+  }
+  .letter-pdf-root table[align="center"] {
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+  }
+  .letter-pdf-root table[width="600"],
+  .letter-pdf-root table[width='600'] {
+    width: 100% !important;
+    max-width: 100% !important;
+  }
 </style>
 </head>
 <body>
@@ -216,8 +249,39 @@ async function waitForNextPaint(page: Page): Promise<void> {
     );
 }
 
+async function measureContentHeightPx(page: Page): Promise<number> {
+    return page.evaluate(() => {
+        const g = globalThis as unknown as {
+            document: {
+                querySelector: (sel: string) => {
+                    getBoundingClientRect: () => { height: number };
+                    scrollHeight: number;
+                } | null;
+                body: { scrollHeight: number };
+                documentElement: { scrollHeight: number };
+            };
+        };
+        const stage = g.document.querySelector('.letter-pdf-stage');
+        const root = g.document.querySelector('.letter-pdf-root');
+        const el = stage ?? root;
+        if (!el) {
+            return Math.ceil(
+                Math.max(g.document.body.scrollHeight, g.document.documentElement.scrollHeight),
+            );
+        }
+        const rect = el.getBoundingClientRect();
+        return Math.ceil(Math.max(rect.height, el.scrollHeight));
+    });
+}
+
+async function applyDynamicPageSize(page: Page, widthMm: number, heightMm: number): Promise<void> {
+    await page.addStyleTag({
+        content: `@page { size: ${widthMm}mm ${heightMm}mm; margin: 0; background: #ffffff; }`,
+    });
+}
+
 /**
- * If content is taller than one printable A4 area, scale the root down slightly
+ * If content is taller than one printable area, scale the root down slightly
  * so a single PDF page is more likely (optional; LETTER_PDF_FIT_ONE_PAGE=1).
  */
 async function scaleLetterToFitOnePageIfNeeded(page: Page): Promise<void> {
@@ -288,10 +352,10 @@ export async function renderLetterHtmlToPdfBuffer(htmlBody: string): Promise<Buf
         // “Screen” paint path keeps template colors/gradients closer to the email preview.
         await page.emulateMediaType('screen');
 
-        // Viewport matches PDF page (same mm → CSS px) so layout and print page align.
+        // Tall viewport so layout is not clipped before we measure content height.
         await page.setViewport({
             width: mmToCssPx(LETTER_PDF_PAGE_WIDTH_MM),
-            height: mmToCssPx(LETTER_PDF_PAGE_HEIGHT_MM),
+            height: mmToCssPx(LETTER_PDF_MAX_HEIGHT_MM),
             deviceScaleFactor: 2,
         });
 
@@ -306,10 +370,17 @@ export async function renderLetterHtmlToPdfBuffer(htmlBody: string): Promise<Buf
         await scaleLetterToFitOnePageIfNeeded(page);
         await waitForNextPaint(page);
 
-        // Single sheet: A4 width, taller height (default 340mm vs 297mm) — see LETTER_PDF_PAGE_HEIGHT_MM.
+        const contentHeightPx = await measureContentHeightPx(page);
+        const contentHeightMm = Math.min(
+            LETTER_PDF_MAX_HEIGHT_MM,
+            Math.max(LETTER_PDF_MIN_HEIGHT_MM, Math.ceil(pxToMm(contentHeightPx) + 1)),
+        );
+
+        await applyDynamicPageSize(page, LETTER_PDF_PAGE_WIDTH_MM, contentHeightMm);
+
         const pdfUint8 = await page.pdf({
             width: `${LETTER_PDF_PAGE_WIDTH_MM}mm`,
-            height: `${LETTER_PDF_PAGE_HEIGHT_MM}mm`,
+            height: `${contentHeightMm}mm`,
             printBackground: true,
             preferCSSPageSize: true,
             margin: { top: '0', right: '0', bottom: '0', left: '0' },
@@ -322,7 +393,7 @@ export async function renderLetterHtmlToPdfBuffer(htmlBody: string): Promise<Buf
             throw new Error('Puppeteer returned an empty PDF buffer');
         }
         console.info(
-            `${LOG_PREFIX} generated pdf bytes=${buf.length} elapsedMs=${Date.now() - started}`,
+            `${LOG_PREFIX} generated pdf bytes=${buf.length} heightMm=${contentHeightMm} elapsedMs=${Date.now() - started}`,
         );
         return buf;
     } catch (err) {

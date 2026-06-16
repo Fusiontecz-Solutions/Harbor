@@ -52,14 +52,12 @@ import {
     buildApplicationApprovalEmailHtml,
     buildApplicationOfferUpdatedEmailHtml,
     sendApplicationApprovalEmail,
+    APPROVAL_EMAIL_PDF_FILENAME,
+    OFFER_UPDATED_EMAIL_PDF_FILENAME,
     sendApplicationOfferUpdatedEmail,
-    sendApplicationFundedEmail,
-    sendApplicationSentToUnderwritingClientEmail,
-    sendApplicationUnderwritingCompletedClientEmail,
     sendUnderwriterNewApplicationEmail,
 } from '../services/emailService';
 import { recordCommunicationAudit } from '../services/systemActivityLogService';
-import { isOutboundSmtpConfigured } from '../config/nodemailer';
 import {
     buildPublicApprovalPortalUrl,
     resolveCrmFrontendBaseUrl,
@@ -980,53 +978,6 @@ class ApplicationController {
                 });
             } catch (logError) {
                 console.error('Failed to create activity log for application creation:', logError);
-            }
-
-            // Best-effort ISO recipient email for newly created ISO-linked applications.
-            try {
-                const isoEmail = String((application as any)?.iso?.email || '').trim();
-                if (isoEmail) {
-                    const isoName = String((application as any)?.iso?.name || '').trim();
-                    const clientBusinessName = String((application as any)?.client?.businessName || '').trim();
-                    const ownerName = `${(application as any)?.client?.ownerFirstName || ''} ${(application as any)?.client?.ownerLastName || ''}`.trim();
-                    const recipientName = isoName || isoEmail || ownerName || clientBusinessName || 'Valued Client';
-                    const appIdNumber = (application as any)?.applicationId ?? '';
-                    const appRouteId =
-                        (application as any)?.applicationId != null &&
-                            String((application as any).applicationId).trim() !== ''
-                            ? String((application as any).applicationId)
-                            : String((application as any)?.id || application.id);
-                    const baseUrl = resolveCrmFrontendBaseUrl();
-                    const viewApplicationUrl = baseUrl
-                        ? `${baseUrl.replace(/\/$/, '')}/application-details/${appRouteId}`
-                        : undefined;
-
-                    let publicPortalUrl: string | undefined;
-                    try {
-                        const portalToken = await createPublicPortalToken(application.id, {
-                            expiresInDays: 90,
-                        });
-                        if (portalToken && baseUrl) {
-                            publicPortalUrl = `${baseUrl.replace(/\/$/, '')}/public/application/status/${portalToken}`;
-                        }
-                    } catch (tokenErr) {
-                        console.error('Public portal token failed (create ISO email):', tokenErr);
-                    }
-
-                    setImmediate(() => {
-                        void sendApplicationSentToUnderwritingClientEmail({
-                            to: isoEmail,
-                            clientName: recipientName,
-                            companyName: clientBusinessName || 'your business',
-                            agentName: String((req as any)?.user?.name || 'your representative').trim() || 'your representative',
-                            applicationNumber: appIdNumber,
-                            viewApplicationUrl,
-                            publicPortalUrl,
-                        });
-                    });
-                }
-            } catch (emailErr) {
-                console.error('Create application ISO email enqueue failed:', emailErr);
             }
 
             invalidateAllApplicationStatsCache();
@@ -3053,25 +3004,8 @@ class ApplicationController {
                         ? `${baseUrl.replace(/\/$/, '')}/application-details/${appRouteId}`
                         : undefined;
 
-                    const companyName =
-                        (applicationRecord as any)?.client?.businessName || clientName || 'your business';
-                    const isoEmail = String((applicationRecord as any)?.iso?.email || '').trim();
-                    const isoName = String((applicationRecord as any)?.iso?.name || '').trim();
-                    const templateRecipientName = isoName || isoEmail || clientName;
-
-                    let publicPortalUrl: string | undefined;
-                    if (isoEmail.length > 0) {
-                        const portalToken = await createPublicPortalToken(applicationRecord.id, {
-                            expiresInDays: 90,
-                        });
-                        const feBase = resolveCrmFrontendBaseUrl();
-                        if (portalToken && feBase) {
-                            publicPortalUrl = `${feBase}/public/application/status/${portalToken}`;
-                        }
-                    }
-
                     setImmediate(() => {
-                        const underwriterEmails = Promise.allSettled(
+                        void Promise.allSettled(
                             recipients
                                 .filter((r) => r.email)
                                 .map((r) =>
@@ -3085,80 +3019,6 @@ class ApplicationController {
                                     })
                                 ),
                         );
-                        const clientEmailPromise =
-                            isoEmail.length > 0
-                                ? sendApplicationSentToUnderwritingClientEmail({
-                                    to: isoEmail,
-                                    clientName: templateRecipientName,
-                                    companyName,
-                                    agentName: senderName,
-                                    applicationNumber: appIdNumber,
-                                    viewApplicationUrl,
-                                    publicPortalUrl,
-                                })
-                                : Promise.resolve();
-                        void Promise.allSettled([underwriterEmails, clientEmailPromise]);
-                    });
-                } else if (transition.action === 'SEND_TO_FINAL_UNDERWRITER') {
-                    // Client email for any authenticated user who may move the deal to Final Underwriter
-                    // (not only role UNDERWRITER — ADMIN/OPERATIONS/etc. were previously excluded and never notified the client).
-                    const clientName =
-                        (applicationRecord as any)?.client?.businessName ||
-                        `${(applicationRecord as any)?.client?.ownerFirstName || ''} ${(applicationRecord as any)?.client?.ownerLastName || ''}`.trim() ||
-                        'Client';
-                    const appIdNumber = (applicationRecord as any)?.applicationId ?? '';
-
-                    const baseUrl = resolveCrmFrontendBaseUrl();
-                    const appRouteId =
-                        (applicationRecord as any)?.applicationId != null &&
-                            String((applicationRecord as any).applicationId).trim() !== ''
-                            ? String((applicationRecord as any).applicationId)
-                            : String((applicationRecord as any)?.id || applicationRecord.id);
-                    const viewApplicationUrl = baseUrl
-                        ? `${baseUrl.replace(/\/$/, '')}/application-details/${appRouteId}`
-                        : undefined;
-
-                    const companyName =
-                        (applicationRecord as any)?.client?.businessName || clientName || 'your business';
-                    const isoEmail = String((applicationRecord as any)?.iso?.email || '').trim();
-                    const isoName = String((applicationRecord as any)?.iso?.name || '').trim();
-                    const templateRecipientName = isoName || isoEmail || clientName;
-
-                    let publicPortalUrl: string | undefined;
-                    if (isoEmail.length > 0) {
-                        try {
-                            const portalToken = await createPublicPortalToken(applicationRecord.id, {
-                                expiresInDays: 90,
-                            });
-                            const feBase = resolveCrmFrontendBaseUrl();
-                            if (portalToken && feBase) {
-                                publicPortalUrl = `${feBase}/public/application/status/${portalToken}`;
-                            }
-                        } catch (tokenErr) {
-                            console.error('Public portal token failed (underwriting-complete ISO email will still attempt send):', tokenErr);
-                        }
-                    }
-
-                    if (isoEmail.length === 0) {
-                        console.warn(
-                            '[email] Underwriting-complete ISO email skipped: deal ISO has no email — application',
-                            (applicationRecord as any)?.applicationId ?? applicationRecord.id,
-                        );
-                    }
-
-                    setImmediate(() => {
-                        const clientEmailPromise =
-                            isoEmail.length > 0
-                                ? sendApplicationUnderwritingCompletedClientEmail({
-                                    to: isoEmail,
-                                    clientName: templateRecipientName,
-                                    companyName,
-                                    viewApplicationUrl,
-                                    publicPortalUrl,
-                                    applicationNumber: appIdNumber,
-                                })
-                                : Promise.resolve();
-                        void clientEmailPromise;
                     });
                 }
             } catch (notifError) {
@@ -4401,54 +4261,6 @@ class ApplicationController {
                 const populatedApplication = mapApplicationToApi(applicationAfterPdf || createdApplication);
                 const mappedClient = mapClientToApi(createdClient);
 
-                // Best-effort ISO recipient email for newly created ISO-linked applications (PDF flow).
-                try {
-                    const appForEmail = applicationAfterPdf || createdApplication;
-                    const isoEmail = String((appForEmail as any)?.iso?.email || '').trim();
-                    if (isoEmail) {
-                        const isoName = String((appForEmail as any)?.iso?.name || '').trim();
-                        const clientBusinessName = String((appForEmail as any)?.client?.businessName || '').trim();
-                        const ownerName = `${(appForEmail as any)?.client?.ownerFirstName || ''} ${(appForEmail as any)?.client?.ownerLastName || ''}`.trim();
-                        const recipientName = isoName || isoEmail || ownerName || clientBusinessName || 'Valued Client';
-                        const appIdNumber = (appForEmail as any)?.applicationId ?? '';
-                        const appRouteId =
-                            (appForEmail as any)?.applicationId != null &&
-                                String((appForEmail as any).applicationId).trim() !== ''
-                                ? String((appForEmail as any).applicationId)
-                                : String((appForEmail as any)?.id || createdApplication.id);
-                        const baseUrl = resolveCrmFrontendBaseUrl();
-                        const viewApplicationUrl = baseUrl
-                            ? `${baseUrl.replace(/\/$/, '')}/application-details/${appRouteId}`
-                            : undefined;
-
-                        let publicPortalUrl: string | undefined;
-                        try {
-                            const portalToken = await createPublicPortalToken(createdApplication.id, {
-                                expiresInDays: 90,
-                            });
-                            if (portalToken && baseUrl) {
-                                publicPortalUrl = `${baseUrl.replace(/\/$/, '')}/public/application/status/${portalToken}`;
-                            }
-                        } catch (tokenErr) {
-                            console.error('Public portal token failed (pdf existing-client ISO email):', tokenErr);
-                        }
-
-                        setImmediate(() => {
-                            void sendApplicationSentToUnderwritingClientEmail({
-                                to: isoEmail,
-                                clientName: recipientName,
-                                companyName: clientBusinessName || 'your business',
-                                agentName: String((req as any)?.user?.name || 'your representative').trim() || 'your representative',
-                                applicationNumber: appIdNumber,
-                                viewApplicationUrl,
-                                publicPortalUrl,
-                            });
-                        });
-                    }
-                } catch (emailErr) {
-                    console.error('PDF existing-client ISO email enqueue failed:', emailErr);
-                }
-
                 console.log(
                     '[autoCreateFromPDF] Final DB response (existing client):',
                     JSON.stringify(
@@ -4568,54 +4380,6 @@ class ApplicationController {
             });
             const populatedApplication = mapApplicationToApi(applicationAfterPdf || createdApplication);
             const mappedClient = mapClientToApi(createdClient);
-
-            // Best-effort ISO recipient email for newly created ISO-linked applications (PDF flow).
-            try {
-                const appForEmail = applicationAfterPdf || createdApplication;
-                const isoEmail = String((appForEmail as any)?.iso?.email || '').trim();
-                if (isoEmail) {
-                    const isoName = String((appForEmail as any)?.iso?.name || '').trim();
-                    const clientBusinessName = String((appForEmail as any)?.client?.businessName || '').trim();
-                    const ownerName = `${(appForEmail as any)?.client?.ownerFirstName || ''} ${(appForEmail as any)?.client?.ownerLastName || ''}`.trim();
-                    const recipientName = isoName || isoEmail || ownerName || clientBusinessName || 'Valued Client';
-                    const appIdNumber = (appForEmail as any)?.applicationId ?? '';
-                    const appRouteId =
-                        (appForEmail as any)?.applicationId != null &&
-                            String((appForEmail as any).applicationId).trim() !== ''
-                            ? String((appForEmail as any).applicationId)
-                            : String((appForEmail as any)?.id || createdApplication.id);
-                    const baseUrl = resolveCrmFrontendBaseUrl();
-                    const viewApplicationUrl = baseUrl
-                        ? `${baseUrl.replace(/\/$/, '')}/application-details/${appRouteId}`
-                        : undefined;
-
-                    let publicPortalUrl: string | undefined;
-                    try {
-                        const portalToken = await createPublicPortalToken(createdApplication.id, {
-                            expiresInDays: 90,
-                        });
-                        if (portalToken && baseUrl) {
-                            publicPortalUrl = `${baseUrl.replace(/\/$/, '')}/public/application/status/${portalToken}`;
-                        }
-                    } catch (tokenErr) {
-                        console.error('Public portal token failed (pdf new-client ISO email):', tokenErr);
-                    }
-
-                    setImmediate(() => {
-                        void sendApplicationSentToUnderwritingClientEmail({
-                            to: isoEmail,
-                            clientName: recipientName,
-                            companyName: clientBusinessName || 'your business',
-                            agentName: String((req as any)?.user?.name || 'your representative').trim() || 'your representative',
-                            applicationNumber: appIdNumber,
-                            viewApplicationUrl,
-                            publicPortalUrl,
-                        });
-                    });
-                }
-            } catch (emailErr) {
-                console.error('PDF new-client ISO email enqueue failed:', emailErr);
-            }
 
             console.log(
                 '[autoCreateFromPDF] Final DB response (new client):',
@@ -5402,6 +5166,9 @@ class ApplicationController {
             const emailSubject = resend
                 ? 'Your Offer Values Have Been Updated'
                 : 'Your Application Has Been Approved';
+            const approvalPdfFilename = resend
+                ? OFFER_UPDATED_EMAIL_PDF_FILENAME
+                : APPROVAL_EMAIL_PDF_FILENAME;
             const emailHtml = resend
                 ? buildApplicationOfferUpdatedEmailHtml({
                     clientName: isoRecipientName,
@@ -5433,7 +5200,7 @@ class ApplicationController {
                     recipient: recipients.map((r) => r.to).join(', '),
                     subject: emailSubject,
                     body: emailHtml,
-                    templateName: resend ? 'Offer updated (ISO)' : 'Application approved (ISO)',
+                    templateName: resend ? 'Update offer template' : 'Application approved template',
                     actionType: 'APPROVED',
                     user: authUserForLog,
                     currentStatus: `${(application as any).currentQueue} / ${(application as any).currentState}`,
@@ -5444,6 +5211,8 @@ class ApplicationController {
                         resend: !!resend,
                         template: resend ? 'offer-updated' : 'approval',
                         status: 'sent',
+                        hasLetterPdf: true,
+                        attachments: [approvalPdfFilename],
                         delivery: {
                             status: 'sent',
                             sentAt: new Date().toISOString(),
@@ -5574,37 +5343,10 @@ class ApplicationController {
                 });
             }
 
-            if (!isOutboundSmtpConfigured()) {
-                console.error(
-                    'Funded email skipped: set SENDGRID_API_KEY or SMTP_AUTH_USER / SMTP_AUTH_PASS.',
-                );
-                return res.status(200).json({
-                    success: true,
-                    message: 'SMTP not configured; funded notification skipped.',
-                    skipped: true,
-                });
-            }
-
-            const clientBusinessName = client?.businessName || 'Unknown Business';
-            const clientName =
-                `${client?.ownerFirstName || ''} ${client?.ownerLastName || ''}`.trim() ||
-                clientBusinessName ||
-                'Valued Client';
-            const isoName = String(iso?.name || '').trim();
-            const templateRecipientName = isoName || isoEmail || clientName;
-            const companyName = clientBusinessName;
-
-            setImmediate(() => {
-                void sendApplicationFundedEmail({
-                    to: isoEmail,
-                    clientName: templateRecipientName,
-                    companyName,
-                });
-            });
-
             return res.status(200).json({
                 success: true,
-                message: 'Funded notification email queued for sending',
+                message: 'Funded notification is not sent to ISO; only approval and offer-update emails are delivered to the linked ISO.',
+                skipped: true,
             });
         } catch (error: any) {
             console.error('Send funded email error:', error);

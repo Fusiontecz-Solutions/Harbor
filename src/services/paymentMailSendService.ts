@@ -138,6 +138,7 @@ export async function sendTrackedPaymentTemplateMail(
         dealKey: input.dealKey,
         categoryLabel: input.category,
         recipient: input.to,
+        paymentMailLogId: paymentLog.id,
         status: 'sent',
         hasLetterPdf: Boolean(input.attachLetterPdf),
         attachments: attachmentNames.length ? attachmentNames : undefined,

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import sendMail, { isOutboundSmtpConfigured, sendSendGridMail } from '../config/nodemailer';
+import prisma from '../config/prismaClient';
 import { resolveEmailBrandDisplayName } from '../constants/emailBrand';
 import {
   resolveCrmFrontendBaseUrl,
@@ -349,9 +350,58 @@ function buildKatanCapitalClientEmailHtml({
 /**
  * When true, application status templates (client/ISO recipient flows) are not sent (no `sendMail`).
  * Internal emails (e.g. welcome, underwriter notifications) are unaffected.
+ *
+ * ISO email delivery policy: only `sendApplicationApprovalEmail` and `sendApplicationOfferUpdatedEmail`
+ * should target the linked ISO address. Step templates (submitted, underwriting complete, funded, etc.)
+ * must not be sent to ISO — callers enforce this; these helpers remain available for other recipients.
  */
 const DISABLE_CLIENT_APPLICATION_EMAILS =
     String(process.env.DISABLE_CLIENT_APPLICATION_EMAILS || '').trim().toLowerCase() === 'true';
+
+/**
+ * ISO-linked deals should only receive branded approval and offer-update emails.
+ * Workflow step templates (submitted, underwriting, etc.) must not be sent to the ISO email.
+ */
+export const ISO_APPLICATION_EMAIL_TEMPLATES = ['approval', 'offer_updated'] as const;
+
+const isoWorkflowSkipCache = new Map<string, boolean>();
+
+/**
+ * Workflow step templates must not be delivered to registered ISO emails.
+ * ISO-linked deals only receive approval and offer-update branded emails.
+ */
+async function shouldSkipWorkflowStepEmailForIsoRecipient(
+    to: string,
+    template: string,
+): Promise<boolean> {
+    const normalized = String(to || '').trim().toLowerCase();
+    if (!normalized) return false;
+
+    if (isoWorkflowSkipCache.has(normalized)) {
+        const cached = isoWorkflowSkipCache.get(normalized) ?? false;
+        if (cached) {
+            // eslint-disable-next-line no-console
+            console.log(
+                `[email] Skipped ${template} for ISO recipient ${normalized} — ISO receives approval and offer-update templates only`,
+            );
+        }
+        return cached;
+    }
+
+    const iso = await prisma.iso.findFirst({
+        where: { email: { equals: normalized, mode: 'insensitive' } },
+        select: { id: true },
+    });
+    const skip = Boolean(iso);
+    isoWorkflowSkipCache.set(normalized, skip);
+    if (skip) {
+        // eslint-disable-next-line no-console
+        console.log(
+            `[email] Skipped ${template} for ISO recipient ${normalized} — ISO receives approval and offer-update templates only`,
+        );
+    }
+    return skip;
+}
 
 /** Resolves links like `{base}/application-details/:id/overview` (idempotent if `/overview` is already present). */
 export function withApplicationDetailsOverviewHref(
@@ -409,6 +459,52 @@ export interface ApplicationApprovalEmailParams {
     bannerLogoUrl?: string;
     /** SendGrid webhook correlation id (`ocid` custom arg). */
     trackingId?: string;
+}
+
+export const APPROVAL_EMAIL_PDF_FILENAME = 'Application-approved-template.pdf';
+export const OFFER_UPDATED_EMAIL_PDF_FILENAME = 'Update-offer-template.pdf';
+
+type MailAttachment = {
+    filename?: string | false;
+    content?: Buffer | string;
+    path?: string;
+    cid?: string;
+    contentType?: string;
+    contentDisposition?: 'inline' | 'attachment';
+};
+
+async function buildEmailHtmlPdfAttachment(
+    html: string,
+    pdfFilename: string,
+): Promise<{
+    filename: string;
+    content: Buffer;
+    contentType: string;
+    contentDisposition: 'attachment';
+} | null> {
+    try {
+        const { renderLetterHtmlToPdfBuffer, sanitizeLetterPdfFilename } = await import(
+            './pdf/letterHtmlToPdf.service'
+        );
+        const content = await renderLetterHtmlToPdfBuffer(html);
+        return {
+            filename: sanitizeLetterPdfFilename(pdfFilename),
+            content,
+            contentType: 'application/pdf',
+            contentDisposition: 'attachment',
+        };
+    } catch (error) {
+        // eslint-disable-next-line no-console
+        console.error('[email] HTML to PDF attachment failed:', { pdfFilename, error });
+        return null;
+    }
+}
+
+async function buildIsoBrandedEmailAttachments(html: string, pdfFilename: string): Promise<MailAttachment[]> {
+    const attachments: MailAttachment[] = [...buildBrandLogoAttachments()];
+    const pdfAttachment = await buildEmailHtmlPdfAttachment(html, pdfFilename);
+    if (pdfAttachment) attachments.push(pdfAttachment);
+    return attachments;
 }
 
 export const buildApplicationApprovalEmailHtml = ({
@@ -504,14 +600,20 @@ export async function sendApplicationApprovalEmail({
     });
 
     try {
+        const attachments = await buildIsoBrandedEmailAttachments(html, APPROVAL_EMAIL_PDF_FILENAME);
+        const hasPdf = attachments.some((a) => a.contentDisposition === 'attachment');
         await sendMail({
             to: toTrimmed,
             subject,
             html,
-            attachments: buildBrandLogoAttachments(),
+            attachments,
             trackingId,
             categories: ['approval'],
         });
+        if (!hasPdf) {
+            // eslint-disable-next-line no-console
+            console.warn('[email] Application approval sent without PDF attachment (PDF generation failed)');
+        }
         return true;
     } catch (error) {
         // eslint-disable-next-line no-console
@@ -692,14 +794,20 @@ export async function sendApplicationOfferUpdatedEmail({
     });
 
     try {
+        const attachments = await buildIsoBrandedEmailAttachments(html, OFFER_UPDATED_EMAIL_PDF_FILENAME);
+        const hasPdf = attachments.some((a) => a.contentDisposition === 'attachment');
         await sendMail({
             to: toTrimmed,
             subject,
             html,
-            attachments: buildBrandLogoAttachments(),
+            attachments,
             trackingId,
             categories: ['offer-updated'],
         });
+        if (!hasPdf) {
+            // eslint-disable-next-line no-console
+            console.warn('[email] Offer update sent without PDF attachment (PDF generation failed)');
+        }
         return true;
     } catch (error) {
         // eslint-disable-next-line no-console
@@ -818,6 +926,7 @@ export async function sendFundingCallPendingEmail({
     companyName,
 }: FundingCallPendingEmailParams): Promise<void> {
     if (DISABLE_CLIENT_APPLICATION_EMAILS) return;
+    if (await shouldSkipWorkflowStepEmailForIsoRecipient(to, 'funding-call-pending')) return;
 
     const subject = 'Funding call — next step for your application';
     const html = buildFundingCallPendingEmailHtml({ clientName, companyName });
@@ -946,6 +1055,7 @@ export async function sendApplicationFundedEmail({
     companyName,
 }: ApplicationFundedEmailParams): Promise<void> {
     if (DISABLE_CLIENT_APPLICATION_EMAILS) return;
+    if (await shouldSkipWorkflowStepEmailForIsoRecipient(to, 'application-funded')) return;
 
     const subject = 'Your application is funded — funds released';
     const html = buildApplicationFundedEmailHtml({ clientName, companyName });
@@ -1126,6 +1236,7 @@ export async function sendApplicationSentToUnderwritingClientEmail({
     publicPortalUrl,
 }: ApplicationSentToUnderwritingClientEmailParams): Promise<void> {
     if (DISABLE_CLIENT_APPLICATION_EMAILS) return;
+    if (await shouldSkipWorkflowStepEmailForIsoRecipient(to, 'application-submitted')) return;
 
     const safeAppRef = applicationNumber != null && String(applicationNumber).trim() !== ''
         ? String(applicationNumber).trim()
@@ -1301,6 +1412,7 @@ export async function sendApplicationUnderwritingCompletedClientEmail({
     applicationNumber,
 }: ApplicationUnderwritingCompletedClientEmailParams): Promise<void> {
     if (DISABLE_CLIENT_APPLICATION_EMAILS) return;
+    if (await shouldSkipWorkflowStepEmailForIsoRecipient(to, 'underwriting-completed')) return;
 
     const safeAppRef =
         applicationNumber != null && String(applicationNumber).trim() !== ''

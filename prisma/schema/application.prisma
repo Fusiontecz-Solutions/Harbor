@@ -274,7 +274,6 @@ model ApplicationFile {
   size                  Int?
   requestedDocumentSlug String?
   uploadedAt            DateTime    @default(now())
-  requestedDocumentSlug String?
   application           Application @relation(fields: [applicationId], references: [id])
 
   @@index([applicationId])
@@ -303,7 +302,6 @@ model ContractTemplate {
   layoutKey    String   @default("contract")
   uploadedById String?  @db.Uuid
   createdAt    DateTime @default(now())
-  layoutKey    String   @default("contract")
   uploadedBy   User?    @relation(fields: [uploadedById], references: [id])
 
   @@index([uploadedById])

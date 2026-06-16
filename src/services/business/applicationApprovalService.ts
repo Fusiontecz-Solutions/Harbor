@@ -6,7 +6,10 @@ import type { AuthenticatedUser } from '../applicationService';
 import {
     APPLICATION_QUEUE_CONTRACT_PENDING,
     APPLICATION_STATE_CONTRACT_PENDING,
-} from './contractApplicationWorkflowSync';
+} from '../contractApplicationWorkflowSync';
+import {
+    enqueueApplicationApprovalSideEffects,
+    isApplicationApprovalQueueEnabled,
 } from '../../queues/applicationApprovalQueue';
 
 /* ============================================================================
@@ -407,12 +410,17 @@ export interface ApprovalSideEffectPayload {
 }
 
 function dispatchApprovalSideEffects(payload: ApprovalSideEffectPayload): void {
-    /**
-     * Always fan out inline so in-app notifications are never blocked by a
+    if (isApplicationApprovalQueueEnabled()) {
         enqueueApplicationApprovalSideEffects(payload).catch((err: unknown) => {
-     * Redis/BullMQ outage (REDIS_URL is set locally but Redis is not running,
-     * worker failed to start, etc.).
-     */
+            console.error(
+                '[applicationApprovalService] enqueue failed; falling back to inline fan-out:',
+                err
+            );
+            void runApprovalSideEffectsInline(payload);
+        });
+        return;
+    }
+
     setImmediate(() => {
         void runApprovalSideEffectsInline(payload);
     });

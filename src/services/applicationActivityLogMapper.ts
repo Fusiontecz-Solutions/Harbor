@@ -62,9 +62,9 @@ export function mapApplicationActivityLogEntry(log: LogWithUser) {
     recipientType: (meta.recipientType as string | undefined) ?? (approvalEmail ? 'ISO' : null),
     templateName: (meta.templateName ??
       (meta.template === 'offer-updated'
-        ? 'Offer updated (ISO)'
+        ? 'Update offer template'
         : meta.template === 'approval'
-          ? 'Application approved (ISO)'
+          ? 'Application approved template'
           : null)) as string | null,
     subject: meta.subject as string | null,
     viewType: meta.viewType as string | null,

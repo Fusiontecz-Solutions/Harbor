@@ -405,7 +405,7 @@ async function propagateToActivityLog(ocid: string, meta: TrackingMeta): Promise
     if (!log) {
       const outbound = await prisma.outbound_communications.findUnique({
         where: { id: ocid },
-        select: { applicationId: true, createdAt: true },
+        select: { applicationId: true, createdAt: true, metadata: true },
       });
       if (outbound?.applicationId) {
         const recent = await prisma.applicationActivityLog.findMany({
@@ -421,6 +421,25 @@ async function propagateToActivityLog(ocid: string, meta: TrackingMeta): Promise
             const m = asObject(row.metadata);
             return m.outboundCommunicationId === ocid;
           }) ?? null;
+      }
+
+      if (!log && outbound) {
+        const outboundMeta = asObject(outbound.metadata);
+        const paymentMailLogId =
+          typeof outboundMeta.paymentMailLogId === 'string'
+            ? outboundMeta.paymentMailLogId.trim()
+            : '';
+        if (paymentMailLogId) {
+          log = await prisma.applicationActivityLog.findFirst({
+            where: {
+              metadata: {
+                path: ['paymentMailLogId'],
+                equals: paymentMailLogId,
+              },
+            },
+            orderBy: { createdAt: 'desc' },
+          });
+        }
       }
     }
 

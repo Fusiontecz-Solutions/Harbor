@@ -423,7 +423,7 @@ export async function getSystemActivityLogContent(logId: string) {
       channel: 'EMAIL',
       recipient: recipients,
       recipientType: 'ISO',
-      templateName: isOfferUpdate ? 'Offer updated (ISO)' : 'Application approved (ISO)',
+      templateName: isOfferUpdate ? 'Update offer template' : 'Application approved template',
       subject: isOfferUpdate
         ? 'Your Offer Values Have Been Updated'
         : 'Your Application Has Been Approved',

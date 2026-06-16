@@ -5,8 +5,11 @@ import {
   resolveApplicationAttributedUserId,
   APPLICATION_USER_ATTRIBUTION_ERROR,
 } from '../middleware/authMiddleware';
-import { isOutboundSmtpConfigured } from '../config/nodemailer';
-import { sendFundingCallPendingEmail } from '../services/emailService';
+import { getAuthenticatedUserFromRequest } from '../services/applicationService';
+import {
+  createApplicationActivityLog,
+  type ApplicationActivityActionType,
+} from '../services/applicationActivityLogService';
 
 /** Align with deal-pipeline queue labels (Agent, Underwriter, Final Underwriter, Contracted, Final). */
 const normalizeQueueKey = (queue: string | null | undefined) =>
@@ -14,6 +17,15 @@ const normalizeQueueKey = (queue: string | null | undefined) =>
     .trim()
     .replace(/[\s_-]+/g, '')
     .toLowerCase();
+
+const normalizeCallStatusKey = (value: string | null | undefined) =>
+  String(value ?? '')
+    .trim()
+    .replace(/[\s_-]+/g, '')
+    .toLowerCase();
+
+const isFundingCallRejected = (callStatus: string | null | undefined) =>
+  normalizeCallStatusKey(callStatus) === 'rejected';
 
 const QUEUES_THAT_CAN_MOVE_TO_FUNDING_CALL = new Set([
   'agent',
@@ -166,8 +178,84 @@ class FundingCallController {
       }
 
       let applicationForResponse = record.Application;
+      const previousQueue = appRecord.currentQueue;
+      const previousState = appRecord.currentState;
+      const callStatusStr = String(callStatus);
 
-      if (shouldSetApplicationQueueToFundingCall(appRecord.currentQueue)) {
+      if (isFundingCallRejected(callStatusStr)) {
+        const declineReason =
+          (remarks && String(remarks).trim()) ||
+          'Rejected during funding call';
+
+        const declinedApp = await prisma.application.update({
+          where: { id: appRecord.id },
+          data: {
+            currentQueue: 'Declined',
+            currentState: 'CANCELLED',
+            note: declineReason,
+          },
+        });
+        applicationForResponse = { ...record.Application, ...declinedApp };
+
+        try {
+          const authUser = getAuthenticatedUserFromRequest(req);
+          const roleLabel = authUser?.role
+            ? String(authUser.role).toUpperCase().replace(/_/g, ' ')
+            : 'User';
+          const actorName = (req as any).user?.name || '';
+
+          await createApplicationActivityLog({
+            applicationId: appRecord.id,
+            user: authUser,
+            req,
+            actionType: 'APPLICATION_REJECTED' as ApplicationActivityActionType,
+            actionDescription:
+              `${roleLabel} ${actorName}`.trim() +
+              ` declined the application during funding call. Reason: ${declineReason}`,
+            previousStatus: `${previousQueue} / ${previousState}`,
+            currentStatus: `${declinedApp.currentQueue} / ${declinedApp.currentState}`,
+            metadata: {
+              reason: declineReason,
+              fundingCallStatus: callStatusStr,
+            },
+          });
+        } catch (logError) {
+          console.error('Failed to create activity log for funding call rejection:', logError);
+        }
+
+        try {
+          const clientName =
+            appRecord.client?.businessName ||
+            `${appRecord.client?.ownerFirstName || ''} ${appRecord.client?.ownerLastName || ''}`.trim() ||
+            'Unknown Client';
+          const applicationIdNumber = appRecord.applicationId || 'N/A';
+          const notificationTitle = `Application #${applicationIdNumber} Rejected`;
+          const notificationMessage = `Application #${applicationIdNumber} for ${clientName} was declined during funding call. Reason: ${declineReason}`;
+
+          const recipientIds = new Set<string>();
+          const addIfNotSender = (id: string | null | undefined) => {
+            const sid = id ? String(id) : '';
+            if (sid && sid !== String(createdBy)) recipientIds.add(sid);
+          };
+          addIfNotSender(appRecord.referringAgentId);
+          addIfNotSender(appRecord.salesRepresentativeId);
+
+          for (const recId of recipientIds) {
+            await prisma.notification.create({
+              data: {
+                title: notificationTitle,
+                message: notificationMessage,
+                type: 'application_update',
+                recipientId: recId,
+                applicationId: appRecord.id,
+                createdById: createdBy,
+              },
+            });
+          }
+        } catch (notificationError) {
+          console.error('Failed to send funding call rejection notification:', notificationError);
+        }
+      } else if (shouldSetApplicationQueueToFundingCall(appRecord.currentQueue)) {
         const updatedApp = await prisma.application.update({
           where: { id: appRecord.id },
           data: {
@@ -180,30 +268,12 @@ class FundingCallController {
           : record.Application;
       }
 
-      const client = appRecord.client;
-      const iso = (appRecord as any).iso;
-      const isoEmail = String(iso?.email || '').trim();
-      if (isoEmail && isOutboundSmtpConfigured()) {
-        const clientName =
-          `${client?.ownerFirstName || ''} ${client?.ownerLastName || ''}`.trim() ||
-          client?.businessName ||
-          'Valued Client';
-        const isoName = String(iso?.name || '').trim();
-        const companyName = client?.businessName || 'your business';
-        await sendFundingCallPendingEmail({
-          to: isoEmail,
-          clientName: isoName || isoEmail || clientName,
-          companyName,
-        });
-      } else if (isoEmail && !isOutboundSmtpConfigured()) {
-        console.error(
-          'Funding call email skipped: set SENDGRID_API_KEY or SMTP_AUTH_USER / SMTP_AUTH_PASS.',
-        );
-      }
 
       return res.status(201).json({
         success: true,
-        message: 'Funding call saved successfully',
+        message: isFundingCallRejected(callStatusStr)
+          ? 'Application declined successfully'
+          : 'Funding call saved successfully',
         data: mapFundingCallToApi({ ...record, Application: applicationForResponse }),
       });
     } catch (error) {

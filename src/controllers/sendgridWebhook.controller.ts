@@ -56,9 +56,16 @@ function verifySignature(req: Request): 'ok' | 'invalid' | 'skipped' {
  * (unless signature enforcement rejects) so SendGrid does not retry valid posts.
  */
 export async function handleSendGridWebhook(req: Request, res: Response): Promise<void> {
+  console.log('=== SENDGRID WEBHOOK HIT ===');
+  console.log(req.body);
+  console.log(JSON.stringify(req.body, null, 2));
+
   const verification = verifySignature(req);
   if (verification === 'invalid') {
     if (isSignatureEnforced()) {
+      console.warn(
+        '[sendgridWebhook] rejected: invalid signature (check SENDGRID_WEBHOOK_VERIFICATION_KEY matches SendGrid dashboard)',
+      );
       res.status(403).json({ success: false, message: 'Invalid webhook signature' });
       return;
     }
@@ -82,6 +89,7 @@ export async function handleSendGridWebhook(req: Request, res: Response): Promis
 
   void processSendGridEvents(events)
     .then((result) => {
+      console.log('[sendgridWebhook] processed:', result);
       if (result.unmatched > 0) {
         console.warn('[sendgridWebhook] unmatched events:', result);
       }

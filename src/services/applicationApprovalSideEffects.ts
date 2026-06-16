@@ -3,6 +3,9 @@ import {
     sendApplicationApprovalEmail,
     sendOperationsIsoApprovalAlertEmail,
 } from './emailService';
+import {
+    buildPublicApprovalPortalUrl,
+    resolveCrmFrontendBaseUrl,
 } from '../utils/crmFrontendUrl';
 import { createPublicPortalToken } from './publicPortalTokenService';
 import { emitToUser } from '../socket';
