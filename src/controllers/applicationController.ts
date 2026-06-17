@@ -52,8 +52,11 @@ import {
     buildApplicationApprovalEmailHtml,
     buildApplicationOfferUpdatedEmailHtml,
     sendApplicationApprovalEmail,
+    sendApplicationRejectionEmail,
     APPROVAL_EMAIL_PDF_FILENAME,
     OFFER_UPDATED_EMAIL_PDF_FILENAME,
+    REJECTION_EMAIL_PDF_FILENAME,
+    resolveMerchantContactForOfferEmail,
     sendApplicationOfferUpdatedEmail,
     sendUnderwriterNewApplicationEmail,
 } from '../services/emailService';
@@ -606,6 +609,8 @@ export const mapApplicationToApi = (app: any) => {
             mimeType: f.mimeType,
             size: f.size,
             uploadedAt: f.uploadedAt,
+            requestedDocumentSlug: f.requestedDocumentSlug,
+            documentType: f.requestedDocumentSlug,
         })) || [];
 
     /** Matches ISO portal `/iso/:id/application-payout-status` (IsoApplicationPayout). */
@@ -1080,7 +1085,10 @@ class ApplicationController {
             }
 
             const requestedDocumentSlug = String(
-                (req.body as { requestedDocumentSlug?: string })?.requestedDocumentSlug || '',
+                (req.body as { requestedDocumentSlug?: string; documentType?: string })?.requestedDocumentSlug ||
+                    // ISO approval-portal uploads tag the file with a documentType (driving_license / voided_check / other).
+                    (req.body as { documentType?: string })?.documentType ||
+                    '',
             )
                 .trim()
                 .toLowerCase();
@@ -3485,7 +3493,7 @@ class ApplicationController {
     async rejectApplication(req: Request, res: Response) {
         try {
             const { id } = req.params;
-            const { reason, additionalComments } = req.body;
+            const { reason, additionalComments, emailHtml, emailSubject } = req.body;
             const authUser = getAuthenticatedUser(req);
             const currentUserRole = authUser?.role;
             const isFinalUnderwriter = currentUserRole === 'FINAL_UNDERWRITER';
@@ -3544,6 +3552,7 @@ class ApplicationController {
                     referringAgent: { select: { id: true, firstName: true, lastName: true, email: true } },
                     salesRepresentative: { select: { id: true, firstName: true, lastName: true, email: true } },
                     client: true,
+                    iso: true,
                     createdBy: { select: { id: true, firstName: true, lastName: true, email: true } },
                     files: true,
                 },
@@ -3614,15 +3623,90 @@ class ApplicationController {
                 });
             }
 
-            // Best-effort activity log for rejection
-            try {
-                const authUserForLog = getAuthenticatedUser(req);
-                const roleLabel = authUserForLog?.role
-                    ? String(authUserForLog.role).toUpperCase().replace(/_/g, ' ')
-                    : 'User';
-                const actorName = (req as any).user?.name || '';
-                const reasonText = reason.trim();
+            // Best-effort activity log for rejection (skipped when the new decline template email is audited)
+            let rejectionCommunicationLogged = false;
+            const authUserForLog = getAuthenticatedUser(req);
+            const roleLabel = authUserForLog?.role
+                ? String(authUserForLog.role).toUpperCase().replace(/_/g, ' ')
+                : 'User';
+            const actorName = (req as any).user?.name || '';
+            const reasonText = reason.trim();
 
+            // Best-effort: notify the linked ISO with the branded decline template.
+            try {
+                const iso = (applicationRecord as any).iso;
+                const isoEmail = String(iso?.email ?? '').trim();
+                if (isoEmail) {
+                    const isoName = String(iso?.name ?? '').trim();
+                    const clientEmailHtml =
+                        typeof emailHtml === 'string' && emailHtml.trim() ? emailHtml.trim() : undefined;
+                    const clientEmailSubject =
+                        typeof emailSubject === 'string' && emailSubject.trim()
+                            ? emailSubject.trim()
+                            : undefined;
+                    let trackingId: string | undefined;
+
+                    if (clientEmailHtml) {
+                        trackingId = randomUUID();
+                        try {
+                            await recordCommunicationAudit(req, {
+                                outboundCommunicationId: trackingId,
+                                applicationId: applicationRecord.id,
+                                channel: 'EMAIL',
+                                recipientType: 'ISO',
+                                recipient: isoEmail,
+                                subject: clientEmailSubject || 'Application Rejected',
+                                body: clientEmailHtml,
+                                templateName: 'Application declined template',
+                                actionType: 'APPLICATION_REJECTED',
+                                actionDescription:
+                                    `${roleLabel} ${actorName}`.trim() +
+                                    ` rejected the application and sent the decline template to the ISO. Reason: ${reasonText}`,
+                                currentStatus: `${applicationRecord.currentQueue} / ${applicationRecord.currentState}`,
+                                user: authUserForLog,
+                                metadata: {
+                                    reason: reasonText,
+                                    additionalComments: additionalCommentsText,
+                                    template: 'rejection',
+                                    status: 'sent',
+                                    hasLetterPdf: true,
+                                    attachments: [REJECTION_EMAIL_PDF_FILENAME],
+                                    delivery: {
+                                        status: 'sent',
+                                        sentAt: new Date().toISOString(),
+                                    },
+                                },
+                            });
+                            rejectionCommunicationLogged = true;
+                        } catch (auditErr) {
+                            console.error(
+                                'Failed to create communication audit for rejection email:',
+                                auditErr,
+                            );
+                        }
+                    }
+
+                    await sendApplicationRejectionEmail({
+                        to: isoEmail,
+                        clientName: isoName || isoEmail,
+                        primaryReason: reason.trim(),
+                        otherReasons: additionalCommentsText,
+                        html: clientEmailHtml,
+                        subject: clientEmailSubject,
+                        trackingId,
+                    });
+                } else {
+                    console.warn(
+                        '[reject] Skipped ISO decline email — no linked ISO email on application',
+                        applicationRecord.id,
+                    );
+                }
+            } catch (rejectionEmailError) {
+                console.error('Failed to send ISO rejection email:', rejectionEmailError);
+            }
+
+            if (!rejectionCommunicationLogged) {
+            try {
                 await createApplicationActivityLog({
                     applicationId: applicationRecord.id,
                     user: authUserForLog,
@@ -3639,6 +3723,7 @@ class ApplicationController {
                 });
             } catch (logError) {
                 console.error('Failed to create activity log for rejection:', logError);
+            }
             }
 
             return res.status(200).json({
@@ -5063,6 +5148,15 @@ class ApplicationController {
                 {
                     client: true,
                     iso: true,
+                    termsOffers: {
+                        orderBy: { updatedAt: 'desc' },
+                        take: 1,
+                        select: {
+                            approvedAmount: true,
+                            factorRate: true,
+                            paybackAmount: true,
+                        },
+                    },
                 }
             );
 
@@ -5113,6 +5207,18 @@ class ApplicationController {
                 clientBusinessName ||
                 'there';
             const companyName = clientBusinessName;
+
+            const merchantFullName =
+                `${client?.ownerFirstName || ''} ${client?.ownerLastName || ''}`.trim() || undefined;
+            const { merchantEmail, merchantPhone } = resolveMerchantContactForOfferEmail(client);
+            const latestTermsOffer = (application as any).termsOffers?.[0] ?? null;
+            const offerApprovedAmount =
+                latestTermsOffer?.approvedAmount != null ? Number(latestTermsOffer.approvedAmount) : undefined;
+            const offerFactorRate =
+                latestTermsOffer?.factorRate != null ? Number(latestTermsOffer.factorRate) : undefined;
+            const offerRepaymentAmount =
+                latestTermsOffer?.paybackAmount != null ? Number(latestTermsOffer.paybackAmount) : undefined;
+            const offerApplicationNumber = (application as any).applicationId ?? undefined;
 
             if (!isoEmailRaw) {
                 return res.status(400).json({
@@ -5174,6 +5280,13 @@ class ApplicationController {
                     clientName: isoRecipientName,
                     companyName,
                     calculateApprovalUrl,
+                    applicationNumber: offerApplicationNumber,
+                    merchantName: merchantFullName,
+                    merchantEmail,
+                    merchantPhone,
+                    approvedAmount: offerApprovedAmount,
+                    factorRate: offerFactorRate,
+                    repaymentAmount: offerRepaymentAmount,
                 })
                 : buildApplicationApprovalEmailHtml({
                     clientName: isoRecipientName,
@@ -5232,6 +5345,13 @@ class ApplicationController {
                             companyName,
                             viewApplicationUrl,
                             calculateApprovalUrl,
+                            applicationNumber: offerApplicationNumber,
+                            merchantName: merchantFullName,
+                            merchantEmail,
+                            merchantPhone,
+                            approvedAmount: offerApprovedAmount,
+                            factorRate: offerFactorRate,
+                            repaymentAmount: offerRepaymentAmount,
                             trackingId,
                         })
                         : await sendApplicationApprovalEmail({

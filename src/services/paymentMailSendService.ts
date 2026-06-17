@@ -11,7 +11,10 @@ import {
   markPaymentMailLogFailed,
 } from './paymentMailLogService';
 import { recordCommunicationAudit } from './systemActivityLogService';
-import { inferRecipientTypeFromCategory } from './outboundCommunicationService';
+import {
+  inferRecipientTypeFromCategory,
+  storeSgMessageIdOnOutbound,
+} from './outboundCommunicationService';
 
 export interface SendPaymentTemplateMailInput {
   to: string;
@@ -24,7 +27,7 @@ export interface SendPaymentTemplateMailInput {
   dealKey: string;
   templateName: string;
   category: string;
-  /** When true, renders the HTML body to a PDF and attaches it (letter templates). */
+  /** When true (or when category is `email`), renders the HTML body to a PDF and attaches it. */
   attachLetterPdf?: boolean;
   letterPdfFilename?: string;
 }
@@ -36,21 +39,6 @@ export type SendPaymentTemplateMailResult =
 function authUserFromRequest(req: Request): AuthenticatedUser | null {
   if (!req.user?.id) return null;
   return { id: req.user.id, role: req.user.role } as AuthenticatedUser;
-}
-
-async function storeSgMessageIdOnOutbound(outboundId: string, sgMessageId: string): Promise<void> {
-  const existing = await prisma.outbound_communications.findUnique({
-    where: { id: outboundId },
-    select: { metadata: true },
-  });
-  const prior =
-    existing?.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)
-      ? (existing.metadata as Record<string, unknown>)
-      : {};
-  await prisma.outbound_communications.update({
-    where: { id: outboundId },
-    data: { metadata: { ...prior, sgMessageId } as object },
-  });
 }
 
 /**
@@ -83,7 +71,11 @@ export async function sendTrackedPaymentTemplateMail(
     contentDisposition?: 'attachment' | 'inline';
   }> = [];
 
-  if (input.attachLetterPdf) {
+  const shouldAttachPdf =
+    Boolean(input.attachLetterPdf) ||
+    String(input.category || '').trim().toLowerCase() === 'email';
+
+  if (shouldAttachPdf) {
     const { renderLetterHtmlToPdfBuffer, sanitizeLetterPdfFilename } = await import(
       './pdf/letterHtmlToPdf.service'
     );
@@ -140,7 +132,7 @@ export async function sendTrackedPaymentTemplateMail(
         recipient: input.to,
         paymentMailLogId: paymentLog.id,
         status: 'sent',
-        hasLetterPdf: Boolean(input.attachLetterPdf),
+        hasLetterPdf: shouldAttachPdf,
         attachments: attachmentNames.length ? attachmentNames : undefined,
         delivery: {
           status: 'sent',

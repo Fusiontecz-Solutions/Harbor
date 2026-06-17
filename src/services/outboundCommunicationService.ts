@@ -101,3 +101,22 @@ declare global {
 export function markActivityLogged(req: Request): void {
   req.__activityLogged = true;
 }
+
+/** Persist SendGrid `x-message-id` on the outbound row for webhook fallback matching. */
+export async function storeSgMessageIdOnOutbound(
+  outboundId: string,
+  sgMessageId: string,
+): Promise<void> {
+  const existing = await prisma.outbound_communications.findUnique({
+    where: { id: outboundId },
+    select: { metadata: true },
+  });
+  const prior =
+    existing?.metadata && typeof existing.metadata === 'object' && !Array.isArray(existing.metadata)
+      ? (existing.metadata as Record<string, unknown>)
+      : {};
+  await prisma.outbound_communications.update({
+    where: { id: outboundId },
+    data: { metadata: { ...prior, sgMessageId } as object },
+  });
+}

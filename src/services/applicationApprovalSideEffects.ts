@@ -1,8 +1,5 @@
 import prisma from '../config/prismaClient';
-import {
-    sendApplicationApprovalEmail,
-    sendOperationsIsoApprovalAlertEmail,
-} from './emailService';
+import { sendApplicationApprovalEmail } from './emailService';
 import {
     buildPublicApprovalPortalUrl,
     resolveCrmFrontendBaseUrl,
@@ -414,13 +411,6 @@ export async function processApplicationApprovalSideEffects(
                 const actionUrl = baseUrl
                     ? `${baseUrl.replace(/\/$/, '')}/application-details/${applicationNumber}`
                     : `/application-details/${applicationNumber}`;
-                const viewApplicationUrl = baseUrl
-                    ? `${baseUrl.replace(/\/$/, '')}/applications/${applicationNumber}`
-                    : undefined;
-                const isoName =
-                    String(iso?.name ?? '').trim() ||
-                    String(payload.actorName ?? '').trim() ||
-                    'ISO';
 
                 await createAndPushNotifications(
                     operationNotifications,
@@ -433,21 +423,6 @@ export async function processApplicationApprovalSideEffects(
                     },
                     { realtimeKind: 'iso_approval_for_operations', actionUrl },
                     { skipIfTitleExists: true }
-                );
-
-                await Promise.allSettled(
-                    operationNotifications
-                        .filter((recipient) => Boolean(recipient.email))
-                        .map((recipient) =>
-                            sendOperationsIsoApprovalAlertEmail({
-                                to: recipient.email as string,
-                                operationsName: recipient.name || undefined,
-                                isoName,
-                                applicationNumber,
-                                clientName,
-                                viewApplicationUrl,
-                            })
-                        )
                 );
             } else {
                 console.warn('[approvalSideEffects] no Operations/Admin/Super Admin recipients to notify:', {
