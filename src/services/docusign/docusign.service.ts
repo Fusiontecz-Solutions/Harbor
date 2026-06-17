@@ -76,13 +76,18 @@ import {
 } from './utils/platform-layout-envelope';
 import { applyDocuSignPrefillTabStyle } from './utils/docusign-tab-style';
 import {
+  contractHasAchAuthorizationEnvelope,
   findApplicationIdByAchEnvelopeId,
   isStandaloneAchEnvelope,
   linkAchAuthorizationEnvelopeToContract,
   mapInternalEnvelopeStatusToAchCapsule,
   updateAchAuthorizationDocuSignStatus,
+  clearAchAuthorizationIfMatchesMainContract,
 } from './utils/ach-authorization-docusign';
-import { archiveMainContractEnvelopeToHistory } from './utils/contract-send-history';
+import {
+  archiveMainContractEnvelopeToHistory,
+  updateArchivedContractSendHistoryStatus,
+} from './utils/contract-send-history';
 import { decryptField, isEncrypted } from '../../utils/fieldEncryption';
 import { handleContractSigningStatusTransition } from '../contractSigningStatusEffects';
 import { mergeDefaultContractCcEmails } from '../../utils/contractCcDefaults';
@@ -2529,13 +2534,18 @@ export class DocusignService {
     });
     const priorEnvelopeId = String(existingDoc?.envelopeId ?? '').trim();
     if (priorEnvelopeId && priorEnvelopeId !== newEnvelopeId) {
-      await archiveMainContractEnvelopeToHistory(applicationId, {
-        envelopeId: priorEnvelopeId,
-        status: String(existingDoc?.status ?? 'draft'),
-        sentAt: existingDoc?.sentAt,
-        completedAt: existingDoc?.completedAt,
-      });
+      const priorIsAch = await contractHasAchAuthorizationEnvelope(priorEnvelopeId);
+      if (!priorIsAch) {
+        await archiveMainContractEnvelopeToHistory(applicationId, {
+          envelopeId: priorEnvelopeId,
+          status: String(existingDoc?.status ?? 'draft'),
+          sentAt: existingDoc?.sentAt,
+          completedAt: existingDoc?.completedAt,
+        });
+      }
     }
+
+    await clearAchAuthorizationIfMatchesMainContract(applicationId, newEnvelopeId);
 
     await prisma.document.upsert({
       where: { applicationId },
@@ -2646,6 +2656,27 @@ export class DocusignService {
       data: updateData as any,
     });
     if (updateResult.count === 0) {
+      const appIdForHistory = applicationId || existingDoc?.applicationId || null;
+      if (appIdForHistory) {
+        const historyUpdated = await updateArchivedContractSendHistoryStatus(
+          String(appIdForHistory),
+          String(envelopeId),
+          status,
+          {
+            sentAt:
+              status === 'sent' && updateData.sentAt
+                ? new Date(updateData.sentAt as Date).toISOString()
+                : undefined,
+            completedAt:
+              status === 'completed' && updateData.completedAt
+                ? new Date(updateData.completedAt as Date).toISOString()
+                : undefined,
+          },
+        );
+        if (historyUpdated) {
+          return status;
+        }
+      }
       console.warn('[DocuSign] webhook: no Document row updated for envelope', {
         envelopeId,
         incoming: incomingResolved,

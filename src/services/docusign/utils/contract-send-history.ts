@@ -60,6 +60,71 @@ export function appendContractSendHistoryEntry(
   };
 }
 
+export function updateContractSendHistoryEntryStatus(
+  baseRaw: unknown,
+  envelopeId: string,
+  status: string,
+  patch?: { sentAt?: string | null; completedAt?: string | null },
+): Record<string, unknown> {
+  const base =
+    baseRaw && typeof baseRaw === 'object' && !Array.isArray(baseRaw)
+      ? { ...(baseRaw as Record<string, unknown>) }
+      : {};
+  const prior = parseContractSendHistoryFromPrefill(base);
+  const eid = String(envelopeId || '').trim();
+  if (!eid || !prior.length) return base;
+
+  const normalized = String(status || 'draft').trim().toLowerCase();
+  const nextHistory = prior.map((entry) => {
+    if (entry.envelopeId !== eid) return entry;
+    return {
+      ...entry,
+      status: normalized,
+      sentAt: patch?.sentAt !== undefined ? patch.sentAt : entry.sentAt,
+      completedAt:
+        patch?.completedAt !== undefined ? patch.completedAt : entry.completedAt,
+    };
+  });
+
+  return {
+    ...base,
+    [CONTRACT_SEND_HISTORY_KEY]: nextHistory,
+  };
+}
+
+export async function updateArchivedContractSendHistoryStatus(
+  applicationId: string,
+  envelopeId: string,
+  status: string,
+  patch?: { sentAt?: string | null; completedAt?: string | null },
+): Promise<boolean> {
+  const appId = String(applicationId || '').trim();
+  const eid = String(envelopeId || '').trim();
+  if (!appId || !eid) return false;
+
+  const contract = await prisma.contract.findUnique({
+    where: { applicationId: appId },
+    select: { id: true, contractPrefillOverrides: true },
+  });
+  if (!contract) return false;
+
+  const prior = parseContractSendHistoryFromPrefill(contract.contractPrefillOverrides);
+  if (!prior.some((row) => row.envelopeId === eid)) return false;
+
+  const merged = updateContractSendHistoryEntryStatus(
+    contract.contractPrefillOverrides,
+    eid,
+    status,
+    patch,
+  );
+
+  await prisma.contract.update({
+    where: { id: contract.id },
+    data: { contractPrefillOverrides: merged as Prisma.InputJsonValue },
+  });
+  return true;
+}
+
 export async function archiveMainContractEnvelopeToHistory(
   applicationId: string,
   snapshot: {

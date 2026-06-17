@@ -179,6 +179,22 @@ export async function linkAchAuthorizationEnvelopeToContract(
   const eid = String(envelopeId || '').trim();
   if (!eid) return false;
 
+  const appId = String(applicationId || '').trim();
+  if (appId) {
+    const mainDoc = await prisma.document.findUnique({
+      where: { applicationId: appId },
+      select: { envelopeId: true },
+    });
+    const mainEnvelopeId = String(mainDoc?.envelopeId ?? '').trim();
+    if (mainEnvelopeId && mainEnvelopeId === eid) {
+      console.warn('[ACH DocuSign] refusing to link main contract envelope as ACH', {
+        applicationId: appId,
+        envelopeId: eid,
+      });
+      return false;
+    }
+  }
+
   const contracts = await loadContractsForAchLink(applicationId, contractId);
   if (!contracts.length) {
     console.warn('[ACH DocuSign] no contract row to link ACH envelope', {
@@ -205,6 +221,36 @@ export async function linkAchAuthorizationEnvelopeToContract(
     });
   }
   return true;
+}
+
+/** Remove ACH envelope metadata when it incorrectly points at the main contract envelope. */
+export async function clearAchAuthorizationIfMatchesMainContract(
+  applicationId: string,
+  mainContractEnvelopeId: string,
+): Promise<boolean> {
+  const mainEid = String(mainContractEnvelopeId || '').trim();
+  const appId = String(applicationId || '').trim();
+  if (!mainEid || !appId) return false;
+
+  const contracts = await loadContractsForAchLink(appId);
+  let cleared = false;
+  for (const contract of contracts) {
+    const prior = parseAchAuthorizationDocuSignFromPrefill(contract.contractPrefillOverrides);
+    if (!prior || prior.envelopeId !== mainEid) continue;
+    const base =
+      contract.contractPrefillOverrides &&
+      typeof contract.contractPrefillOverrides === 'object' &&
+      !Array.isArray(contract.contractPrefillOverrides)
+        ? { ...(contract.contractPrefillOverrides as Record<string, unknown>) }
+        : {};
+    delete base[ACH_AUTHORIZATION_DOCUSIGN_KEY];
+    await prisma.contract.update({
+      where: { id: contract.id },
+      data: { contractPrefillOverrides: base as Prisma.InputJsonValue },
+    });
+    cleared = true;
+  }
+  return cleared;
 }
 
 export async function contractRowHasAchEnvelope(
