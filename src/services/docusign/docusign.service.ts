@@ -76,10 +76,8 @@ import {
 } from './utils/platform-layout-envelope';
 import { applyDocuSignPrefillTabStyle } from './utils/docusign-tab-style';
 import {
-  contractHasAchAuthorizationEnvelope,
-  contractRowHasAchEnvelope,
-  ensureAchAuthorizationEnvelopeLinked,
   findApplicationIdByAchEnvelopeId,
+  isStandaloneAchEnvelope,
   linkAchAuthorizationEnvelopeToContract,
   mapInternalEnvelopeStatusToAchCapsule,
   updateAchAuthorizationDocuSignStatus,
@@ -2625,7 +2623,7 @@ export class DocusignService {
       applicationId: applicationId ?? undefined,
       contractId: achHints?.contractId,
     };
-    if (await contractRowHasAchEnvelope(envelopeId, achLookup)) {
+    if (await isStandaloneAchEnvelope(envelopeId, achLookup)) {
       await updateAchAuthorizationDocuSignStatus(envelopeId, incomingResolved, achLookup);
       return incomingResolved;
     }
@@ -3923,7 +3921,7 @@ export class DocusignService {
     });
     invalidateEnvelopeStatusSyncCache(envelopeId);
 
-    const isAchEnvelope = await contractHasAchAuthorizationEnvelope(envelopeId);
+    const isAchEnvelope = await isStandaloneAchEnvelope(envelopeId);
     if (isAchEnvelope) {
       await updateAchAuthorizationDocuSignStatus(envelopeId, 'revoked');
       return { success: true, achAuthorization: true };
@@ -4000,8 +3998,24 @@ export class DocusignService {
       const base64 = await loadPlatformDocumentPdfBase64(ref);
       return Buffer.from(base64, 'base64');
     }
+
+    const row = await prisma.boldSignTemplate.findFirst({
+      where: { OR: [{ id: ref }, { templateId: ref }, { layoutKey: ref }] },
+      select: { pdfUrl: true, name: true },
+    });
+    const pdfUrl = String(row?.pdfUrl || '').trim();
+    if (pdfUrl.startsWith('http://') || pdfUrl.startsWith('https://')) {
+      const res = await fetch(pdfUrl);
+      if (!res.ok) {
+        throw new BadRequestException(
+          `Failed to download template PDF for "${row?.name || ref}" (${res.status}).`,
+        );
+      }
+      return Buffer.from(await res.arrayBuffer());
+    }
+
     throw new BadRequestException(
-      `Unknown platform document "${ref}". Use a layout key such as flex_addendum, balance_transfer, or ach_authorization.`,
+      `Unknown platform document "${ref}". Use a layout key such as flex_addendum, balance_transfer, or ach_authorization, or a CRM template row id with pdfUrl.`,
     );
   }
 
@@ -4367,14 +4381,8 @@ export class DocusignService {
     const priorStatus = String(existingDoc?.status || '').toLowerCase();
     const appId = applicationId || existingDoc?.applicationId || null;
     const contractIdHint = Number(options.contractId);
-    await ensureAchAuthorizationEnvelopeLinked(envelopeId, incomingResolved, {
-      applicationId: appId ?? applicationId,
-      contractId:
-        Number.isFinite(contractIdHint) && contractIdHint > 0
-          ? contractIdHint
-          : undefined,
-    });
     const achHints = {
+      applicationId: appId ?? applicationId,
       contractId:
         Number.isFinite(contractIdHint) && contractIdHint > 0
           ? contractIdHint
@@ -4406,10 +4414,7 @@ export class DocusignService {
       );
     }
 
-    const achAuthorization = await contractRowHasAchEnvelope(envelopeId, {
-      applicationId: appId ?? applicationId,
-      contractId: achHints.contractId,
-    });
+    const achAuthorization = await isStandaloneAchEnvelope(envelopeId, achHints);
 
     const payload = {
       envelopeId,

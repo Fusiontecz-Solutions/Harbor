@@ -29,6 +29,8 @@ export type DocumentLayoutPlacement = {
   height?: string;
   optional?: boolean;
   sourceTabLabel?: string;
+  /** When true, prefill tab is locked so signers cannot edit. */
+  lockedForSigner?: boolean;
 };
 
 export type DocumentLayout = {

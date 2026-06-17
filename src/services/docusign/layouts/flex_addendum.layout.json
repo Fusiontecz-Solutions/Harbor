@@ -20,20 +20,34 @@
   "variables": [
     "client_legal_name",
     "client_name",
+    "business_name_2",
     "signature_date"
   ],
   "placements": [
     {
       "id": "p1",
       "type": "signature",
-      "slot": "signature_p2_425_391",
+      "slot": "signature_p2_422_392",
       "documentId": "1",
       "pageNumber": "2",
-      "x": "425",
-      "y": "391",
+      "x": "422",
+      "y": "392",
       "signerRole": "Receiver",
       "optional": false,
-      "sourceTabLabel": "Signature e267d21b-4f1e-49a7-9a79-8d1345b23bae",
+      "sourceTabLabel": "Signature flex_addendum_p2_owner1",
+      "signerParty": "primary"
+    },
+    {
+      "id": "p1b",
+      "type": "signature",
+      "slot": "signature_p2_424_506",
+      "documentId": "1",
+      "pageNumber": "2",
+      "x": "424",
+      "y": "506",
+      "signerRole": "Receiver",
+      "optional": false,
+      "sourceTabLabel": "Signature flex_addendum_p2_owner2",
       "signerParty": "secondary"
     },
     {
@@ -93,6 +107,21 @@
       "signerRole": "Receiver",
       "optional": true,
       "sourceTabLabel": "client_name"
+    },
+    {
+      "id": "p6",
+      "type": "text",
+      "variable": "business_name_2",
+      "documentId": "1",
+      "pageNumber": "2",
+      "x": "96",
+      "y": "517",
+      "width": "257",
+      "height": "24",
+      "signerRole": "Receiver",
+      "optional": true,
+      "sourceTabLabel": "business_name_2",
+      "when": "owners >= 2"
     }
   ],
   "pdf": {
