@@ -55,14 +55,21 @@ export async function loadSupplementalLayoutPackage(
   }
 
   const resolved = await resolveTemplateRefForMerge(sourceRef);
-  if (!resolved.layoutKey) {
-    throw new Error(`Supplemental document "${resolved.name || ref}" has no layoutKey.`);
+  const layout =
+    resolved.inlineLayout ||
+    (resolved.layoutKey ? getDocumentLayout(resolved.layoutKey) : null);
+  if (!layout) {
+    throw new Error(`Supplemental document "${resolved.name || ref}" has no layout.`);
   }
-  const layout = getDocumentLayout(resolved.layoutKey);
   const pdfUrl = String(resolved.pdfUrl || '').trim();
   const documentBase64 = pdfUrl.startsWith('platform://')
-    ? await loadPlatformDocumentPdfBase64(resolved.layoutKey)
+    ? resolved.layoutKey
+      ? await loadPlatformDocumentPdfBase64(resolved.layoutKey)
+      : ''
     : await fetchPdfAsBase64(pdfUrl);
+  if (!documentBase64) {
+    throw new Error(`Supplemental document "${resolved.name || ref}" PDF could not be loaded.`);
+  }
   return { ...layout, documentBase64 };
 }
 
@@ -194,27 +201,31 @@ export function countGuarantorsFromRoles(roles: Array<Record<string, unknown>>):
   return Math.min(2, count);
 }
 
-/** Normalize supplemental refs to platform layout keys (code-defined documents). */
+/** Normalize supplemental refs to platform layout keys or CRM template row ids (e.g. state disclosure). */
 export async function filterSupplementalRefs(refs: string[]): Promise<string[]> {
-  const layoutKeys: string[] = [];
+  const out: string[] = [];
   for (const ref of refs) {
     const trimmed = String(ref || '').trim();
     if (!trimmed) continue;
     if (isDocumentLayoutKey(trimmed)) {
-      layoutKeys.push(trimmed);
+      out.push(trimmed);
       continue;
     }
 
     const row = await prisma.boldSignTemplate.findFirst({
       where: { OR: [{ id: trimmed }, { templateId: trimmed }, { layoutKey: trimmed }] },
-      select: { layoutKey: true, type: true, templateId: true },
+      select: { id: true, layoutKey: true, type: true, templateId: true, pdfUrl: true },
     });
+    if (row?.id && String(row.pdfUrl || '').trim()) {
+      out.push(String(row.id));
+      continue;
+    }
     const fromRow = String(row?.layoutKey || row?.templateId || '').trim();
     if (isDocumentLayoutKey(fromRow)) {
-      layoutKeys.push(fromRow);
+      out.push(fromRow);
     }
   }
-  return normalizeSupplementalLayoutKeys(layoutKeys);
+  return [...new Set(out)];
 }
 
 export async function resolveSupplementalRefsFromDb(filters: {

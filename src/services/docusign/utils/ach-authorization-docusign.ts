@@ -140,15 +140,21 @@ export async function findApplicationIdByAchEnvelopeId(
   return appId || null;
 }
 
+type AchContractPrefillRow = {
+  id: number;
+  applicationId: string | null;
+  contractPrefillOverrides: unknown;
+};
+
 async function loadContractsForAchLink(
   applicationId: string,
   contractId?: number,
-): Promise<Array<{ id: number; contractPrefillOverrides: unknown }>> {
+): Promise<AchContractPrefillRow[]> {
   const numericContractId = Number(contractId);
   if (Number.isFinite(numericContractId) && numericContractId > 0) {
     const byId = await prisma.contract.findUnique({
       where: { id: numericContractId },
-      select: { id: true, contractPrefillOverrides: true },
+      select: { id: true, applicationId: true, contractPrefillOverrides: true },
     });
     if (byId) return [byId];
   }
@@ -158,7 +164,7 @@ async function loadContractsForAchLink(
 
   return prisma.contract.findMany({
     where: { applicationId: appId },
-    select: { id: true, contractPrefillOverrides: true },
+    select: { id: true, applicationId: true, contractPrefillOverrides: true },
     orderBy: { id: 'desc' },
     take: 1,
   });
@@ -201,22 +207,6 @@ export async function linkAchAuthorizationEnvelopeToContract(
   return true;
 }
 
-export async function ensureAchAuthorizationEnvelopeLinked(
-  envelopeId: string,
-  internalStatus: string,
-  hints: { applicationId?: string; contractId?: number },
-): Promise<boolean> {
-  const eid = String(envelopeId || '').trim();
-  if (!eid) return false;
-  if (await contractHasAchAuthorizationEnvelope(eid)) return true;
-  return linkAchAuthorizationEnvelopeToContract(
-    hints.applicationId ?? '',
-    eid,
-    internalStatus,
-    hints.contractId,
-  );
-}
-
 export async function contractRowHasAchEnvelope(
   envelopeId: string,
   hints?: { applicationId?: string; contractId?: number },
@@ -235,17 +225,16 @@ export async function contractRowHasAchEnvelope(
 async function findContractsForAchEnvelopeUpdate(
   envelopeId: string,
   hints?: { applicationId?: string; contractId?: number },
-): Promise<Array<{ id: number; contractPrefillOverrides: unknown }>> {
+): Promise<AchContractPrefillRow[]> {
   const eid = String(envelopeId || '').trim();
-  let contracts: Array<{ id: number; contractPrefillOverrides: unknown }> =
-    await prisma.contract.findMany({
+  let contracts: AchContractPrefillRow[] = await prisma.contract.findMany({
       where: {
         contractPrefillOverrides: {
           path: [ACH_AUTHORIZATION_DOCUSIGN_KEY, 'envelopeId'],
           equals: eid,
         },
       },
-      select: { id: true, contractPrefillOverrides: true },
+      select: { id: true, applicationId: true, contractPrefillOverrides: true },
     });
   if (!contracts.length && hints && (hints.applicationId || hints.contractId)) {
     const candidates = await loadContractsForAchLink(
@@ -258,6 +247,40 @@ async function findContractsForAchEnvelopeUpdate(
     );
   }
   return contracts;
+}
+
+/**
+ * True when this envelope is the standalone ACH send — not the main contract envelope.
+ * Contract and ACH must keep separate DocuSign envelopes so voiding one does not affect the other.
+ */
+export async function isStandaloneAchEnvelope(
+  envelopeId: string,
+  hints?: { applicationId?: string; contractId?: number },
+): Promise<boolean> {
+  const eid = String(envelopeId || '').trim();
+  if (!eid) return false;
+  if (!(await contractRowHasAchEnvelope(eid, hints))) return false;
+
+  const appIdHint = String(hints?.applicationId ?? '').trim();
+  if (appIdHint) {
+    const mainDoc = await prisma.document.findUnique({
+      where: { applicationId: appIdHint },
+      select: { envelopeId: true },
+    });
+    return String(mainDoc?.envelopeId ?? '').trim() !== eid;
+  }
+
+  const contracts = await findContractsForAchEnvelopeUpdate(eid, hints);
+  for (const contract of contracts) {
+    const appId = String(contract.applicationId ?? '').trim();
+    if (!appId) continue;
+    const mainDoc = await prisma.document.findUnique({
+      where: { applicationId: appId },
+      select: { envelopeId: true },
+    });
+    if (String(mainDoc?.envelopeId ?? '').trim() === eid) return false;
+  }
+  return true;
 }
 
 export async function updateAchAuthorizationDocuSignStatus(
