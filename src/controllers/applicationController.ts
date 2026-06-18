@@ -51,6 +51,7 @@ import { applyContractCompletedSyncToApplicationRecord } from '../services/contr
 import {
     buildApplicationApprovalEmailHtml,
     buildApplicationOfferUpdatedEmailHtml,
+    injectApplicationApprovalEmailValues,
     sendApplicationApprovalEmail,
     sendApplicationRejectionEmail,
     APPROVAL_EMAIL_PDF_FILENAME,
@@ -282,7 +283,10 @@ const applicationStateApiToPrisma: Record<string, ApplicationState> = {
 
 /** API input → verbatim `Application.currentState` string (not a Prisma workflow enum). */
 const verbatimApplicationStateByInput: Record<string, string> = {
-    'Contract Out': 'Contract Out',
+    'Contract Out': 'CONTRACT_SENT',
+    'Contracts Out': 'CONTRACT_SENT',
+    'Contract Sent': 'CONTRACT_SENT',
+    Contract_Sent: 'CONTRACT_SENT',
 };
 
 const applicationStatePrismaToApi: Record<ApplicationState, string> = {
@@ -293,7 +297,7 @@ const applicationStatePrismaToApi: Record<ApplicationState, string> = {
     [ApplicationState.COMPLETED]: 'Completed',
     [ApplicationState.CANCELLED]: 'Cancelled',
     [ApplicationState.CONTRACT_PENDING]: 'Contract_Pending',
-    [ApplicationState.CONTRACTS_OUT]: 'Contract Out',
+    [ApplicationState.CONTRACTS_OUT]: 'Contract Sent',
     [ApplicationState.SIGNED_CONTRACTS]: 'Signed_Contracts',
     [ApplicationState.FUNDING_CALL]: 'Funding Call',
     [ApplicationState.DISBURSMENT]: 'Disbursment',
@@ -324,12 +328,36 @@ const toPrismaApplicationState = (value: unknown): ApplicationState | undefined 
     );
 };
 
+const normalizeContractSentWorkflowLabel = (value: string): string | null => {
+    const compact = value.trim().replace(/[\s_-]+/g, '').toLowerCase();
+    if (
+        compact === 'contractout' ||
+        compact === 'contractsout' ||
+        compact === 'contractsent' ||
+        value.trim() === 'CONTRACT_SENT' ||
+        value.trim() === 'Contract_Sent'
+    ) {
+        return 'Contract Sent';
+    }
+    return null;
+};
+
 const toApiApplicationState = (value: ApplicationState | string | null | undefined): string | undefined => {
     if (!value) return undefined;
+    const asString = String(value);
+    const contractSentLabel = normalizeContractSentWorkflowLabel(asString);
+    if (contractSentLabel) return contractSentLabel;
     if (value in applicationStatePrismaToApi) {
         return applicationStatePrismaToApi[value as ApplicationState];
     }
-    return String(value);
+    return asString;
+};
+
+const normalizeWorkflowQueueForApi = (queue: string | null | undefined): string | undefined => {
+    if (!queue) return undefined;
+    const trimmed = String(queue).trim();
+    const contractSentLabel = normalizeContractSentWorkflowLabel(trimmed);
+    return contractSentLabel ?? trimmed;
 };
 
 const WORKFLOW_QUEUES = {
@@ -663,7 +691,7 @@ export const mapApplicationToApi = (app: any) => {
         type,
         loanAmount: loanAmount ?? undefined,
         note,
-        currentQueue,
+        currentQueue: normalizeWorkflowQueueForApi(currentQueue) ?? currentQueue,
         currentState: toWorkflowApiState(currentQueue, currentState),
         /** DB `currentState` before workflow API mapping — use for dashboard buckets matching `/applications/stats`. */
         statsCurrentState: currentState,
@@ -5123,10 +5151,17 @@ class ApplicationController {
     // Send approval email to client for a given application (async email, non-blocking)
     async sendApprovalEmail(req: Request, res: Response) {
         try {
-            const { applicationId, resend } = req.body as {
+            const { applicationId, resend, emailHtml: clientEmailHtmlRaw, emailSubject: clientEmailSubjectRaw } = req.body as {
                 applicationId?: string | number;
                 resend?: boolean;
+                /** Frontend-rendered branded approval HTML (backend injects URL / ISO name / business name). */
+                emailHtml?: string;
+                emailSubject?: string;
             };
+            const clientEmailSubject =
+                typeof clientEmailSubjectRaw === 'string' && clientEmailSubjectRaw.trim()
+                    ? clientEmailSubjectRaw.trim()
+                    : undefined;
 
             if (!applicationId) {
                 return res.status(400).json({
@@ -5269,30 +5304,47 @@ class ApplicationController {
                 { to: isoEmailRaw, clientName: isoRecipientName },
             ];
 
-            const emailSubject = resend
-                ? 'Your Offer Values Have Been Updated'
-                : 'Your Application Has Been Approved';
+            const emailSubject =
+                clientEmailSubject ||
+                (resend ? 'Your Offer Values Have Been Updated' : 'Your Application Has Been Approved');
             const approvalPdfFilename = resend
                 ? OFFER_UPDATED_EMAIL_PDF_FILENAME
                 : APPROVAL_EMAIL_PDF_FILENAME;
-            const emailHtml = resend
-                ? buildApplicationOfferUpdatedEmailHtml({
-                    clientName: isoRecipientName,
-                    companyName,
-                    calculateApprovalUrl,
-                    applicationNumber: offerApplicationNumber,
-                    merchantName: merchantFullName,
-                    merchantEmail,
-                    merchantPhone,
-                    approvedAmount: offerApprovedAmount,
-                    factorRate: offerFactorRate,
-                    repaymentAmount: offerRepaymentAmount,
-                })
-                : buildApplicationApprovalEmailHtml({
-                    clientName: isoRecipientName,
-                    companyName,
-                    calculateApprovalUrl,
-                });
+
+            /**
+             * Prefer the frontend-rendered branded template (the approval/update-offer HTML is now
+             * owned by the frontend). Server-only values — the signed public-portal URL, the resolved
+             * ISO recipient name, and the deal business name — are injected here. The backend builders
+             * remain only as a safety fallback when no frontend HTML is supplied.
+             */
+            const frontendEmailHtml =
+                typeof clientEmailHtmlRaw === 'string' && clientEmailHtmlRaw.trim()
+                    ? injectApplicationApprovalEmailValues(clientEmailHtmlRaw.trim(), {
+                        approvalUrl: calculateApprovalUrl,
+                        clientName: isoRecipientName,
+                        companyName,
+                    })
+                    : undefined;
+            const emailHtml =
+                frontendEmailHtml ??
+                (resend
+                    ? buildApplicationOfferUpdatedEmailHtml({
+                        clientName: isoRecipientName,
+                        companyName,
+                        calculateApprovalUrl,
+                        applicationNumber: offerApplicationNumber,
+                        merchantName: merchantFullName,
+                        merchantEmail,
+                        merchantPhone,
+                        approvedAmount: offerApprovedAmount,
+                        factorRate: offerFactorRate,
+                        repaymentAmount: offerRepaymentAmount,
+                    })
+                    : buildApplicationApprovalEmailHtml({
+                        clientName: isoRecipientName,
+                        companyName,
+                        calculateApprovalUrl,
+                    }));
 
             const trackingId = randomUUID();
             const approvalEmailLogSuffix = resend
@@ -5352,6 +5404,8 @@ class ApplicationController {
                             approvedAmount: offerApprovedAmount,
                             factorRate: offerFactorRate,
                             repaymentAmount: offerRepaymentAmount,
+                            html: emailHtml,
+                            subject: emailSubject,
                             trackingId,
                         })
                         : await sendApplicationApprovalEmail({
@@ -5360,6 +5414,8 @@ class ApplicationController {
                             companyName,
                             viewApplicationUrl,
                             calculateApprovalUrl,
+                            html: emailHtml,
+                            subject: emailSubject,
                             trackingId,
                         });
                     return { to, ok };

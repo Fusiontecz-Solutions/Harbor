@@ -2,6 +2,10 @@ import axios, { AxiosInstance } from 'axios';
 import dotenv from 'dotenv';
 import prisma from '../../config/prismaClient';
 import { Prisma } from '@prisma/client';
+import {
+  syncApplicationToContractGenerated,
+  syncApplicationWorkflowFromContractEnvelopeStatus,
+} from '../contractApplicationWorkflowSync';
 import sendMail, { isOutboundSmtpConfigured } from '../../config/nodemailer';
 import {
   DOCUSIGN_CLIENT_ID,
@@ -2717,46 +2721,16 @@ export class DocusignService {
     await this.syncApplicationWorkflowOnContractSigning(appId, internalStatus);
   }
 
-  /** Draft envelope ready in DocuSign (review before send) — not yet Contract Out. */
+  /** Draft envelope ready in DocuSign (review before send) — not yet Contract Sent. */
   private async syncApplicationWorkflowOnDraftCreated(applicationId: string) {
     const appId = String(applicationId || '').trim();
     if (!appId) return;
-
-    const normalizeQueueKey = (queue: string | null | undefined) =>
-      String(queue ?? '')
-        .trim()
-        .replace(/[\s_-]+/g, '')
-        .toLowerCase();
-
-    const app = await prisma.application.findUnique({
-      where: { id: appId },
-      select: { currentQueue: true },
-    });
-    const qKey = normalizeQueueKey(app?.currentQueue);
-    const postDraftQueues = new Set([
-      'contractgenerated',
-      'contractout',
-      'contractsout',
-      'contractsigned',
-      'signedcontracts',
-      'final',
-      'fundingcall',
-      'disbursment',
-      'disbursement',
-      'funded',
-    ]);
-    if (postDraftQueues.has(qKey)) return;
-
-    await prisma.application.updateMany({
-      where: { id: appId },
-      data: {
-        currentQueue: 'Contract Generated',
-        currentState: 'Contract_Generated',
-      },
+    await syncApplicationToContractGenerated(prisma, appId, {
+      source: 'docusign:draft_created',
     });
   }
 
-  /** Move deal to Contract Signed when fully signed; keep Contract Out while awaiting signature. */
+  /** Move deal to Contract Sent when envelope is out; Contract Signed when fully signed. */
   private async syncApplicationWorkflowOnContractSigning(
     applicationId: string,
     internalStatus: string,
@@ -2764,50 +2738,24 @@ export class DocusignService {
     const appId = String(applicationId || '').trim();
     if (!appId) return;
     const status = String(internalStatus || '').trim().toLowerCase();
-
-    const normalizeQueueKey = (queue: string | null | undefined) =>
-      String(queue ?? '')
-        .trim()
-        .replace(/[\s_-]+/g, '')
-        .toLowerCase();
-
-    const postSignedQueueKeys = new Set([
-      'contractsigned',
-      'signedcontracts',
-      'final',
-      'fundingcall',
-      'disbursment',
-      'disbursement',
-      'funded',
-    ]);
-
-    if (status === 'completed') {
-      await prisma.application.updateMany({
-        where: { id: appId },
-        data: {
-          currentQueue: 'Contract Signed',
-          currentState: 'SIGNED_CONTRACTS',
-        },
-      });
-      return;
-    }
-
-    if (['sent', 'viewed', 'signed'].includes(status)) {
-      const app = await prisma.application.findUnique({
-        where: { id: appId },
-        select: { currentQueue: true },
-      });
-      const qKey = normalizeQueueKey(app?.currentQueue);
-      if (!postSignedQueueKeys.has(qKey)) {
-        await prisma.application.updateMany({
-          where: { id: appId },
-          data: {
-            currentQueue: 'Contract Out',
-            currentState: 'Contract Out',
-          },
-        });
-      }
-    }
+    const envelopeStatusByInternal: Record<string, string> = {
+      draft: 'DRAFT',
+      sent: 'SENT',
+      viewed: 'VIEWED',
+      signed: 'SIGNED',
+      completed: 'COMPLETED',
+      declined: 'DECLINED',
+      revoked: 'REVOKED',
+      expired: 'EXPIRED',
+    };
+    const envelopeStatus = envelopeStatusByInternal[status];
+    if (!envelopeStatus) return;
+    await syncApplicationWorkflowFromContractEnvelopeStatus(
+      prisma,
+      appId,
+      envelopeStatus,
+      { source: 'docusign:signing_status' },
+    );
   }
 
   /** After auto-send: mark linked `Document` row and `Contract.status` as SENT. */

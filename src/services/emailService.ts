@@ -574,8 +574,49 @@ export interface ApplicationApprovalEmailParams {
     calculateApprovalUrl?: string;
     /** Optional logo URL above the hero banner (overrides APPROVAL_BANNER_LOGO_URL). */
     bannerLogoUrl?: string;
+    /** Frontend-rendered branded HTML; when set it is sent as-is instead of the backend template. */
+    html?: string;
+    /** Overrides the default subject when the frontend template is used. */
+    subject?: string;
     /** SendGrid webhook correlation id (`ocid` custom arg). */
     trackingId?: string;
+}
+
+/**
+ * Placeholders embedded by the frontend approval template. The backend owns the
+ * signed public-portal URL and the resolved ISO recipient / business name, so it
+ * swaps these tokens for real values before sending (mirrors the document-request
+ * `__DOCUMENT_REQUEST_UPLOAD_URL__` flow).
+ */
+export const APPLICATION_APPROVAL_URL_PLACEHOLDER = '__APPLICATION_APPROVAL_URL__';
+export const APPLICATION_APPROVAL_CLIENT_NAME_PLACEHOLDER = '__APPROVAL_CLIENT_NAME__';
+export const APPLICATION_APPROVAL_COMPANY_NAME_PLACEHOLDER = '__APPROVAL_COMPANY_NAME__';
+
+function escapeApprovalEmailValue(value: string): string {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+
+/** Fills the frontend approval-template placeholders with server-resolved values. */
+export function injectApplicationApprovalEmailValues(
+    html: string,
+    values: { approvalUrl?: string; clientName?: string; companyName?: string },
+): string {
+    let out = String(html || '');
+    const approvalUrl = String(values.approvalUrl || '').trim();
+    if (approvalUrl) {
+        out = out.split(APPLICATION_APPROVAL_URL_PLACEHOLDER).join(approvalUrl);
+    }
+    out = out
+        .split(APPLICATION_APPROVAL_CLIENT_NAME_PLACEHOLDER)
+        .join(escapeApprovalEmailValue(String(values.clientName || '').trim()));
+    out = out
+        .split(APPLICATION_APPROVAL_COMPANY_NAME_PLACEHOLDER)
+        .join(escapeApprovalEmailValue(String(values.companyName || '').trim()));
+    return out;
 }
 
 export const APPROVAL_EMAIL_PDF_FILENAME = 'Application-approved-template.pdf';
@@ -690,6 +731,8 @@ export async function sendApplicationApprovalEmail({
     companyName,
     calculateApprovalUrl,
     bannerLogoUrl,
+    html: clientHtml,
+    subject: clientSubject,
     trackingId,
 }: ApplicationApprovalEmailParams): Promise<boolean> {
     const toTrimmed = String(to || '').trim();
@@ -708,13 +751,15 @@ export async function sendApplicationApprovalEmail({
         return false;
     }
 
-    const subject = 'Your Application Has Been Approved';
-    const html = buildApplicationApprovalEmailHtml({
-        clientName,
-        companyName,
-        calculateApprovalUrl,
-        bannerLogoUrl,
-    });
+    const subject = String(clientSubject || '').trim() || 'Your Application Has Been Approved';
+    const html =
+        String(clientHtml || '').trim() ||
+        buildApplicationApprovalEmailHtml({
+            clientName,
+            companyName,
+            calculateApprovalUrl,
+            bannerLogoUrl,
+        });
 
     try {
         const attachments = await buildIsoBrandedEmailAttachments(html, APPROVAL_EMAIL_PDF_FILENAME);
@@ -1165,6 +1210,10 @@ export interface ApplicationOfferUpdatedEmailParams {
     repaymentAmount?: number;
     /** Optional logo URL above the hero banner (overrides OFFER_UPDATED_BANNER_LOGO_URL). */
     bannerLogoUrl?: string;
+    /** Frontend-rendered branded HTML; when set it is sent as-is instead of the backend template. */
+    html?: string;
+    /** Overrides the default subject when the frontend template is used. */
+    subject?: string;
     /** SendGrid webhook correlation id (`ocid` custom arg). */
     trackingId?: string;
 }
@@ -1239,6 +1288,8 @@ export async function sendApplicationOfferUpdatedEmail({
     factorRate,
     repaymentAmount,
     bannerLogoUrl,
+    html: clientHtml,
+    subject: clientSubject,
     trackingId,
 }: ApplicationOfferUpdatedEmailParams): Promise<boolean> {
     const toTrimmed = String(to || '').trim();
@@ -1257,20 +1308,22 @@ export async function sendApplicationOfferUpdatedEmail({
         return false;
     }
 
-    const subject = 'Your Offer Values Have Been Updated';
-    const html = buildApplicationOfferUpdatedEmailHtml({
-        clientName,
-        companyName,
-        calculateApprovalUrl,
-        applicationNumber,
-        merchantName,
-        merchantEmail,
-        merchantPhone,
-        approvedAmount,
-        factorRate,
-        repaymentAmount,
-        bannerLogoUrl,
-    });
+    const subject = String(clientSubject || '').trim() || 'Your Offer Values Have Been Updated';
+    const html =
+        String(clientHtml || '').trim() ||
+        buildApplicationOfferUpdatedEmailHtml({
+            clientName,
+            companyName,
+            calculateApprovalUrl,
+            applicationNumber,
+            merchantName,
+            merchantEmail,
+            merchantPhone,
+            approvedAmount,
+            factorRate,
+            repaymentAmount,
+            bannerLogoUrl,
+        });
 
     try {
         const attachments = await buildIsoBrandedEmailAttachments(html, OFFER_UPDATED_EMAIL_PDF_FILENAME);
