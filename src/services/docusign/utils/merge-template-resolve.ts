@@ -2,7 +2,6 @@ import prisma from '../../../config/prismaClient';
 import {
   findBoldSignTemplatePdfUrlForLayout,
   isDocumentLayoutKey,
-  loadPlatformDocumentPdfBase64,
   PLATFORM_DOCUMENTS,
 } from '../platform-document-registry';
 import type { DocumentLayout } from './convert-docusign-template-export';
@@ -38,11 +37,16 @@ export async function resolveTemplateRefForMerge(
   if (isDocumentLayoutKey(sourceRef)) {
     const def = PLATFORM_DOCUMENTS[sourceRef];
     const dbPdfUrl = await findBoldSignTemplatePdfUrlForLayout(sourceRef);
+    if (!dbPdfUrl) {
+      throw new Error(
+        `No Cloudinary pdfUrl for "${def.name}". Set pdfUrl on the BoldSignTemplate row with layoutKey "${sourceRef}".`,
+      );
+    }
     return {
       sourceRef,
       name: def.name,
       layoutKey: sourceRef,
-      pdfUrl: dbPdfUrl || `platform://${sourceRef}`,
+      pdfUrl: dbPdfUrl,
     };
   }
 
@@ -178,11 +182,12 @@ export async function buildPdfCompositeFromResolved(
     );
   }
   const pdfUrl = String(resolved.pdfUrl || '').trim();
-  const documentBase64 = pdfUrl.startsWith('platform://')
-    ? resolved.layoutKey
-      ? await loadPlatformDocumentPdfBase64(resolved.layoutKey)
-      : ''
-    : await fetchPdfAsBase64(pdfUrl);
+  if (!pdfUrl || pdfUrl.startsWith('platform://')) {
+    throw new Error(
+      `Template "${resolved.name || resolved.sourceRef}" is missing a Cloudinary pdfUrl.`,
+    );
+  }
+  const documentBase64 = await fetchPdfAsBase64(pdfUrl);
   if (!documentBase64) {
     throw new Error(
       `Template "${resolved.name || resolved.sourceRef}" PDF could not be loaded`,

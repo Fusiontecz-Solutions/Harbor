@@ -85,6 +85,7 @@ import {
   isStandaloneAchEnvelope,
   linkAchAuthorizationEnvelopeToContract,
   mapInternalEnvelopeStatusToAchCapsule,
+  parseAchAuthorizationDocuSignFromPrefill,
   updateAchAuthorizationDocuSignStatus,
   clearAchAuthorizationIfMatchesMainContract,
 } from './utils/ach-authorization-docusign';
@@ -96,7 +97,9 @@ import { decryptField, isEncrypted } from '../../utils/fieldEncryption';
 import { handleContractSigningStatusTransition } from '../contractSigningStatusEffects';
 import { mergeDefaultContractCcEmails } from '../../utils/contractCcDefaults';
 import {
-  buildDocuSignEnvelopeEmailSubject,
+  buildContractEnvelopeDocumentName,
+  buildContractEnvelopeEmailSubject,
+  buildContractEnvelopePdfFilename,
   normalizeContractCcEmailSubject,
 } from '../../utils/contractEnvelopeEmailSubject';
 
@@ -107,7 +110,7 @@ const envelopeStatusSyncCache = new Map<
   string,
   { syncedAt: number; payload: Record<string, unknown> }
 >();
-const ENVELOPE_STATUS_SYNC_MIN_INTERVAL_MS = 25_000;
+const ENVELOPE_STATUS_SYNC_MIN_INTERVAL_MS = 60_000;
 
 export function invalidateEnvelopeStatusSyncCache(envelopeId?: string): void {
   const eid = String(envelopeId || '').trim();
@@ -175,6 +178,9 @@ export function formatDocusignApiErrorMessage(err: unknown): string {
   const fallback = String(ax?.message ?? err ?? 'Unknown error');
   if (/^request failed with status code \d+$/i.test(fallback) && ax?.response?.status) {
     return `DocuSign API returned HTTP ${ax.response.status} with no error details. Check envelope id, DocuSign account, and JWT impersonated user.`;
+  }
+  if (/BURST_ENVELOPE_POLLING|HOURLY_ENVELOPE_POLLING/i.test(fallback)) {
+    return `DocuSign polling limit reached. Wait a few minutes before checking status again — use Connect webhooks for live updates. (${fallback})`;
   }
   return fallback;
 }
@@ -1612,7 +1618,7 @@ export class DocusignService {
 
   /**
    * DocuSign copies every signer role from the template into the envelope.
-   * When CRM sends one signer (e.g. Receiver), remove extra signer slots on the draft.
+   * When CRM sends one signer (e.g. Signer), remove extra signer slots on the draft.
    */
   private async pruneEnvelopeSignersToCrmRoles(
     client: AxiosInstance,
@@ -2222,38 +2228,70 @@ export class DocusignService {
   }> {
     const defaultRole = DOCUSIGN_DEFAULT_ROLE_NAME;
     return roles
-      .map((r, idx) => ({
-        roleName: String(
-          r.roleName || r.signerRole || defaultRole || `Signer ${idx + 1}`,
-        ).trim(),
-        name: String(r.signerName || '').trim(),
-        email: String(r.signerEmail || '').trim(),
-        routingOrder: String(r.signerOrder ?? idx + 1),
-      }))
+      .map((r, idx) => {
+        const rawRole = String(r.roleName || r.signerRole || defaultRole || `Signer ${idx + 1}`).trim();
+        const roleLower = rawRole.toLowerCase();
+        const roleName =
+          !rawRole ||
+          roleLower === defaultRole.toLowerCase() ||
+          /^(receiver|client|merchant|customer|owner|guarantor|signer)/i.test(rawRole)
+            ? defaultRole
+            : rawRole;
+        return {
+          roleName,
+          name: String(r.signerName || '').trim(),
+          email: String(r.signerEmail || '').trim(),
+          routingOrder: String(r.signerOrder ?? idx + 1),
+        };
+      })
       .filter((r) => r.email);
   }
 
   /**
-   * Map a CRM signer role to the template role name (e.g. Receiver).
-   * Index-only mapping breaks when the template lists roles in a different order than CRM.
+   * Map a CRM signer role to the template role name (always prefers Signer over legacy Receiver).
    */
   private resolveTemplateRoleNameForSigner(
     crmRoleName: string,
     templateRoleNames: string[],
     idx: number,
   ): string {
+    const defaultRole = DOCUSIGN_DEFAULT_ROLE_NAME;
     const crm = String(crmRoleName || '').trim();
+    const crmLower = crm.toLowerCase();
+
+    const signerTemplateRole = templateRoleNames.find(
+      (r) => String(r).trim().toLowerCase() === defaultRole.toLowerCase(),
+    );
+
+    const crmIsDocuSignSigner =
+      !crm ||
+      crmLower === defaultRole.toLowerCase() ||
+      /^(receiver|client|merchant|customer|owner|guarantor|signer)/i.test(crm);
+
+    if (crmIsDocuSignSigner) {
+      if (signerTemplateRole) return String(signerTemplateRole).trim();
+      const nonReceiver = templateRoleNames.find(
+        (r) => String(r).trim().toLowerCase() !== 'receiver',
+      );
+      if (nonReceiver) return String(nonReceiver).trim();
+      return defaultRole;
+    }
+
     if (crm) {
       const match = templateRoleNames.find(
-        (r) => String(r).trim().toLowerCase() === crm.toLowerCase(),
+        (r) => String(r).trim().toLowerCase() === crmLower,
       );
       if (match) return String(match).trim();
     }
+
+    if (signerTemplateRole && idx === 0) return String(signerTemplateRole).trim();
+
     return String(
       templateRoleNames[idx] ||
+        signerTemplateRole ||
         templateRoleNames[0] ||
         crm ||
-        DOCUSIGN_DEFAULT_ROLE_NAME,
+        defaultRole,
     ).trim();
   }
 
@@ -2637,6 +2675,35 @@ export class DocusignService {
       applicationId: applicationId ?? undefined,
       contractId: achHints?.contractId,
     };
+
+    if (await updateAchAuthorizationDocuSignStatus(envelopeId, incomingResolved, achLookup)) {
+      return incomingResolved;
+    }
+
+    if (
+      !existingDoc &&
+      achHints?.contractId &&
+      applicationId &&
+      (await isStandaloneAchEnvelope(envelopeId, achLookup)) === false
+    ) {
+      const mainDoc = await prisma.document.findUnique({
+        where: { applicationId: String(applicationId) },
+        select: { envelopeId: true },
+      });
+      const mainEid = String(mainDoc?.envelopeId ?? '').trim();
+      if (!mainEid || mainEid !== String(envelopeId)) {
+        await linkAchAuthorizationEnvelopeToContract(
+          String(applicationId),
+          envelopeId,
+          incomingResolved,
+          achHints.contractId,
+        );
+        if (await updateAchAuthorizationDocuSignStatus(envelopeId, incomingResolved, achLookup)) {
+          return incomingResolved;
+        }
+      }
+    }
+
     if (await isStandaloneAchEnvelope(envelopeId, achLookup)) {
       await updateAchAuthorizationDocuSignStatus(envelopeId, incomingResolved, achLookup);
       return incomingResolved;
@@ -3096,9 +3163,9 @@ export class DocusignService {
     }
   }
 
-  private async resolveApplicationClientNameForEmailSubject(
+  private async resolveApplicationContractEmailContext(
     applicationId: string,
-  ): Promise<string | null> {
+  ): Promise<{ businessName: string | null; offerAmount: number | null }> {
     try {
       const contract = await prisma.contract.findFirst({
         where: { applicationId },
@@ -3107,12 +3174,15 @@ export class DocusignService {
           legalName: true,
           clientName: true,
           doingBusinessAs: true,
+          approvedAmount: true,
         },
       });
-      const fromContract = String(
-        contract?.legalName || contract?.clientName || contract?.doingBusinessAs || '',
+
+      let businessName = String(
+        contract?.legalName || contract?.doingBusinessAs || contract?.clientName || '',
       ).trim();
-      if (fromContract) return fromContract;
+      let offerAmount =
+        contract?.approvedAmount != null ? Number(contract.approvedAmount) : null;
 
       const app = await prisma.application.findUnique({
         where: { id: applicationId },
@@ -3121,19 +3191,48 @@ export class DocusignService {
           client: {
             select: { businessName: true },
           },
+          OfferDecision: {
+            select: { offer: true },
+          },
+          termsOffers: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+            select: { approvedAmount: true },
+          },
         },
       });
-      return (
-        String(
+
+      if (!businessName) {
+        businessName = String(
           app?.client?.businessName || app?.dealDisplayName || '',
-        ).trim() || null
-      );
+        ).trim();
+      }
+
+      if (offerAmount == null || !Number.isFinite(offerAmount)) {
+        const fromOfferDecision =
+          app?.OfferDecision?.offer != null ? Number(app.OfferDecision.offer) : null;
+        const fromTerms =
+          app?.termsOffers?.[0]?.approvedAmount != null
+            ? Number(app.termsOffers[0].approvedAmount)
+            : null;
+        offerAmount =
+          fromOfferDecision != null && Number.isFinite(fromOfferDecision)
+            ? fromOfferDecision
+            : fromTerms != null && Number.isFinite(fromTerms)
+              ? fromTerms
+              : null;
+      }
+
+      return {
+        businessName: businessName || null,
+        offerAmount: offerAmount != null && Number.isFinite(offerAmount) ? offerAmount : null,
+      };
     } catch {
-      return null;
+      return { businessName: null, offerAmount: null };
     }
   }
 
-  /** Match signer envelope subject (e.g. KATAN CAPITAL LLC - Client Name). */
+  /** Match signer envelope subject (e.g. KATAN CAPITAL : Business Name - $12,345.67). */
   private async resolveCcContractEmailSubject(
     client: AxiosInstance,
     accountId: string,
@@ -3153,8 +3252,11 @@ export class DocusignService {
 
     const appId = String(applicationId || '').trim();
     if (appId) {
-      const clientName = await this.resolveApplicationClientNameForEmailSubject(appId);
-      if (clientName) return buildDocuSignEnvelopeEmailSubject(clientName);
+      const { businessName, offerAmount } =
+        await this.resolveApplicationContractEmailContext(appId);
+      if (businessName) {
+        return buildContractEnvelopeEmailSubject(businessName, offerAmount);
+      }
     }
 
     return hint;
@@ -3200,6 +3302,7 @@ export class DocusignService {
     }
 
     const subject = normalizeContractCcEmailSubject(subjectBase);
+    const pdfFilename = buildContractEnvelopePdfFilename(subject);
     const emailed: string[] = [];
     for (const to of list) {
       try {
@@ -3209,7 +3312,7 @@ export class DocusignService {
           html: '',
           attachments: [
             {
-              filename: 'contract-prefilled.pdf',
+              filename: pdfFilename,
               content: pdf,
               contentType: 'application/pdf',
             },
@@ -3290,6 +3393,7 @@ export class DocusignService {
     envelopeId: string,
     options: {
       applicationId?: string;
+      contractId?: number;
       /** When false (standalone ACH), link envelope on contract prefill — not main Document row. */
       linkApplicationDocument?: boolean;
       redirectUrl?: string;
@@ -3311,7 +3415,13 @@ export class DocusignService {
     if (appId && linkApplicationDocument) {
       await this.linkEnvelopeToApplication(userId, appId, envelopeId);
     } else if (appId && !linkApplicationDocument) {
-      await linkAchAuthorizationEnvelopeToContract(appId, envelopeId, 'draft');
+      const contractIdNum = Number(options.contractId);
+      await linkAchAuthorizationEnvelopeToContract(
+        appId,
+        envelopeId,
+        'draft',
+        Number.isFinite(contractIdNum) && contractIdNum > 0 ? contractIdNum : undefined,
+      );
     }
 
     let prefillApplied = {
@@ -3562,6 +3672,7 @@ export class DocusignService {
         reminderCount?: number;
       };
       autoSend?: boolean;
+      contractId?: number;
     },
   ) {
     const { client, accountId } = await this.getAuthContext(userId);
@@ -3569,6 +3680,7 @@ export class DocusignService {
     let built;
     try {
       const sendImmediately = options.autoSend === true;
+      const envelopeSubject = String(options.title || '').trim();
       built = await buildPlatformLayoutEnvelopeDefinition({
         supplementalRefs: options.supplementalRefs,
         includeMainContract: options.includeMainContract,
@@ -3578,6 +3690,9 @@ export class DocusignService {
         guarantorCount: options.guarantorCount,
         title: options.title,
         message: options.message,
+        documentName: envelopeSubject
+          ? buildContractEnvelopeDocumentName(envelopeSubject)
+          : undefined,
         flattenPrefillInPdf: sendImmediately,
         lockDataTabs: sendImmediately,
       });
@@ -3604,6 +3719,7 @@ export class DocusignService {
 
       const result = await this.finalizeEnvelopeFlow(userId, envelopeId, {
         applicationId: options.applicationId,
+        contractId: options.contractId,
         linkApplicationDocument: options.includeMainContract !== false,
         redirectUrl: options.redirectUrl,
         ccEmails: options.ccEmails,
@@ -3723,6 +3839,7 @@ export class DocusignService {
         reminderDays?: number;
         reminderCount?: number;
       };
+      contractId?: number;
     },
   ) {
     if (!options?.roles?.length) {
@@ -3762,6 +3879,7 @@ export class DocusignService {
       guarantorCount: options.guarantorCount,
       autoSend: options.autoSend,
       reminderSettings: options.reminderSettings,
+      contractId: options.contractId,
     });
   }
 
@@ -3994,7 +4112,7 @@ export class DocusignService {
     }
 
     throw new BadRequestException(
-      `Unknown platform document "${ref}". Use a layout key such as flex_addendum, balance_transfer, or ach_authorization, or a CRM template row id with pdfUrl.`,
+      `Unknown document "${ref}". Use a layout key (e.g. flex_addendum) or a CRM document row id with a Cloudinary pdfUrl.`,
     );
   }
 
@@ -4324,6 +4442,33 @@ export class DocusignService {
       return { ...cached.payload, cached: true };
     }
 
+    const contractIdHint = Number(options.contractId);
+    const achHints = {
+      applicationId: applicationId || undefined,
+      contractId:
+        Number.isFinite(contractIdHint) && contractIdHint > 0
+          ? contractIdHint
+          : undefined,
+    };
+
+    const isAchEnvelope = await isStandaloneAchEnvelope(envelopeId, achHints);
+
+    if (!forceRefresh) {
+      const terminalPayload = await this.buildTerminalEnvelopeSyncPayload(
+        envelopeId,
+        applicationId,
+        isAchEnvelope,
+        achHints,
+      );
+      if (terminalPayload) {
+        envelopeStatusSyncCache.set(envelopeId, {
+          syncedAt: Date.now(),
+          payload: terminalPayload,
+        });
+        return { ...terminalPayload, cached: true, skippedDocuSign: true };
+      }
+    }
+
     const { client, accountId } = await this.getAuthContext(userId);
     let res: { data?: { status?: string } };
     try {
@@ -4333,6 +4478,20 @@ export class DocusignService {
     } catch (err: unknown) {
       const httpStatus = (err as { response?: { status?: number } })?.response
         ?.status;
+      const errMsg = formatDocusignApiErrorMessage(err);
+      const isPollingLimit = /BURST_ENVELOPE_POLLING|HOURLY_ENVELOPE_POLLING/i.test(
+        errMsg,
+      );
+      if ((httpStatus === 429 || httpStatus === 400) && isPollingLimit && cached) {
+        return { ...cached.payload, cached: true, rateLimited: true };
+      }
+      if (httpStatus === 429 || (httpStatus === 400 && isPollingLimit)) {
+        const rateErr = new Error(
+          'DocuSign polling limit reached. Wait a few minutes before checking again.',
+        ) as Error & { status?: number };
+        rateErr.status = httpStatus === 400 ? 400 : 429;
+        throw rateErr;
+      }
       if (httpStatus === 429 && cached) {
         return { ...cached.payload, cached: true, rateLimited: true };
       }
@@ -4359,14 +4518,6 @@ export class DocusignService {
 
     const priorStatus = String(existingDoc?.status || '').toLowerCase();
     const appId = applicationId || existingDoc?.applicationId || null;
-    const contractIdHint = Number(options.contractId);
-    const achHints = {
-      applicationId: appId ?? applicationId,
-      contractId:
-        Number.isFinite(contractIdHint) && contractIdHint > 0
-          ? contractIdHint
-          : undefined,
-    };
     const status = await this.applySigningStatusUpdate(
       envelopeId,
       incomingResolved,
@@ -4379,6 +4530,7 @@ export class DocusignService {
       emailed: [],
     };
     if (
+      !isAchEnvelope &&
       incomingResolved === 'sent' &&
       priorStatus !== 'sent' &&
       priorStatus !== 'completed'
@@ -4393,7 +4545,7 @@ export class DocusignService {
       );
     }
 
-    const achAuthorization = await isStandaloneAchEnvelope(envelopeId, achHints);
+    const achAuthorization = isAchEnvelope;
 
     const payload = {
       envelopeId,
@@ -4415,6 +4567,108 @@ export class DocusignService {
       payload,
     });
     return payload;
+  }
+
+  /** Skip DocuSign GET when CRM already has a terminal status for this envelope. */
+  private async buildTerminalEnvelopeSyncPayload(
+    envelopeId: string,
+    applicationId: string,
+    isAchEnvelope: boolean,
+    achHints: { applicationId?: string; contractId?: number },
+  ): Promise<Record<string, unknown> | null> {
+    const eid = String(envelopeId || '').trim();
+    if (!eid) return null;
+
+    if (isAchEnvelope) {
+      const where =
+        achHints.contractId && achHints.contractId > 0
+          ? { id: achHints.contractId }
+          : achHints.applicationId
+            ? { applicationId: achHints.applicationId }
+            : null;
+      if (!where) return null;
+      const contracts = await prisma.contract.findMany({
+        where,
+        select: { contractPrefillOverrides: true },
+        take: 5,
+      });
+      for (const row of contracts) {
+        const ach = parseAchAuthorizationDocuSignFromPrefill(row.contractPrefillOverrides);
+        if (ach?.envelopeId !== eid) continue;
+        const capsule = String(ach.status || '').toUpperCase();
+        if (capsule === 'SIGNED' || capsule === 'VOIDED') {
+          return {
+            envelopeId: eid,
+            applicationId: applicationId || achHints.applicationId || null,
+            docusignStatus: capsule === 'SIGNED' ? 'completed' : 'voided',
+            internalStatus: capsule === 'SIGNED' ? 'completed' : 'voided',
+            achAuthorization: true,
+            achAuthorizationStatus: ach.status,
+            contractStatus: null,
+            ccPrefilledEmail: { emailed: [] },
+          };
+        }
+      }
+      return null;
+    }
+
+    const existingDoc = await prisma.document.findFirst({
+      where: { envelopeId: eid },
+    });
+    if (!existingDoc) return null;
+
+    const docStatus = String(existingDoc.status || '').trim().toLowerCase();
+    const terminalDoc = new Set([
+      'completed',
+      'declined',
+      'voided',
+      'revoked',
+      'expired',
+    ]);
+    if (!terminalDoc.has(docStatus)) {
+      const appId = String(applicationId || existingDoc.applicationId || '').trim();
+      if (appId) {
+        const contract = await prisma.contract.findFirst({
+          where: { applicationId: appId },
+          orderBy: { createdAt: 'desc' },
+          select: { status: true },
+        });
+        const cs = String(contract?.status || '').trim().toUpperCase();
+        const terminalContract = new Set([
+          'COMPLETED',
+          'SIGNED',
+          'DECLINED',
+          'REVOKED',
+          'EXPIRED',
+          'VOIDED',
+        ]);
+        if (!terminalContract.has(cs)) return null;
+      } else {
+        return null;
+      }
+    }
+
+    const appId = String(applicationId || existingDoc.applicationId || '').trim() || null;
+    let contractStatus: string | null = null;
+    if (appId) {
+      const contract = await prisma.contract.findFirst({
+        where: { applicationId: appId },
+        orderBy: { createdAt: 'desc' },
+        select: { status: true },
+      });
+      contractStatus = contract?.status ? String(contract.status) : null;
+    }
+
+    return {
+      envelopeId: eid,
+      applicationId: appId,
+      docusignStatus: docStatus === 'completed' ? 'completed' : docStatus,
+      internalStatus: docStatus,
+      achAuthorization: false,
+      achAuthorizationStatus: null,
+      contractStatus,
+      ccPrefilledEmail: { emailed: [] },
+    };
   }
 
   /** @deprecated Legacy PDF+tabs path — use sendTemplate / mergeAndSendTemplates */

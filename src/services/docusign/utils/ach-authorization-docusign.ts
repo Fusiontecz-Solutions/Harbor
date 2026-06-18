@@ -5,6 +5,9 @@ import { mergeWithExistingEnvelopeStatus } from './docusign-webhook';
 /** Stored on `Contract.contractPrefillOverrides` — separate from main contract envelope. */
 export const ACH_AUTHORIZATION_DOCUSIGN_KEY = 'achAuthorizationDocuSign';
 
+/** Prior standalone ACH DocuSign sends — stored on `Contract.contractPrefillOverrides`. */
+export const ACH_SEND_HISTORY_KEY = 'achSendHistory';
+
 export type AchAuthorizationDocuSignCapsuleStatus =
   | 'DRAFT'
   | 'SENT'
@@ -17,6 +20,13 @@ export type AchAuthorizationDocuSignMeta = {
   status: AchAuthorizationDocuSignCapsuleStatus;
   sentAt?: string | null;
   updatedAt?: string | null;
+};
+
+export type AchSendHistoryEntry = {
+  envelopeId: string;
+  status: AchAuthorizationDocuSignCapsuleStatus;
+  sentAt?: string | null;
+  archivedAt: string;
 };
 
 function achCapsuleToInternal(status: AchAuthorizationDocuSignCapsuleStatus): string {
@@ -104,6 +114,60 @@ export function mergeAchAuthorizationDocuSignIntoPrefill(
   return {
     ...base,
     [ACH_AUTHORIZATION_DOCUSIGN_KEY]: meta,
+  };
+}
+
+export function parseAchSendHistoryFromPrefill(raw: unknown): AchSendHistoryEntry[] {
+  if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return [];
+  const list = (raw as Record<string, unknown>)[ACH_SEND_HISTORY_KEY];
+  if (!Array.isArray(list)) return [];
+  const out: AchSendHistoryEntry[] = [];
+  for (const item of list) {
+    if (item == null || typeof item !== 'object' || Array.isArray(item)) continue;
+    const o = item as Record<string, unknown>;
+    const envelopeId = String(o.envelopeId ?? '').trim();
+    if (!envelopeId) continue;
+    const statusRaw = String(o.status ?? 'DRAFT').trim().toUpperCase();
+    const status: AchAuthorizationDocuSignCapsuleStatus =
+      statusRaw === 'SENT' ||
+      statusRaw === 'VIEWED' ||
+      statusRaw === 'SIGNED' ||
+      statusRaw === 'VOIDED'
+        ? statusRaw
+        : 'DRAFT';
+    out.push({
+      envelopeId,
+      status,
+      sentAt: o.sentAt != null ? String(o.sentAt) : null,
+      archivedAt: String(o.archivedAt ?? new Date(0).toISOString()),
+    });
+  }
+  return out;
+}
+
+export function appendAchSendHistoryEntry(
+  baseRaw: unknown,
+  entry: Omit<AchSendHistoryEntry, 'archivedAt'> & { archivedAt?: string },
+): Record<string, unknown> {
+  const base =
+    baseRaw && typeof baseRaw === 'object' && !Array.isArray(baseRaw)
+      ? { ...(baseRaw as Record<string, unknown>) }
+      : {};
+  const prior = parseAchSendHistoryFromPrefill(base);
+  const envelopeId = String(entry.envelopeId ?? '').trim();
+  if (!envelopeId) return base;
+  if (prior.some((row) => row.envelopeId === envelopeId)) return base;
+
+  const next: AchSendHistoryEntry = {
+    envelopeId,
+    status: entry.status,
+    sentAt: entry.sentAt ?? null,
+    archivedAt: entry.archivedAt ?? new Date().toISOString(),
+  };
+
+  return {
+    ...base,
+    [ACH_SEND_HISTORY_KEY]: [...prior, next],
   };
 }
 
@@ -209,7 +273,17 @@ export async function linkAchAuthorizationEnvelopeToContract(
   const now = new Date().toISOString();
 
   for (const contract of contracts) {
-    const merged = mergeAchAuthorizationDocuSignIntoPrefill(contract.contractPrefillOverrides, {
+    const prior = parseAchAuthorizationDocuSignFromPrefill(contract.contractPrefillOverrides);
+    let prefillBase = contract.contractPrefillOverrides;
+    if (prior?.envelopeId && prior.envelopeId !== eid) {
+      prefillBase = appendAchSendHistoryEntry(prefillBase, {
+        envelopeId: prior.envelopeId,
+        status: prior.status,
+        sentAt: prior.sentAt ?? null,
+        archivedAt: now,
+      });
+    }
+    const merged = mergeAchAuthorizationDocuSignIntoPrefill(prefillBase, {
       envelopeId: eid,
       status: capsule,
       sentAt: capsule === 'SENT' || capsule === 'VIEWED' || capsule === 'SIGNED' ? now : null,

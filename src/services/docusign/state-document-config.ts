@@ -3,7 +3,7 @@
  *
  * `tabLabel` values match CRM prefill field ids from
  * `in-house-crm-fe/src/components/application/contractdata/Daily_*.ts` and
- * `Weekly_California.ts` (snake_case), NOT the legacy Woodmere platform names
+ * `Weekly_California.ts` (snake_case), NOT legacy third-party platform names
  * (`purchasePrice`, `amountFinanced`, `paymentTerms`, etc.).
  *
  * Config keys: `${frequency}${StateName}` — e.g. `dailyFlorida`, `weeklyCalifornia`.

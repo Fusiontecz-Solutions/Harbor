@@ -39,6 +39,8 @@ export type BuildEnvelopeFromLayoutOptions = {
   signers: LayoutSignerInput[];
   ownerCount?: number;
   guarantorCount?: number;
+  /** Display name for the primary (first) PDF in the envelope. */
+  primaryDocumentName?: string;
   /**
    * When true, text/date values are already burned into document PDFs — only signature /
    * initial / attachment tabs are attached (visible to all recipients including CC).
@@ -318,10 +320,10 @@ function emptySignerTabBuckets(): SignerTabBuckets {
 
 function resolvePrimarySignerRoleName(signers: LayoutSignerInput[]): string {
   return (
+    signers.find((s) => /^signer$/i.test(s.roleName))?.roleName ||
     signers.find((s) => /receiver|client|merchant|customer/i.test(s.roleName))?.roleName ||
     signers.find((s) => /^owner$/i.test(s.roleName))?.roleName ||
     signers.find((s) => /^guarantor$/i.test(s.roleName))?.roleName ||
-    signers.find((s) => /^signer$/i.test(s.roleName))?.roleName ||
     signers[0]?.roleName ||
     DOCUSIGN_DEFAULT_ROLE_NAME
   );
@@ -736,7 +738,10 @@ export function buildEnvelopeFromLayouts(options: BuildEnvelopeFromLayoutOptions
     }
     documents.push({
       documentId: envelopeDocId,
-      name: layout.document.originalFileName || layout.name,
+      name:
+        idx === 0 && options.primaryDocumentName
+          ? options.primaryDocumentName
+          : layout.document.originalFileName || layout.name,
       documentBase64: base64,
     });
   });

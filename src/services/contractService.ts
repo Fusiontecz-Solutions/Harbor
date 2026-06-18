@@ -282,6 +282,11 @@ class ContractService {
     if (isDocumentLayoutKey(ref)) {
       return ensurePlatformBoldSignTemplateRow(ref);
     }
+    const byLayoutKey = await (prisma as any).boldSignTemplate.findFirst({
+      where: { layoutKey: ref },
+      select: { id: true },
+    });
+    if (byLayoutKey?.id) return byLayoutKey.id;
     const byId = await (prisma as any).boldSignTemplate.findUnique({
       where: { id: ref },
       select: { id: true },
@@ -670,10 +675,10 @@ class ContractService {
       exhibitOwnerName: customerName || null,
       appendixClientName: customerName || null,
       appendixUnderwritingFees: firstNonEmptyString(offer?.fees) || null,
-      authorizationApplication: firstNonEmptyString(legalName, customerName) || null,
+      authorizationApplication: firstNonEmptyString(customerName, legalName) || null,
       authorizationClientDate: derivedAgreementDate.toISOString().slice(0, 10),
-      authorizationClientName: legalName || null,
-      authorizationClientNamePrint: legalName || null,
+      authorizationClientName: customerName || null,
+      authorizationClientNamePrint: customerName || null,
       authorizationClientTaxId: taxEin || null,
       authorizationClientBankName: bankName || null,
       authorizationClientBankAccount: bankAccount || null,

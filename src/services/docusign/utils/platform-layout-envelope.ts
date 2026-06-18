@@ -36,7 +36,7 @@ export async function loadLatestContractLayoutPackage(): Promise<DocumentLayoutW
     });
     if (!latest?.url) {
       throw new Error(
-        'No contract PDF configured. Set PLATFORM_CONTRACT_PDF_URL or upload a contract PDF from the Final Underwriter dashboard.',
+        'No contract PDF configured. Upload a contract PDF from the Final Underwriter dashboard or set BoldSignTemplate.pdfUrl for layoutKey "contract".',
       );
     }
     const documentBase64 = await fetchPdfAsBase64(latest.url);
@@ -62,11 +62,12 @@ export async function loadSupplementalLayoutPackage(
     throw new Error(`Supplemental document "${resolved.name || ref}" has no layout.`);
   }
   const pdfUrl = String(resolved.pdfUrl || '').trim();
-  const documentBase64 = pdfUrl.startsWith('platform://')
-    ? resolved.layoutKey
-      ? await loadPlatformDocumentPdfBase64(resolved.layoutKey)
-      : ''
-    : await fetchPdfAsBase64(pdfUrl);
+  if (!pdfUrl || pdfUrl.startsWith('platform://')) {
+    throw new Error(
+      `Supplemental document "${resolved.name || ref}" is missing a Cloudinary pdfUrl.`,
+    );
+  }
+  const documentBase64 = await fetchPdfAsBase64(pdfUrl);
   if (!documentBase64) {
     throw new Error(`Supplemental document "${resolved.name || ref}" PDF could not be loaded.`);
   }
@@ -262,6 +263,8 @@ export async function buildPlatformLayoutEnvelopeDefinition(options: {
   guarantorCount?: number;
   title?: string;
   message?: string;
+  /** Display name for the primary PDF document in the envelope. */
+  documentName?: string;
   /** Burn prefill into PDF at create (auto-send). Draft review keeps editable tabs. */
   flattenPrefillInPdf?: boolean;
   lockDataTabs?: boolean;
@@ -325,6 +328,7 @@ export async function buildPlatformLayoutEnvelopeDefinition(options: {
     signers,
     ownerCount,
     guarantorCount,
+    primaryDocumentName: options.documentName,
     skipTextDateTabs: prefillFlattenedInPdf,
     lockDataTabs: options.lockDataTabs === true,
   });

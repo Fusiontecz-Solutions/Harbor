@@ -22,7 +22,7 @@ import { EPO_DOCUMENT_CONFIG } from './epo-document-config';
 import { ACH_DOCUMENT_CONFIG } from './ach-document-config';
 
 import { mergeDefaultContractCcEmails } from '../../utils/contractCcDefaults';
-import { normalizeContractCcEmailSubject } from '../../utils/contractEnvelopeEmailSubject';
+import { normalizeContractCcEmailSubject, buildContractEnvelopePdfFilename } from '../../utils/contractEnvelopeEmailSubject';
 import {
   mergeWithExistingEnvelopeStatus,
   parseWebhookPayload,
@@ -1187,6 +1187,7 @@ export class BoldSignService {
     }
 
     const subject = normalizeContractCcEmailSubject(subjectBase);
+    const pdfFilename = buildContractEnvelopePdfFilename(subject);
     const html = ``;
 
     const emailed: string[] = [];
@@ -1198,7 +1199,7 @@ export class BoldSignService {
           html,
           attachments: [
             {
-              filename: 'contract-prefilled.pdf',
+              filename: pdfFilename,
               content: pdf,
               contentType: 'application/pdf',
             },

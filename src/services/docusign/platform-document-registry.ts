@@ -1,5 +1,3 @@
-import fs from 'fs';
-import path from 'path';
 import prisma from '../../config/prismaClient';
 import {
   BOLD_SIGN_TYPE_TO_LAYOUT_KEY,
@@ -12,10 +10,6 @@ export type PlatformDocumentDefinition = {
   layoutKey: DocumentLayoutKey;
   name: string;
   type: string;
-  /** HTTPS URL — set via env in production. */
-  pdfUrlEnvKey: string;
-  /** Optional repo-relative PDF under `docs/` for local dev. */
-  localPdfFileName?: string;
 };
 
 export const PLATFORM_SIGNER_SLOTS = [
@@ -28,36 +22,26 @@ export const PLATFORM_DOCUMENTS: Record<DocumentLayoutKey, PlatformDocumentDefin
     layoutKey: DOCUMENT_LAYOUT_KEYS.contract,
     name: 'Katan Capital Funding Contract',
     type: 'contract',
-    pdfUrlEnvKey: 'PLATFORM_CONTRACT_PDF_URL',
-    localPdfFileName: 'KATAN_CAPITAL_-_FUNDING_CONTRACT.pdf',
   },
   [DOCUMENT_LAYOUT_KEYS.flexAddendum]: {
     layoutKey: DOCUMENT_LAYOUT_KEYS.flexAddendum,
     name: 'Katan Capital Flex Addendum',
     type: 'flex_addendum',
-    pdfUrlEnvKey: 'PLATFORM_FLEX_ADDENDUM_PDF_URL',
-    localPdfFileName: 'KATAN_CAPITAL_-_FLEX_ADDENDUM.pdf',
   },
   [DOCUMENT_LAYOUT_KEYS.balanceTransfer]: {
     layoutKey: DOCUMENT_LAYOUT_KEYS.balanceTransfer,
     name: 'Katan Capital Balance Transfer Sheet',
     type: 'balance_transfer',
-    pdfUrlEnvKey: 'PLATFORM_BALANCE_TRANSFER_PDF_URL',
-    localPdfFileName: 'KATAN_CAPITAL_-_BALANCE_TRANSFER_SHEET.pdf',
   },
   [DOCUMENT_LAYOUT_KEYS.achAuthorization]: {
     layoutKey: DOCUMENT_LAYOUT_KEYS.achAuthorization,
     name: 'Katan LLC ACH Authorization',
     type: 'ach_authorization',
-    pdfUrlEnvKey: 'PLATFORM_ACH_AUTHORIZATION_PDF_URL',
-    localPdfFileName: 'KATAN_CAPITAL_LLC_-_ACH_FORM.pdf',
   },
   [DOCUMENT_LAYOUT_KEYS.achAuthorizationStandalone]: {
     layoutKey: DOCUMENT_LAYOUT_KEYS.achAuthorizationStandalone,
     name: 'Katan LLC ACH Authorization (standalone)',
     type: 'ach_authorization',
-    pdfUrlEnvKey: 'PLATFORM_ACH_AUTHORIZATION_PDF_URL',
-    localPdfFileName: 'KATAN_CAPITAL_LLC_-_ACH_FORM.pdf',
   },
 };
 
@@ -72,16 +56,6 @@ const LAYOUT_KEY_SET = new Set<string>(Object.values(DOCUMENT_LAYOUT_KEYS));
 
 export function isDocumentLayoutKey(value: string): value is DocumentLayoutKey {
   return LAYOUT_KEY_SET.has(String(value || '').trim());
-}
-
-function docsRootDir(): string {
-  return path.resolve(process.cwd(), '..', 'docs');
-}
-
-function readLocalPdfBase64(fileName: string): string | null {
-  const filePath = path.join(docsRootDir(), fileName);
-  if (!fs.existsSync(filePath)) return null;
-  return fs.readFileSync(filePath).toString('base64');
 }
 
 function isValidRemotePdfUrl(url: string): boolean {
@@ -149,11 +123,8 @@ export async function resolvePlatformDocumentPdfUrl(
   const fromDb = await findBoldSignTemplatePdfUrlForLayout(layoutKey);
   if (fromDb) return fromDb;
 
-  const fromEnv = String(process.env[def.pdfUrlEnvKey] || '').trim();
-  if (fromEnv) return fromEnv;
-
   throw new Error(
-    `Missing PDF URL for "${def.name}". Upload the PDF to Cloudinary and set pdfUrl on the BoldSignTemplate row with layoutKey "${layoutKey}", or set ${def.pdfUrlEnvKey}.`,
+    `Missing PDF URL for "${def.name}". Upload the PDF to Cloudinary and set pdfUrl on the BoldSignTemplate row with layoutKey "${layoutKey}".`,
   );
 }
 
@@ -161,25 +132,13 @@ export async function loadPlatformDocumentPdfBase64(
   layoutKey: DocumentLayoutKey,
 ): Promise<string> {
   const def = PLATFORM_DOCUMENTS[layoutKey];
-
   const fromDb = await findBoldSignTemplatePdfUrlForLayout(layoutKey);
-  if (fromDb) {
-    return fetchRemotePdfAsBase64(fromDb, def.name);
+  if (!fromDb) {
+    throw new Error(
+      `No PDF configured for "${def.name}". Upload to Cloudinary and set BoldSignTemplate.pdfUrl with layoutKey "${layoutKey}".`,
+    );
   }
-
-  const fromEnv = String(process.env[def.pdfUrlEnvKey] || '').trim();
-  if (fromEnv) {
-    return fetchRemotePdfAsBase64(fromEnv, def.name);
-  }
-
-  if (def.localPdfFileName) {
-    const local = readLocalPdfBase64(def.localPdfFileName);
-    if (local) return local;
-  }
-
-  throw new Error(
-    `No PDF configured for "${def.name}". Upload to Cloudinary and set BoldSignTemplate.pdfUrl with layoutKey "${layoutKey}", set ${def.pdfUrlEnvKey}, or add ${def.localPdfFileName ?? 'a PDF'} under docs/.`,
-  );
+  return fetchRemotePdfAsBase64(fromDb, def.name);
 }
 
 export function normalizeSupplementalLayoutKeys(refs: string[]): DocumentLayoutKey[] {
@@ -198,7 +157,7 @@ export function normalizeSupplementalLayoutKeys(refs: string[]): DocumentLayoutK
   return [...new Set(out)];
 }
 
-/** Keeps document-template-mapping FK working without manual BoldSignTemplate rows. */
+/** Resolves CRM document row id for a platform layout key (coordinates come from code layouts). */
 export async function ensurePlatformBoldSignTemplateRow(
   layoutKey: DocumentLayoutKey,
 ): Promise<string> {
@@ -206,52 +165,26 @@ export async function ensurePlatformBoldSignTemplateRow(
 
   const existing = await prisma.boldSignTemplate.findFirst({
     where: { OR: [{ templateId: layoutKey }, { layoutKey }] },
-    select: { id: true, pdfUrl: true },
+    orderBy: { createdAt: 'desc' },
+    select: { id: true, layoutKey: true, name: true, type: true },
   });
   if (existing?.id) {
-    const currentPdfUrl = String(existing.pdfUrl || '').trim();
-    if (!isValidRemotePdfUrl(currentPdfUrl)) {
-      let resolvedPdfUrl = '';
-      try {
-        resolvedPdfUrl = await resolvePlatformDocumentPdfUrl(layoutKey);
-      } catch {
-        resolvedPdfUrl = '';
-      }
-      if (resolvedPdfUrl) {
-        await prisma.boldSignTemplate.update({
-          where: { id: existing.id },
-          data: { pdfUrl: resolvedPdfUrl, layoutKey, name: def.name, type: def.type },
-        });
-      } else {
-        await prisma.boldSignTemplate.update({
-          where: { id: existing.id },
-          data: { layoutKey, name: def.name, type: def.type },
-        });
-      }
+    const needsSync =
+      existing.layoutKey !== layoutKey ||
+      existing.name !== def.name ||
+      existing.type !== def.type;
+    if (needsSync) {
+      await prisma.boldSignTemplate.update({
+        where: { id: existing.id },
+        data: { layoutKey, name: def.name, type: def.type, templateId: layoutKey },
+      });
     }
     return existing.id;
   }
 
-  let pdfUrl = '';
-  try {
-    pdfUrl = await resolvePlatformDocumentPdfUrl(layoutKey);
-  } catch {
-    pdfUrl = '';
-  }
-
-  const created = await prisma.boldSignTemplate.create({
-    data: {
-      name: def.name,
-      type: def.type,
-      templateId: layoutKey,
-      layoutKey,
-      pdfUrl: pdfUrl || `platform://${layoutKey}`,
-      state: 'all',
-      frequency: 'all',
-    },
-    select: { id: true },
-  });
-  return created.id;
+  throw new Error(
+    `No document record for "${def.name}" (layoutKey: ${layoutKey}). Create a BoldSignTemplate row with layoutKey "${layoutKey}" and a Cloudinary pdfUrl.`,
+  );
 }
 
 export function getPlatformTemplateRecipients() {
