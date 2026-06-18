@@ -332,6 +332,7 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
       reminderSettings,
       ownerCount,
       guarantorCount,
+      contractId,
     } = req.body;
 
     const hasSupplementalLayoutKeys =
@@ -390,6 +391,10 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
       guarantorCount: guarantorCount != null ? Number(guarantorCount) : undefined,
       autoSend: autoSend === false ? false : autoSend === true ? true : undefined,
       reminderSettings,
+      contractId:
+        contractId != null && Number.isFinite(Number(contractId)) && Number(contractId) > 0
+          ? Number(contractId)
+          : undefined,
     });
 
     return res.json(result);

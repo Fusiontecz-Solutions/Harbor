@@ -38,7 +38,7 @@
       "y": "275",
       "width": "0",
       "height": "0",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": false,
       "sourceTabLabel": "Date Signed 4f3ea070-31e5-4c20-9ce2-fa6536906705"
     },
@@ -53,7 +53,7 @@
       "y": "341",
       "width": "0",
       "height": "0",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": false,
       "sourceTabLabel": "Date Signed 277eb44f-f91a-467d-90e3-b0afae944be2"
     },
@@ -68,7 +68,7 @@
       "y": "364",
       "width": "0",
       "height": "0",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": false,
       "sourceTabLabel": "Date Signed ab9eb83e-1381-402d-9d87-8071d16b705c"
     },
@@ -82,7 +82,7 @@
       "y": "226",
       "width": "266",
       "height": "19",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": true,
       "sourceTabLabel": "business_address"
     },
@@ -96,7 +96,7 @@
       "y": "248",
       "width": "84",
       "height": "22",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": true,
       "sourceTabLabel": "business_address_city"
     },
@@ -110,7 +110,7 @@
       "y": "248",
       "width": "84",
       "height": "22",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": true,
       "sourceTabLabel": "business_address_state"
     },
@@ -124,7 +124,7 @@
       "y": "248",
       "width": "76",
       "height": "20",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": true,
       "sourceTabLabel": "business_address_zip"
     },
@@ -138,7 +138,7 @@
       "y": "385",
       "width": "84",
       "height": "22",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": true,
       "sourceTabLabel": "purchase_price"
     },
@@ -152,7 +152,7 @@
       "y": "575",
       "width": "208",
       "height": "20",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": true,
       "sourceTabLabel": "client_name_by"
     },
@@ -166,7 +166,7 @@
       "y": "598",
       "width": "194",
       "height": "19",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": true,
       "sourceTabLabel": "client_legal_name"
     },
@@ -180,7 +180,7 @@
       "y": "98",
       "width": "217",
       "height": "22",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": true,
       "sourceTabLabel": "merchant_legal_name"
     },
@@ -194,7 +194,7 @@
       "y": "142",
       "width": "183",
       "height": "19",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": true,
       "sourceTabLabel": "business_legal_name"
     },
@@ -208,7 +208,7 @@
       "y": "168",
       "width": "185",
       "height": "24",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": true,
       "sourceTabLabel": "dba"
     }

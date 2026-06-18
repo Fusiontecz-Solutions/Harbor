@@ -18,10 +18,12 @@
     }
   ],
   "variables": [
+    "addendum_date",
+    "agreement_date",
     "client_legal_name",
     "client_name",
     "business_name_2",
-    "signature_date"
+    "daily_payment"
   ],
   "placements": [
     {
@@ -32,7 +34,7 @@
       "pageNumber": "2",
       "x": "422",
       "y": "392",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": false,
       "sourceTabLabel": "Signature flex_addendum_p2_owner1",
       "signerParty": "primary"
@@ -45,7 +47,7 @@
       "pageNumber": "2",
       "x": "424",
       "y": "506",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": false,
       "sourceTabLabel": "Signature flex_addendum_p2_owner2",
       "signerParty": "secondary"
@@ -53,7 +55,7 @@
     {
       "id": "p2",
       "type": "date",
-      "variable": "signature_date",
+      "variable": "addendum_date",
       "slot": "date_p1_196_102",
       "documentId": "1",
       "pageNumber": "1",
@@ -61,14 +63,14 @@
       "y": "102",
       "width": "0",
       "height": "0",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": false,
       "sourceTabLabel": "Date Signed 3912e6f5-69a7-45e0-b215-284d9e284c44"
     },
     {
       "id": "p3",
       "type": "date",
-      "variable": "signature_date",
+      "variable": "agreement_date",
       "slot": "date_p1_158_116",
       "documentId": "1",
       "pageNumber": "1",
@@ -76,7 +78,7 @@
       "y": "116",
       "width": "0",
       "height": "0",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": false,
       "sourceTabLabel": "Date Signed ab7493c6-1a0b-4cfe-a129-f99b31ec92af"
     },
@@ -90,7 +92,7 @@
       "y": "129",
       "width": "248",
       "height": "19",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": true,
       "sourceTabLabel": "client_legal_name"
     },
@@ -104,7 +106,7 @@
       "y": "398",
       "width": "257",
       "height": "24",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": true,
       "sourceTabLabel": "client_name"
     },
@@ -118,10 +120,38 @@
       "y": "517",
       "width": "257",
       "height": "24",
-      "signerRole": "Receiver",
+      "signerRole": "Signer",
       "optional": true,
       "sourceTabLabel": "business_name_2",
       "when": "owners >= 2"
+    },
+    {
+      "id": "p7",
+      "type": "text",
+      "variable": "daily_payment",
+      "documentId": "1",
+      "pageNumber": "1",
+      "x": "226",
+      "y": "363",
+      "width": "120",
+      "height": "16",
+      "signerRole": "Signer",
+      "optional": true,
+      "sourceTabLabel": "daily_payment"
+    },
+    {
+      "id": "p8",
+      "type": "text",
+      "variable": "daily_payment",
+      "documentId": "1",
+      "pageNumber": "1",
+      "x": "226",
+      "y": "377",
+      "width": "120",
+      "height": "16",
+      "signerRole": "Signer",
+      "optional": true,
+      "sourceTabLabel": "daily_payment"
     }
   ],
   "pdf": {
