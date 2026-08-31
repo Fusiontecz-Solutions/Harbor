@@ -18,23 +18,41 @@ const LETTER_PDF_PAGE_WIDTH_MM = (() => {
     const n = Number(process.env.LETTER_PDF_PAGE_WIDTH_MM ?? '210');
     return Number.isFinite(n) && n > 0 ? n : 210;
 })();
+
 /**
- * Letter PDF height (mm) ΓÇö taller than A4 (297mm) so one page fits the HTML letter
- * (footer + watermark) without a blank second page. Override with LETTER_PDF_PAGE_HEIGHT_MM.
+ * Optional cap used only by LETTER_PDF_FIT_ONE_PAGE scaling.
  */
-const LETTER_PDF_PAGE_HEIGHT_MM = (() => {
+const LETTER_PDF_FIT_HEIGHT_MM = (() => {
     const n = Number(process.env.LETTER_PDF_PAGE_HEIGHT_MM ?? '320');
-    return Number.isFinite(n) && n > 0 ? n : 340;
+    return Number.isFinite(n) && n > 0 ? n : 320;
 })();
 
-/** Minimum PDF page height (mm) ΓÇö avoids zero-height sheets on empty markup. */
-const LETTER_PDF_MIN_HEIGHT_MM = 20;
+/** Fallback when the letter card cannot be measured (mm). */
+const LETTER_PDF_MEASURE_FALLBACK_MM = 20;
+
+/**
+ * Minimum PDF page height (mm). Short letters still get a full A4 sheet instead
+ * of a stubby content-cropped page. Override with LETTER_PDF_MIN_PAGE_HEIGHT_MM.
+ */
+const LETTER_PDF_MIN_PAGE_HEIGHT_MM = (() => {
+    const n = Number(process.env.LETTER_PDF_MIN_PAGE_HEIGHT_MM ?? '297');
+    return Number.isFinite(n) && n > 0 ? n : 297;
+})();
 
 /** Max single-page PDF height (mm). Very long letters may be clipped if exceeded. */
 const LETTER_PDF_MAX_HEIGHT_MM = (() => {
     const n = Number(process.env.LETTER_PDF_MAX_HEIGHT_MM ?? '1500');
     return Number.isFinite(n) && n > 0 ? n : 1500;
 })();
+
+/**
+ * Tiny extra page height so Chromium does not push the last footer strip onto
+ * page 2. Keep well under 2mm — larger values show as a white gap under the bars.
+ */
+const LETTER_PDF_HEIGHT_SLACK_MM = 0.5;
+
+/** Extra viewport px after measure so layout is not clipped before `page.pdf()`. */
+const LETTER_PDF_VIEWPORT_SLACK_PX = 8;
 
 /** Standard A4 (matches typical contract PDF pages). */
 const A4_PAGE_WIDTH_MM = 210;
@@ -78,14 +96,12 @@ function buildLetterPdfDocument(innerHtml: string): string {
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <style id="letter-pdf-print-shell">
-  /* ----- Page: A4 width, extra height so template fits on one sheet (see LETTER_PDF_PAGE_HEIGHT_MM) ----- */
+  /* Page size is set from measured card height before page.pdf(); do not lock to A4. */
   @page {
-    size: ${LETTER_PDF_PAGE_WIDTH_MM}mm ${LETTER_PDF_PAGE_HEIGHT_MM}mm;
     margin: 0;
     background: #ffffff;
   }
 
-  /* ----- Hard reset: no default UA grey, no stray margins ----- */
   *, *::before, *::after {
     box-sizing: border-box;
   }
@@ -93,7 +109,6 @@ function buildLetterPdfDocument(innerHtml: string): string {
     margin: 0 !important;
     padding: 0 !important;
     width: 100%;
-    /* Content-height only ΓÇö avoid 100vh/100% stacking past one A4 and spawning a blank page */
     height: auto !important;
     min-height: 0 !important;
     background: #ffffff !important;
@@ -116,7 +131,6 @@ function buildLetterPdfDocument(innerHtml: string): string {
     -webkit-font-smoothing: antialiased;
   }
 
-  /* Stage height = template only (no forced viewport tallness) */
   .letter-pdf-stage {
     margin: 0 !important;
     padding: 0 !important;
@@ -127,7 +141,6 @@ function buildLetterPdfDocument(innerHtml: string): string {
     display: block;
   }
 
-  /* Letter column = full A4 width. No max-width / centering / gutters */
   .letter-pdf-root {
     margin: 0 !important;
     padding: 0 !important;
@@ -137,20 +150,19 @@ function buildLetterPdfDocument(innerHtml: string): string {
     overflow: visible;
   }
 
-  /* Strip every email-only "card" decoration from the outer template table */
   .letter-pdf-root,
   .letter-pdf-root * {
     box-shadow: none !important;
     text-shadow: none !important;
   }
+
+  /* Outer grey email canvas: full width, no padding, no min-height (that creates blank PDF). */
   .letter-pdf-root > table,
   .letter-pdf-root > div > table {
     width: 100% !important;
     max-width: 100% !important;
     min-width: 0 !important;
-    /* Email templates use min-height:1123px for ΓÇ£one pageΓÇ¥ preview; that + row heights
-       often exceeds A4 by a few px in Chromium PDF and creates an empty second page. */
-    min-height: auto !important;
+    min-height: 0 !important;
     height: auto !important;
     margin: 0 !important;
     padding: 0 !important;
@@ -158,6 +170,16 @@ function buildLetterPdfDocument(innerHtml: string): string {
     border-radius: 0 !important;
     box-shadow: none !important;
     background: #ffffff !important;
+    background-color: #ffffff !important;
+  }
+  .letter-pdf-root > table > tbody > tr > td,
+  .letter-pdf-root > table > tr > td,
+  .letter-pdf-root > div > table > tbody > tr > td,
+  .letter-pdf-root > div > table > tr > td {
+    padding: 0 !important;
+    background: #ffffff !important;
+    background-color: #ffffff !important;
+    vertical-align: top !important;
   }
 
   img {
@@ -169,24 +191,28 @@ function buildLetterPdfDocument(innerHtml: string): string {
     border-collapse: collapse;
   }
 
-  /* Branded ISO / approval emails: remove grey body gutters and 600px centered card */
   body,
-  body[style],
-  body > table,
-  body > table > tbody > tr > td {
+  body[style] {
     background: #ffffff !important;
     background-color: #ffffff !important;
-    padding-top: 0 !important;
-    padding-bottom: 0 !important;
   }
   .letter-pdf-root table[align="center"] {
     margin-left: 0 !important;
     margin-right: 0 !important;
   }
+
+  /* Keep the email card at its native 600px width; zoom scales it to the page. */
+  .letter-pdf-root .email-container,
   .letter-pdf-root table[width="600"],
   .letter-pdf-root table[width='600'] {
-    width: 100% !important;
-    max-width: 100% !important;
+    width: 600px !important;
+    max-width: 600px !important;
+    min-width: 600px !important;
+    margin: 0 !important;
+    border: 0 !important;
+    border-width: 0 !important;
+    border-style: none !important;
+    border-radius: 0 !important;
   }
 </style>
 </head>
@@ -259,6 +285,15 @@ async function resolveLetterPdfExecutablePaths(): Promise<Array<string | undefin
   if (process.platform === 'darwin') {
     candidates.push('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
     candidates.push('/Applications/Chromium.app/Contents/MacOS/Chromium');
+  }
+
+  if (process.platform === 'win32') {
+    candidates.push('C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe');
+    candidates.push('C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe');
+    const localAppData = process.env.LOCALAPPDATA?.trim();
+    if (localAppData) {
+      candidates.push(`${localAppData}\\Google\\Chrome\\Application\\chrome.exe`);
+    }
   }
 
   try {
@@ -372,29 +407,176 @@ async function waitForNextPaint(page: Page): Promise<void> {
     );
 }
 
+type PdfDomEl = {
+    tagName: string;
+    classList: { contains: (name: string) => boolean };
+    getAttribute: (name: string) => string | null;
+    setAttribute: (name: string, value: string) => void;
+    style: {
+        setProperty: (name: string, value: string, priority?: string) => void;
+        transformOrigin: string;
+        transform: string;
+    };
+    getBoundingClientRect: () => { top: number; bottom: number; height: number; width: number };
+    offsetHeight: number;
+    offsetWidth: number;
+    parentElement: PdfDomEl | null;
+    children: ArrayLike<PdfDomEl>;
+    querySelector: (sel: string) => PdfDomEl | null;
+    querySelectorAll: (sel: string) => ArrayLike<PdfDomEl>;
+    appendChild: (child: PdfDomEl) => PdfDomEl;
+    insertBefore: (node: PdfDomEl, ref: PdfDomEl | null) => PdfDomEl;
+    remove: () => void;
+};
+
+type PdfDocumentEl = PdfDomEl & {
+    createElement: (tag: string) => PdfDomEl;
+    body: PdfDomEl;
+};
+
+/** Native email letter card width (px) — matches the Letters preview iframe. */
+const LETTER_EMAIL_CARD_WIDTH_PX = 600;
+
+/**
+ * PDF-only DOM tweaks: strip the grey email canvas padding and tag the letter
+ * card. Keeps the card at the email width (600px) so line-wrapping / height
+ * match the Letters preview; a later zoom step scales it to the PDF page width.
+ * Email HTML templates are left unchanged.
+ */
+async function prepareLetterDomForPdf(page: Page): Promise<void> {
+    await page.evaluate((cardWidthPx: number) => {
+        const g = globalThis as unknown as { document: PdfDomEl };
+        const root = g.document.querySelector('.letter-pdf-root');
+        if (!root) return;
+
+        const attrWidth = (el: PdfDomEl) => (el.getAttribute('width') || '').trim();
+        const inlineStyle = (el: PdfDomEl) => el.getAttribute('style') || '';
+
+        const tables = Array.from(root.querySelectorAll('table'));
+        for (const table of tables) {
+            const w = attrWidth(table);
+            const style = inlineStyle(table);
+            const isEmailCard =
+                table.classList.contains('email-container') ||
+                w === '600' ||
+                w === String(cardWidthPx) ||
+                /(?:^|;)\s*(?:max-)?width\s*:\s*600px/i.test(style);
+            if (!isEmailCard) continue;
+
+            table.setAttribute('data-letter-pdf-card', '');
+            table.setAttribute('width', String(cardWidthPx));
+            table.style.setProperty('width', `${cardWidthPx}px`, 'important');
+            table.style.setProperty('max-width', `${cardWidthPx}px`, 'important');
+            table.style.setProperty('min-width', `${cardWidthPx}px`, 'important');
+            table.style.setProperty('border', '0', 'important');
+            table.style.setProperty('border-width', '0', 'important');
+            table.style.setProperty('margin', '0', 'important');
+        }
+
+        const card =
+            root.querySelector('[data-letter-pdf-card]') ??
+            root.querySelector('.email-container');
+        if (!card) return;
+
+        let ancestor: PdfDomEl | null = card.parentElement;
+        while (ancestor && ancestor !== root) {
+            const tag = (ancestor.tagName || '').toUpperCase();
+            if (tag === 'TD' || tag === 'TH' || tag === 'TABLE') {
+                ancestor.style.setProperty('padding', '0', 'important');
+                ancestor.style.setProperty('background', '#ffffff', 'important');
+                ancestor.style.setProperty('background-color', '#ffffff', 'important');
+                ancestor.style.setProperty('vertical-align', 'top', 'important');
+            }
+            ancestor = ancestor.parentElement;
+        }
+    }, LETTER_EMAIL_CARD_WIDTH_PX);
+}
+
+/**
+ * Scale the 600px email letter up to the PDF page width with CSS `zoom` so
+ * wrapping stays identical to the on-screen template (no height collapse).
+ */
+async function zoomLetterCardToPageWidth(
+    page: Page,
+    pageWidthPx: number,
+    cardWidthPx: number = LETTER_EMAIL_CARD_WIDTH_PX,
+): Promise<number> {
+    const zoom = pageWidthPx / cardWidthPx;
+    await page.evaluate(
+        (args: { zoom: number; cardWidthPx: number }) => {
+            const g = globalThis as unknown as { document: PdfDomEl };
+            const root = g.document.querySelector('.letter-pdf-root');
+            const card =
+                g.document.querySelector('[data-letter-pdf-card]') ??
+                g.document.querySelector('.email-container');
+            if (!root || !card) return;
+
+            card.setAttribute('width', String(args.cardWidthPx));
+            card.style.setProperty('width', `${args.cardWidthPx}px`, 'important');
+            card.style.setProperty('max-width', `${args.cardWidthPx}px`, 'important');
+            card.style.setProperty('min-width', `${args.cardWidthPx}px`, 'important');
+
+            // Chromium `zoom` scales layout boxes (unlike transform), so PDF
+            // capture sees a full-page-width letter with preview wrapping.
+            root.style.setProperty('zoom', String(args.zoom));
+            root.style.setProperty('width', `${args.cardWidthPx}px`, 'important');
+        },
+        { zoom, cardWidthPx },
+    );
+    return zoom;
+}
+
+/** In-page fallback if the card cannot be found (min-height expressed in CSS px). */
+const LETTER_PDF_MEASURE_FALLBACK_PX = mmToCssPx(LETTER_PDF_MEASURE_FALLBACK_MM);
+
+/**
+ * Height of the letter card only (header bars through footer accent strips).
+ * Never uses body / documentElement scrollHeight — those equal the tall
+ * Puppeteer viewport and produce a huge blank PDF.
+ */
 async function measureContentHeightPx(page: Page): Promise<number> {
-    return page.evaluate(() => {
-        const g = globalThis as unknown as {
-            document: {
-                querySelector: (sel: string) => {
-                    getBoundingClientRect: () => { height: number };
-                    scrollHeight: number;
-                } | null;
-                body: { scrollHeight: number };
-                documentElement: { scrollHeight: number };
+    const minFallbackPx = LETTER_PDF_MEASURE_FALLBACK_PX;
+    return page.evaluate((fallbackPx: number) => {
+        const g = globalThis as unknown as { document: PdfDomEl };
+        const root = g.document.querySelector('.letter-pdf-root');
+        const card =
+            g.document.querySelector('[data-letter-pdf-card]') ??
+            g.document.querySelector('.email-container') ??
+            root;
+        if (!card) return fallbackPx;
+
+        const includeRect = (
+            top: number,
+            bottom: number,
+            rect: { top: number; bottom: number; height: number },
+        ) => {
+            if (!(rect.height > 0)) return { top, bottom };
+            return {
+                top: Math.min(top, rect.top),
+                bottom: Math.max(bottom, rect.bottom),
             };
         };
-        const stage = g.document.querySelector('.letter-pdf-stage');
-        const root = g.document.querySelector('.letter-pdf-root');
-        const el = stage ?? root;
-        if (!el) {
-            return Math.ceil(
-                Math.max(g.document.body.scrollHeight, g.document.documentElement.scrollHeight),
-            );
+
+        const cardRect = card.getBoundingClientRect();
+        let top = cardRect.top;
+        let bottom = cardRect.bottom;
+
+        const descendants = [
+            ...Array.from(card.querySelectorAll('tr')),
+            ...Array.from(card.querySelectorAll('td')),
+            ...Array.from(card.querySelectorAll('th')),
+            ...Array.from(card.querySelectorAll('table')),
+        ];
+        for (const el of descendants) {
+            const next = includeRect(top, bottom, el.getBoundingClientRect());
+            top = next.top;
+            bottom = next.bottom;
         }
-        const rect = el.getBoundingClientRect();
-        return Math.ceil(Math.max(rect.height, el.scrollHeight));
-    });
+
+        const fromDescendants = Math.max(0, bottom - top);
+        const fromBox = Math.max(cardRect.height, card.offsetHeight || 0);
+        return Math.ceil(Math.max(fromBox, fromDescendants));
+    }, minFallbackPx);
 }
 
 async function applyDynamicPageSize(page: Page, widthMm: number, heightMm: number): Promise<void> {
@@ -404,24 +586,76 @@ async function applyDynamicPageSize(page: Page, widthMm: number, heightMm: numbe
 }
 
 /**
+ * Pin footer accent bars to the bottom of a full A4 page by inserting a spacer
+ * row before the last card row. Avoids setting table/card height (which was
+ * overflowing onto page 2) while keeping the letter page tall like the preview.
+ */
+async function pinFooterWithSpacer(page: Page, pageHeightPx: number): Promise<void> {
+    await page.evaluate((targetHeightPx: number) => {
+        const g = globalThis as unknown as { document: PdfDocumentEl };
+        const doc = g.document;
+        const card =
+            doc.querySelector('[data-letter-pdf-card]') ??
+            doc.querySelector('.email-container');
+        if (!card || !(targetHeightPx > 0)) return;
+
+        // Clear any prior spacer from a previous pass.
+        Array.from(card.querySelectorAll('[data-letter-pdf-spacer]')).forEach((el) => {
+            el.remove();
+        });
+
+        const directRows = Array.from(card.children).flatMap((child) => {
+            const tag = (child.tagName || '').toUpperCase();
+            if (tag === 'TBODY' || tag === 'THEAD' || tag === 'TFOOT') {
+                return Array.from(child.children).filter(
+                    (row) => (row.tagName || '').toUpperCase() === 'TR',
+                );
+            }
+            if (tag === 'TR') return [child];
+            return [];
+        });
+        if (directRows.length < 2) return;
+
+        const cardRect = card.getBoundingClientRect();
+        const currentHeight = Math.ceil(
+            Math.max(cardRect.height, card.offsetHeight || 0),
+        );
+        // Keep 2px under the page so Chromium never spills a blank page 2.
+        const gap = Math.floor(targetHeightPx - currentHeight - 2);
+        if (gap <= 0) return;
+
+        const footerRow = directRows[directRows.length - 1];
+        const parent = footerRow.parentElement;
+        if (!parent) return;
+
+        const spacerRow = doc.createElement('tr');
+        spacerRow.setAttribute('data-letter-pdf-spacer', '');
+        const spacerTd = doc.createElement('td');
+        spacerTd.setAttribute('height', String(gap));
+        spacerTd.style.setProperty('height', `${gap}px`, 'important');
+        spacerTd.style.setProperty('line-height', `${gap}px`, 'important');
+        spacerTd.style.setProperty('font-size', '0', 'important');
+        spacerTd.style.setProperty('padding', '0', 'important');
+        spacerTd.style.setProperty('margin', '0', 'important');
+        spacerTd.style.setProperty('border', '0', 'important');
+        spacerTd.appendChild(doc.createElement('span'));
+        spacerRow.appendChild(spacerTd);
+        parent.insertBefore(spacerRow, footerRow);
+    }, pageHeightPx);
+}
+
+/**
  * If content is taller than one printable area, scale the root down slightly
  * so a single PDF page is more likely (optional; LETTER_PDF_FIT_ONE_PAGE=1).
  */
 async function scaleLetterToFitOnePageIfNeeded(page: Page): Promise<void> {
     if (!FIT_ONE_PAGE) return;
     const widthMm = LETTER_PDF_PAGE_WIDTH_MM;
-    const heightMm = LETTER_PDF_PAGE_HEIGHT_MM;
+    const heightMm = LETTER_PDF_FIT_HEIGHT_MM;
     await page.evaluate(
         (args: { widthMm: number; heightMm: number }) => {
             const g = globalThis as unknown as {
-                document: {
-                    querySelector: (sel: string) => {
-                        style: { transformOrigin: string; transform: string };
-                        getBoundingClientRect: () => { width: number; height: number };
-                        scrollHeight: number;
-                        scrollWidth: number;
-                    } | null;
-                };
+                document: { querySelector: (sel: string) => PdfDomEl | null };
             };
             const root = g.document.querySelector('.letter-pdf-root');
             if (!root) return;
@@ -431,8 +665,8 @@ async function scaleLetterToFitOnePageIfNeeded(page: Page): Promise<void> {
             const pageInnerW = mmToPx(args.widthMm);
 
             const rect = root.getBoundingClientRect();
-            const h = Math.max(rect.height, root.scrollHeight);
-            const w = Math.max(rect.width, root.scrollWidth);
+            const h = Math.max(rect.height, root.offsetHeight || 0);
+            const w = Math.max(rect.width, root.offsetWidth || 0);
             if (h <= pageInnerH && w <= pageInnerW) return;
 
             const scale = Math.min(pageInnerH / h, pageInnerW / w, 1) * 0.985;
@@ -447,8 +681,12 @@ async function scaleLetterToFitOnePageIfNeeded(page: Page): Promise<void> {
 
 /**
  * Renders CRM letter / rich HTML email body to a single-page PDF buffer.
- * Page size: {@link LETTER_PDF_PAGE_WIDTH_MM} ├ù {@link LETTER_PDF_PAGE_HEIGHT_MM} mm
- * (default 210├ù340 ΓÇö A4 width, extra height so letters fit on one page).
+ * Width is A4 ({@link LETTER_PDF_PAGE_WIDTH_MM} mm). Height is at least a full
+ * A4 sheet ({@link LETTER_PDF_MIN_PAGE_HEIGHT_MM}), or taller when content needs it.
+ *
+ * Layout matches the Letters preview: the email card stays 600px wide (same
+ * wrapping / height), then CSS zoom scales it to the A4 page width. A spacer
+ * pins footer bars to the bottom without overflowing onto page 2.
  */
 export async function renderLetterHtmlToPdfBuffer(htmlBody: string): Promise<Buffer> {
     if (!htmlBody || !String(htmlBody).trim()) {
@@ -462,13 +700,16 @@ export async function renderLetterHtmlToPdfBuffer(htmlBody: string): Promise<Buf
 
         const page = await browser.newPage();
 
-        // ΓÇ£ScreenΓÇ¥ paint path keeps template colors/gradients closer to the email preview.
+        // Screen paint path keeps template colors/gradients closer to the email preview.
         await page.emulateMediaType('screen');
 
-        // Tall viewport so layout is not clipped before we measure content height.
+        const pageWidthPx = mmToCssPx(LETTER_PDF_PAGE_WIDTH_MM);
+        const measureViewportHeightPx = mmToCssPx(LETTER_PDF_MAX_HEIGHT_MM);
+
+        // Measure at the email card width first so wrapping matches the preview.
         await page.setViewport({
-            width: mmToCssPx(LETTER_PDF_PAGE_WIDTH_MM),
-            height: mmToCssPx(LETTER_PDF_MAX_HEIGHT_MM),
+            width: LETTER_EMAIL_CARD_WIDTH_PX,
+            height: measureViewportHeightPx,
             deviceScaleFactor: 2,
         });
 
@@ -480,22 +721,48 @@ export async function renderLetterHtmlToPdfBuffer(htmlBody: string): Promise<Buf
         await waitForImages(page);
         await waitForFonts(page);
         await waitForNextPaint(page);
+        await prepareLetterDomForPdf(page);
+        await waitForNextPaint(page);
+
+        // Natural preview height at 600px (same wrapping as Letters UI).
+        const previewHeightPx = await measureContentHeightPx(page);
+        const zoom = pageWidthPx / LETTER_EMAIL_CARD_WIDTH_PX;
+        const zoomedContentHeightPx = Math.ceil(previewHeightPx * zoom);
+        const measuredHeightMm =
+            Math.ceil(pxToMm(zoomedContentHeightPx)) + LETTER_PDF_HEIGHT_SLACK_MM;
+        const pageHeightMm = Math.min(
+            LETTER_PDF_MAX_HEIGHT_MM,
+            Math.max(LETTER_PDF_MIN_PAGE_HEIGHT_MM, measuredHeightMm),
+        );
+        const pageHeightPx = mmToCssPx(pageHeightMm);
+
+        // Insert spacer in pre-zoom coordinates, then zoom to full page width.
+        const targetLayoutHeightPx = Math.floor(pageHeightPx / zoom);
+        await pinFooterWithSpacer(page, targetLayoutHeightPx);
+        await waitForNextPaint(page);
+        await zoomLetterCardToPageWidth(page, pageWidthPx, LETTER_EMAIL_CARD_WIDTH_PX);
+        await waitForNextPaint(page);
         await scaleLetterToFitOnePageIfNeeded(page);
         await waitForNextPaint(page);
 
-        const contentHeightPx = await measureContentHeightPx(page);
-        const contentHeightMm = Math.min(
-            LETTER_PDF_MAX_HEIGHT_MM,
-            Math.max(LETTER_PDF_MIN_HEIGHT_MM, Math.ceil(pxToMm(contentHeightPx) + 1)),
+        const pdfViewportHeightPx = Math.max(
+            pageHeightPx + LETTER_PDF_VIEWPORT_SLACK_PX,
+            zoomedContentHeightPx + LETTER_PDF_VIEWPORT_SLACK_PX,
         );
+        await page.setViewport({
+            width: pageWidthPx,
+            height: pdfViewportHeightPx,
+            deviceScaleFactor: 2,
+        });
+        await waitForNextPaint(page);
 
-        await applyDynamicPageSize(page, LETTER_PDF_PAGE_WIDTH_MM, contentHeightMm);
+        await applyDynamicPageSize(page, LETTER_PDF_PAGE_WIDTH_MM, pageHeightMm);
 
         const pdfUint8 = await page.pdf({
             width: `${LETTER_PDF_PAGE_WIDTH_MM}mm`,
-            height: `${contentHeightMm}mm`,
+            height: `${pageHeightMm}mm`,
             printBackground: true,
-            preferCSSPageSize: true,
+            preferCSSPageSize: false,
             margin: { top: '0', right: '0', bottom: '0', left: '0' },
             omitBackground: false,
             tagged: false,
@@ -506,7 +773,7 @@ export async function renderLetterHtmlToPdfBuffer(htmlBody: string): Promise<Buf
             throw new Error('Puppeteer returned an empty PDF buffer');
         }
         console.info(
-            `${LOG_PREFIX} generated pdf bytes=${buf.length} heightMm=${contentHeightMm} elapsedMs=${Date.now() - started}`,
+            `${LOG_PREFIX} generated pdf bytes=${buf.length} previewHeightPx=${previewHeightPx} zoom=${zoom.toFixed(3)} pageHeightMm=${pageHeightMm} elapsedMs=${Date.now() - started}`,
         );
         return buf;
     } catch (err) {
