@@ -27,6 +27,12 @@ import {
   getApplicationById,
   rejectApplication,
 } from "@/redux/actions/applicationActions";
+import {
+  patchApplicationDetailFields,
+  patchApplicationFields,
+} from "@/redux/slices/applicationSlice";
+import { setOfferDecision } from "@/redux/slices/offerDecisionSlice";
+import { invalidateApplicationDetailCache } from "@/lib/applicationDetailCache";
 import { Badge } from "@/components/ui/badge";
 import MyNotes from "./MyNotes";
 import { ApprovedOfferDisplay } from "./ApprovedOfferDisplay";
@@ -630,11 +636,14 @@ const OfferDecisionToggle: React.FC<OfferDecisionToggleProps> = (props) => {
   // Real-time sync when approval modal (or elsewhere) saves offer-decision
   useEffect(() => {
     const onOfferDecisionUpdated = (event: Event) => {
-      const detail = (event as CustomEvent<{ applicationId?: string }>).detail;
+      const detail = (event as CustomEvent<{
+        applicationId?: string;
+        skipReload?: boolean;
+      }>).detail;
       if (!offerDecisionUpdateMatchesApplication(detail?.applicationId, applicationId)) {
         return;
       }
-      if (skipNextOfferDecisionReloadRef.current) {
+      if (detail?.skipReload || skipNextOfferDecisionReloadRef.current) {
         skipNextOfferDecisionReloadRef.current = false;
         return;
       }
@@ -1351,8 +1360,17 @@ const OfferDecisionToggle: React.FC<OfferDecisionToggleProps> = (props) => {
 
       const saveRes = await axiosPost("/offer-decisions", payload);
       const saved = (saveRes?.data && saveRes.data.data) || null;
+      const savedMeta = (saveRes?.data && saveRes.data.meta) || null;
+      const applicationPatch =
+        savedMeta &&
+        typeof savedMeta === "object" &&
+        savedMeta.application &&
+        typeof savedMeta.application === "object"
+          ? (savedMeta.application as Record<string, unknown>)
+          : null;
 
       if (saved) {
+        dispatch(setOfferDecision(saved));
         const savedFunded = resolveOfferDecisionFundedAmount(
           saved as Record<string, unknown>,
         );
@@ -1417,22 +1435,12 @@ const OfferDecisionToggle: React.FC<OfferDecisionToggleProps> = (props) => {
       setShowApproveForm(true);
 
       skipNextOfferDecisionReloadRef.current = true;
-      emitOfferDecisionUpdated(applicationId);
-
-      // Refresh application so header status shows Contract Pending
-      try {
-        const idStr = String(applicationId);
-        if (/^\d+$/.test(idStr)) {
-          await dispatch(getApplicationByApplicationId(idStr));
-        } else {
-          await dispatch(getApplicationById(idStr));
-        }
-      } catch (refreshErr) {
-        console.error(
-          "Offer saved but failed to refresh application status:",
-          refreshErr,
-        );
+      if (applicationPatch) {
+        dispatch(patchApplicationDetailFields(applicationPatch));
+        dispatch(patchApplicationFields(applicationPatch));
       }
+      invalidateApplicationDetailCache(String(applicationId));
+      emitOfferDecisionUpdated(applicationId, { skipReload: true });
 
       toast.success("Offer saved successfully.");
     } catch (error: any) {

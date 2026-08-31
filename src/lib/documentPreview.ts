@@ -79,7 +79,7 @@ export function resolveClientPreviewMime(
 }
 
 export function isCloudinaryAssetUrl(url: string): boolean {
-    return /^https:\/\/res\.cloudinary\.com\/[^/]+\/(image|raw|video)\//.test(
+    return /^(https?:)?\/\/res\.cloudinary\.com\/[^/]+\/(image|raw|video)\//i.test(
         String(url ?? "").trim(),
     );
 }

@@ -23,6 +23,7 @@ import {
     formatDisclosurePaymentFrequencyLabel,
 } from "./disclosureAprCalculator";
 import { DISCLOSURE_PLATFORM_FEE_USD, PLATFORM_DISCLOSURE_FUNDER_NAME } from "./platformDocumentConfig";
+import { isKnownUsStateToken, isAddressPlaceholderToken, isUsableDisclosureStreetLine } from "@/utils/usStateMatch";
 import {
     calculateRefinanceDealMetrics,
     isRefinanceDeal,
@@ -204,6 +205,7 @@ function buildCaliforniaDisclosurePrefill(ctx: StateDisclosureContext): Contract
         avarageMonthlyIncome: ctx.averageMonthlyIncome,
         payementExceededPercent: ctx.paymentExceededPercent,
         monthlyIncome: ctx.averageMonthlyIncome,
+        incomeLookbackMonths: "4",
         financeCharge: ctx.financeCharge,
         funderName: ctx.funderName?.toUpperCase() ?? PLATFORM_DISCLOSURE_FUNDER_NAME.toUpperCase(),
         recipientName: ctx.recipientName?.toUpperCase(),
@@ -332,7 +334,8 @@ const buildDailyUtah = (ctx: StateDisclosureContext) =>
     buildDailyUtahContractPrefillFields({
         /** Guide: Total Amount of Funds = Total Net (all fund amount slots). */
         purchaseAmount: ctx.fundingDisbursed || ctx.netContractedFunding || ctx.fundingProvided,
-        netToMerchant: ctx.fundingDisbursed || ctx.netContractedFunding,
+        netToMerchant:
+            ctx.fundingDisbursed || ctx.netContractedFunding || ctx.fundingProvided,
         purchasePrice: ctx.totalRepayment,
         financeCharge: ctx.financeCharge || ctx.totalDollarCost,
         remittance: ctx.estimatedPayment,
@@ -576,14 +579,16 @@ const REGISTRY: Record<string, StateDisclosureBuilder> = {
             recipientAddress: ctx.recipientAddress,
             prepaymentDiscount: ctx.prepaymentDiscountAmount,
             dateOfAmountReceived: ctx.prepaymentReceivedByDate,
-            signatureDate: ctx.signatureDate,
             recipientName2: ctx.recipientName,
             disclosureDate2: ctx.signatureDate,
             recipientAddress1: ctx.recipientAddress,
             exceededPayment: ctx.paymentExceededPercent,
+            fordailypayments: ctx.estimatedPayment,
             weeklyPayments: ctx.estimatedPayment,
             paymentExceededPercent: ctx.paymentExceededPercent,
-            signatureDate2: ctx.signatureDate,
+            // Last-page Signature / Date lines stay empty.
+            signatureDate: "",
+            signatureDate2: "",
         }),
 
     weekly_virginia: (ctx) =>
@@ -597,16 +602,18 @@ const REGISTRY: Record<string, StateDisclosureBuilder> = {
             disclosureDate: ctx.signatureDate,
             disclosureName: ctx.recipientName,
             recipientAddress: ctx.recipientAddress,
-            prepaymentDiscount: ctx.prepaymentDiscountAmount,
             dateOfAmountReceived: ctx.prepaymentReceivedByDate,
-            signatureDate: ctx.signatureDate,
             recipientName2: ctx.recipientName,
             disclosureDate2: ctx.signatureDate,
             recipientAddress1: ctx.recipientAddress,
             exceededPayment: ctx.paymentExceededPercent,
+            fordailypayments: ctx.estimatedPayment,
             weeklyPayments: ctx.estimatedPayment,
             paymentExceededPercent: ctx.paymentExceededPercent,
-            signatureDate2: ctx.signatureDate,
+            appendixUnderwritingFees: ctx.brokerFeePaidToBroker,
+            // Last-page Signature / Date lines stay empty.
+            signatureDate: "",
+            signatureDate2: "",
         }),
 
     daily_utah: buildDailyUtah,
@@ -712,6 +719,35 @@ function formatUsDate(value: unknown): string {
 
 function str(v: unknown): string {
     return String(v ?? "").trim();
+}
+
+function joinAddressParts(
+    street?: string,
+    city?: string,
+    state?: string,
+    zip?: string,
+): string {
+    const cityOut =
+        str(city) && !isAddressPlaceholderToken(city) ? str(city) : "";
+    const stateOut = isKnownUsStateToken(state) ? str(state) : "";
+    const zipOut = /^\d{5}(-\d{4})?$/.test(str(zip)) ? str(zip) : "";
+    return [str(street), cityOut, stateOut, zipOut].filter(Boolean).join(", ");
+}
+
+/** Street line for disclosure recipient address — never country / disclosure state / ZIP alone. */
+function composeDisclosureRecipientAddress(parts: {
+    street?: string;
+    city?: string;
+    state?: string;
+    zip?: string;
+}[]): string {
+    for (const part of parts) {
+        const street = str(part.street);
+        if (!isUsableDisclosureStreetLine(street)) continue;
+        const line = joinAddressParts(street, part.city, part.state, part.zip);
+        if (line && isUsableDisclosureStreetLine(line)) return line;
+    }
+    return "";
 }
 
 /* --------------------------- context extraction --------------------------- */
@@ -878,22 +914,46 @@ export function buildStateDisclosurePrefillContextFromContract(args: {
         str((contract as Record<string, unknown>).client_legal_name) ||
         str(appPrefill.legalName);
 
-    const businessAddressLine = [
-        str(contract.businessAddress),
-        str(contract.businessAddressCity),
-        str(contract.businessAddressState),
-        str(contract.businessAddressZip),
+    const appClient = (args.application?.client ?? {}) as Record<string, unknown>;
+    const appBiz = (appClient.business ?? {}) as Record<string, unknown>;
+    const appBizAddr =
+        appBiz.address && typeof appBiz.address === "object"
+            ? (appBiz.address as Record<string, unknown>)
+            : {};
+    const appStreet = [
+        str(appPrefill.businessAddress),
+        str(appClient.businessAddress1),
+        str(appBizAddr.address1),
+        str(appClient.businessAddress),
     ]
         .filter(Boolean)
-        .join(", ") ||
-        [
-            str(appPrefill.businessAddress),
-            str(appPrefill.businessAddressCity),
-            str(appPrefill.businessAddressState),
-            str(appPrefill.businessAddressZip),
-        ]
-            .filter(Boolean)
-            .join(", ");
+        .find((line) => isUsableDisclosureStreetLine(line));
+    const businessAddressLine = composeDisclosureRecipientAddress([
+        {
+            street: appStreet,
+            city:
+                str(appPrefill.businessAddressCity) ||
+                str(appClient.businessCity) ||
+                str(appBizAddr.city),
+            state:
+                str(appPrefill.businessAddressState) ||
+                str(appClient.businessState) ||
+                str(appBizAddr.state),
+            zip:
+                str(appPrefill.businessAddressZip) ||
+                str(appClient.businessZipCode) ||
+                str(appClient.businessZip) ||
+                str(appBizAddr.zipCode) ||
+                str(appBizAddr.zip),
+        },
+        {
+            street: str(contract.businessAddress),
+            city: str(contract.businessAddressCity),
+            state: str(contract.businessAddressState),
+            zip: str(contract.businessAddressZip),
+        },
+        { street: merchant.physicalAddress },
+    ]);
 
     const signatureDate =
         formatUsDate(args.agreementDate) ||

@@ -38,6 +38,7 @@ export const FUNDER_ADDENDUM_COORDINATE_LAYOUT_OPTIONS = [
   { value: "addendum_ca", label: "Addendum CA" },
   { value: "addendum_ny", label: "Addendum NY" },
   { value: "addendum_va", label: "Addendum VA" },
+  { value: "addendum_epa", label: "EPA Addendum" },
   { value: "ach_authorization", label: "ACH Authorization" },
 ] as const;
 
@@ -103,6 +104,12 @@ export function isFunderAddendumRow(row: FunderDocumentTemplateRow): boolean {
     key.endsWith("_addendum_ca") ||
     key.endsWith("_addendum_ny") ||
     key.endsWith("_addendum_va") ||
+    key.endsWith("_addendum_epa") ||
+    key.includes("addendum_p_") ||
+    key.includes("addendum_ca_") ||
+    key.includes("addendum_ny_") ||
+    key.includes("addendum_va_") ||
+    key.includes("addendum_epa_") ||
     key.endsWith("_ach_authorization") ||
     key.endsWith("_ach_authorization_texas") ||
     key.includes("_ach_authorization")

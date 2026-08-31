@@ -161,6 +161,76 @@ export function getMostRecentCachedApplicationsList(): unknown | undefined {
   return freshest?.data;
 }
 
+function applicationIdsMatch(row: Application, application: Application): boolean {
+  const id = application._id || (application as { id?: string }).id;
+  const numericId = application.applicationId;
+  return Boolean(
+    (id && (row._id === id || (row as { id?: string }).id === id)) ||
+      (numericId != null && row.applicationId === numericId),
+  );
+}
+
+function cloneAndPrependListPayload(data: unknown, application: Application): unknown | null {
+  const prepend = (rows: Application[]) => {
+    if (rows.some((row) => applicationIdsMatch(row, application))) return { rows, added: false };
+    return { rows: [application, ...rows], added: true };
+  };
+
+  if (Array.isArray(data)) {
+    return prepend(data as Application[]).rows;
+  }
+  if (data && typeof data === "object") {
+    const payload = data as {
+      data?: Application[];
+      pagination?: { totalItems?: number; total?: number };
+    };
+    if (!Array.isArray(payload.data)) return null;
+    const { rows, added } = prepend(payload.data);
+    const pagination = payload.pagination
+      ? {
+          ...payload.pagination,
+          ...(added
+            ? {
+                totalItems:
+                  Number(
+                    payload.pagination.totalItems ??
+                      payload.pagination.total ??
+                      payload.data.length,
+                  ) + 1,
+              }
+            : {}),
+        }
+      : payload.pagination;
+    return { ...payload, data: rows, pagination };
+  }
+  return null;
+}
+
+/**
+ * Insert a newly created application into cached first-page lists so returning
+ * to /applications does not wait on a full list refetch.
+ */
+export function prependApplicationToListCache(application: unknown): void {
+  if (!application || typeof application !== "object") return;
+  const app = application as Application;
+  const now = Date.now();
+
+  for (const [key, entry] of [...cache.entries()]) {
+    if (now - entry.at > TTL_MS) continue;
+    let params: { page?: unknown; search?: unknown } = {};
+    try {
+      params = JSON.parse(key) as { page?: unknown; search?: unknown };
+    } catch {
+      continue;
+    }
+    if (params.page != null && Number(params.page) !== 1) continue;
+    if (params.search) continue;
+
+    const next = cloneAndPrependListPayload(entry.data, app);
+    if (next) remember(key, { at: Date.now(), data: next });
+  }
+}
+
 export function setCachedApplicationsList(key: string, data: unknown) {
   remember(key, { at: Date.now(), data });
 }

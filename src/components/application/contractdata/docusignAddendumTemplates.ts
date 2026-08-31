@@ -19,6 +19,7 @@ export const DOCUSIGN_ADDENDUM_LAYOUT_KEYS = {
     ADDENDUM_CA: "addendum_ca",
     ADDENDUM_NY: "addendum_ny",
     ADDENDUM_VA: "addendum_va",
+    ADDENDUM_EPA: "addendum_epa",
 } as const;
 
 export type DocusignAddendumLayoutKey =

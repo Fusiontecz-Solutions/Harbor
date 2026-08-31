@@ -7,6 +7,7 @@ import {
 } from "@/lib/offerRepaymentCalculations";
 import { formatRateUS } from "@/lib/utils";
 import { formatUSD, parseMoneyInput } from "@/utils/formatCurrency";
+import { isAddressPlaceholderToken, isUsableDisclosureStreetLine, toUsStateAbbreviation } from "@/utils/usStateMatch";
 import {
     clearParty2PrefillFieldPayload,
     clearParty2PrefillPartial,
@@ -660,15 +661,42 @@ export const buildContractPrefillFields = ({
         ...mapIds(FIELD_IDS.legalName, "Legal Name", legalName),
         ...mapIds(FIELD_IDS.stateOfInc, "State Of Incorporation", state),
         ...mapIds(FIELD_IDS.doingBusinessAs, "Doing Business As", doingBusinessAs),
-        ...mapIds(FIELD_IDS.businessAddress, "Business Address", businessAddress),
+        ...mapIds(
+            FIELD_IDS.businessAddress,
+            "Business Address",
+            composeUsMailingAddress({
+                line: businessAddress,
+                city: businessAddressCity,
+                state: businessAddressState,
+                zip: businessAddressZip,
+            }),
+        ),
         ...mapIds(FIELD_IDS.businessAddressCity, "City", businessAddressCity),
         ...mapIds(FIELD_IDS.businessAddressState, "State", businessAddressState),
         ...mapIds(FIELD_IDS.businessAddressZip, "Zip", businessAddressZip),
-        ...mapIds(FIELD_IDS.businessAddressContract, "Contract Address", businessAddressContract),
+        ...mapIds(
+            FIELD_IDS.businessAddressContract,
+            "Contract Address",
+            composeUsMailingAddress({
+                line: businessAddressContract,
+                city: businessAddressContractCity,
+                state: businessAddressContractState,
+                zip: businessAddressContractZip,
+            }),
+        ),
         ...mapIds(FIELD_IDS.businessAddressContractCity, "Contract City", businessAddressContractCity),
         ...mapIds(FIELD_IDS.businessAddressContractState, "Contract State", businessAddressContractState),
         ...mapIds(FIELD_IDS.businessAddressContractZip, "Contract Zip", businessAddressContractZip),
-        ...mapIds(FIELD_IDS.guarantorAddress, "Guarantor Address", guarantorAddress),
+        ...mapIds(
+            FIELD_IDS.guarantorAddress,
+            "Guarantor Address",
+            composeUsMailingAddress({
+                line: guarantorAddress,
+                city: guarantorAddressCity,
+                state: guarantorAddressState,
+                zip: guarantorAddressZip,
+            }),
+        ),
         ...mapIds(FIELD_IDS.guarantorAddressCity, "Guarantor City", guarantorAddressCity),
         ...mapIds(FIELD_IDS.guarantorAddressState, "Guarantor State", guarantorAddressState),
         ...mapIds(FIELD_IDS.guarantorAddressZip, "Guarantor Zip", guarantorAddressZip),
@@ -941,9 +969,8 @@ function mergeNonemptyPrefillPartial<T extends Record<string, unknown>>(
 }
 
 /**
- * DocuSign page 1 expects street in `business_address` and city/state/zip in separate tabs.
- * Legacy contract rows sometimes store the full line in `businessAddress`; strip the suffix
- * when split city/state/zip columns are also present.
+ * Strip city/state/ZIP from a stored full mailing line when those parts are also
+ * present as separate columns (Alliance / ACH split tabs).
  */
 export function streetOnlyWhenPartsSplit(args: {
     line?: unknown;
@@ -977,6 +1004,53 @@ export function streetOnlyWhenPartsSplit(args: {
         }
     }
     return line;
+}
+
+/**
+ * Harbor / Clear Capital page 1 Business Address and Contact Address are one line.
+ * Keep a clean street, then join city / state / ZIP: `204 S MADISON ST, GREENWOOD, MO 64083`.
+ */
+export function composeUsMailingAddress(args: {
+    line?: unknown;
+    city?: unknown;
+    state?: unknown;
+    zip?: unknown;
+}): string {
+    const street = streetOnlyWhenPartsSplit(args);
+    const city = str(args.city);
+    const stateZip = [str(args.state), str(args.zip)].filter(Boolean).join(" ");
+    if (city && street.toLowerCase().includes(city.toLowerCase())) return street;
+    const cityLine = [city, stateZip].filter(Boolean).join(", ");
+    return [street, cityLine].filter(Boolean).join(", ");
+}
+
+function applyAchHolderAddressTabMapping(
+    partial: Partial<BuildContractPrefillFieldsArgs>,
+): Partial<BuildContractPrefillFieldsArgs> {
+    const out = { ...partial };
+    if (
+        str(out.achAuthorizationAccountHolderCity) ||
+        str(out.achAuthorizationAccountHolderState) ||
+        str(out.achAuthorizationAccountHolderZip)
+    ) {
+        out.achAuthorizationAccountHolderAddress = streetOnlyWhenPartsSplit({
+            line: out.achAuthorizationAccountHolderAddress,
+            city: out.achAuthorizationAccountHolderCity,
+            state: out.achAuthorizationAccountHolderState,
+            zip: out.achAuthorizationAccountHolderZip,
+        });
+    }
+    if (!isUsableDisclosureStreetLine(out.achAuthorizationAccountHolderAddress)) {
+        out.achAuthorizationAccountHolderAddress = "";
+    }
+    if (isAddressPlaceholderToken(out.achAuthorizationAccountHolderCity)) {
+        out.achAuthorizationAccountHolderCity = "";
+    }
+    const achState = toUsStateAbbreviation(out.achAuthorizationAccountHolderState);
+    if (achState) out.achAuthorizationAccountHolderState = achState;
+    const achBankState = toUsStateAbbreviation(out.achAuthorizationAccountHolderBankState);
+    if (achBankState) out.achAuthorizationAccountHolderBankState = achBankState;
+    return out;
 }
 
 function applySplitAddressStreetFields(
@@ -1023,7 +1097,7 @@ function applySplitAddressStreetFields(
             zip: out.guarantorAddressZip,
         });
     }
-    return out;
+    return applyAchHolderAddressTabMapping(out);
 }
 
 /**
@@ -3051,6 +3125,11 @@ export function applyOwnerRowsToPrefillMerge(
             if (n1) {
                 syncPrimaryPartyNameToPrefillPartial(partial as Record<string, unknown>, n1);
             }
+            const email1 = partyEmail(o1);
+            if (email1) {
+                if (!str(partial.guarantorEmail)) partial.guarantorEmail = email1;
+                if (!str(partial.clientEmail)) partial.clientEmail = email1;
+            }
             if (ssn1) {
                 partial.guarantySs = ssn1;
                 partial.guarantyOwner1Ss = ssn1;
@@ -3398,7 +3477,7 @@ export function applySeparatedAddressPrefillFields(
     });
 
     return applyCanonicalOwnerAddressPrefillFields(
-        applyCanonicalBusinessAddressPrefillFields(repaired),
+        applyAchHolderAddressTabMapping(applyCanonicalBusinessAddressPrefillFields(repaired)),
     );
 }
 
@@ -3666,6 +3745,11 @@ export function getApplicationClientPrefillArgs(anyApp: unknown): Partial<BuildC
     const street = [r.businessAddress1, r.businessAddress2].filter(Boolean).join(", ").trim();
     const ownerStreet = [r.ownerAddress1, r.ownerAddress2].filter(Boolean).join(", ").trim();
     const dba = String(r.dba || bi?.dba || "");
+    const client = (a?.client ?? {}) as Record<string, any>;
+    const bizAddr =
+        client.business?.address && typeof client.business.address === "object"
+            ? client.business.address
+            : {};
     return {
         customerName,
         legalName,
@@ -3674,7 +3758,13 @@ export function getApplicationClientPrefillArgs(anyApp: unknown): Partial<BuildC
         doingBusinessAs: dba,
         securityDoingBusinessAs: dba,
         achAuthorizationAccountHolderDba: dba,
-        businessAddress: String(street || bi?.businessAddress || ""),
+        businessAddress: String(
+            street ||
+                client.businessAddress ||
+                bizAddr.address1 ||
+                bi?.businessAddress ||
+                "",
+        ),
         businessAddressCity: String(r.businessCity || bi?.city || ""),
         businessAddressState: String(r.businessState || bi?.state || ""),
         businessAddressZip: String(r.businessZip || bi?.zip || ""),
@@ -3902,7 +3992,13 @@ export function resolveBalanceTransferMerchantContext(
     ]
         .filter(Boolean)
         .join(", ");
-    const physicalAddress = contractLine || appLine || str(sctx?.recipientAddress);
+    const physicalAddress = (
+        contractLine && isUsableDisclosureStreetLine(contractLine) ? contractLine : ""
+    ) || (appLine && isUsableDisclosureStreetLine(appLine) ? appLine : "") || (
+        sctx?.recipientAddress && isUsableDisclosureStreetLine(sctx.recipientAddress)
+            ? String(sctx.recipientAddress).trim()
+            : ""
+    );
 
     return {
         clientName,
@@ -4103,6 +4199,9 @@ function finalizePrefillDefaultsForOwnerCount(
         }
     }
     clearParty2PrefillPartial(out as Record<string, unknown>, ownerCount);
+    if (!str(out.guarantorEmail) && str(out.clientEmail)) {
+        out.guarantorEmail = str(out.clientEmail);
+    }
     return out;
 }
 

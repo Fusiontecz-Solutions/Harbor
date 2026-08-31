@@ -56,7 +56,7 @@ const dateField = (
 export const californiaDisclosureMergeRoleFormFields: CaliforniaDisclosureMergeRoleFormField[] =
     [
         textField("funding_provided", 1, 188, 124),
-        textField("funding_provided_direct", 1, 345, 149),
+        textField("funding_provided_direct", 1, 294, 154),
         textField("estimated_annual_percentage_rate", 1, 185, 292, 70),
         textField("avarage_monthly_income", 1, 293, 348),
         textField("finance_charge", 1, 187, 444),
@@ -66,7 +66,8 @@ export const californiaDisclosureMergeRoleFormFields: CaliforniaDisclosureMergeR
         textField("estimated_payment", 1, 312, 676),
         textField("payement_exceeded_percent", 1, 439, 676, 40),
         textField("monthly_income", 1, 411, 688),
-        textField("payement_exceeded_percent", 2, 184, 160, 40),
+        textField("income_lookback_months", 2, 229, 73, 28),
+        textField("payement_exceeded_percent", 2, 184, 119, 40),
         textField("estimated_term", 2, 184, 349, 60),
         textField("avarage_monthly_income", 2, 350, 402),
         textField("finance_charge", 2, 371, 437),
@@ -83,7 +84,7 @@ export const californiaDisclosureMergeRoleFormFields: CaliforniaDisclosureMergeR
 export const weeklyCaliforniaDisclosureMergeRoleFormFields: CaliforniaDisclosureMergeRoleFormField[] =
     [
         textField("funding_provided", 1, 190, 146),
-        textField("funding_provided_direct", 1, 443, 123),
+        textField("funding_provided_direct", 1, 443, 128),
         textField("estimated_annual_percentage_rate", 1, 183, 289, 70),
         textField("avarage_monthly_income", 1, 310, 342),
         textField("finance_charge", 1, 186, 448),
@@ -138,6 +139,8 @@ export interface CaliforniaDisclosureContractPrefillFields {
     avarageMonthlyIncome?: string;
     payementExceededPercent?: string;
     monthlyIncome?: string;
+    /** Daily NO REFI “for the last ____ months” (weekly PDF prints 4). */
+    incomeLookbackMonths?: string;
     financeCharge?: string;
     funderName?: string;
     recipientName?: string;
@@ -162,6 +165,7 @@ const FIELD_IDS = {
     avarageMonthlyIncome: ["avarage_monthly_income"],
     payementExceededPercent: ["payement_exceeded_percent"],
     monthlyIncome: ["monthly_income"],
+    incomeLookbackMonths: ["income_lookback_months"],
     financeCharge: ["finance_charge"],
     funderName: ["funder_name"],
     recipientName: ["client_name", "disclosure_merchant_name"],
@@ -192,6 +196,7 @@ export function buildCaliforniaDisclosureContractPrefillFields({
     avarageMonthlyIncome = "",
     payementExceededPercent = "",
     monthlyIncome = "",
+    incomeLookbackMonths = "4",
     financeCharge = "",
     funderName = PLATFORM_DISCLOSURE_FUNDER_NAME.toUpperCase(),
     recipientName = "",
@@ -229,6 +234,7 @@ export function buildCaliforniaDisclosureContractPrefillFields({
             payementExceededPercent,
         ),
         ...mapIds(FIELD_IDS.monthlyIncome, "Monthly Income", monthlyIncome),
+        ...mapIds(FIELD_IDS.incomeLookbackMonths, "Income Lookback Months", incomeLookbackMonths),
         ...mapIds(FIELD_IDS.financeCharge, "Finance Charge", financeCharge),
         ...mapIds(FIELD_IDS.funderName, "Funder Name", funderName),
         ...mapIds(FIELD_IDS.recipientName, "Merchant Name", recipientName),

@@ -1,5 +1,3 @@
-import { formatUSD } from "@/utils/formatCurrency";
-
 /** Default signer role on Harbor DocuSign templates (must match template role name exactly). */
 export const DOCUSIGN_DEFAULT_SIGNER_ROLE = "Signer";
 
@@ -31,17 +29,16 @@ export const CONTRACT_ENVELOPE_LENDER_NAME = String(
 /** @deprecated Use CONTRACT_ENVELOPE_LENDER_NAME */
 export const DOCUSIGN_EMAIL_LENDER_NAME = CONTRACT_ENVELOPE_LENDER_NAME;
 
-/** Contract envelope email subject: {FunderName}: BusinessName $Offer Amount */
+/** Contract envelope email subject: {FunderName}: BusinessName */
 export function buildContractEnvelopeEmailSubject(
     businessName: string,
-    offerAmount?: number | string | null,
+    _offerAmount?: number | string | null,
     funderName?: string | null,
 ): string {
     const business = String(businessName || "").trim() || "Business";
-    const amount = formatUSD(offerAmount, { fallback: "$0.00" });
     const lender =
         String(funderName || "").trim() || CONTRACT_ENVELOPE_LENDER_NAME;
-    return `${lender}: ${business} ${amount}`;
+    return `${lender}: ${business}`;
 }
 
 /** ACH / standalone envelope subject / PDF name: {FunderName}: BusinessName - ACH */

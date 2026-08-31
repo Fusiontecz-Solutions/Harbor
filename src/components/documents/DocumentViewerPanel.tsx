@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { Download, FileText, Loader2 } from "lucide-react";
-import { Document, Page, pdfjs } from "react-pdf";
+import { Document, Page } from "react-pdf";
 import "react-pdf/dist/Page/AnnotationLayer.css";
 import "react-pdf/dist/Page/TextLayer.css";
+import "@/lib/pdfjsWorker";
 import { Button } from "@/components/ui/button";
 import {
     isImageMimeOrName,
@@ -10,8 +11,6 @@ import {
     isTextMimeOrName,
     resolveDocumentPreview,
 } from "@/lib/documentPreview";
-
-pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
 
 type DocumentViewerPanelProps = {
     fileUrl: string;
@@ -68,8 +67,8 @@ function PdfPages({ fileUrl, minHeightClassName }: { fileUrl: string; minHeightC
                               pageNumber={i + 1}
                               width={pageWidth}
                               className="bg-white shadow-md"
-                              renderTextLayer
-                              renderAnnotationLayer
+                              renderTextLayer={i < 2}
+                              renderAnnotationLayer={false}
                           />
                       ))
                     : null}

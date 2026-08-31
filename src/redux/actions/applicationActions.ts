@@ -1,13 +1,17 @@
 import { createAsyncThunk } from '@reduxjs/toolkit';
 import { axiosGet, axiosPost, axiosPut, axiosPatch, axiosDelete, axiosPostFormData } from '../axios';
+import { invalidateClientsListCache } from '@/lib/clientsListCache';
 import {
     applicationsListParamsCacheKey,
     buildApplicationsListUrl,
     getCachedApplicationsList,
     invalidateApplicationsListCache,
+    prependApplicationToListCache,
     setCachedApplicationsList,
     coalesceApplicationsListFetch,
 } from '@/lib/applicationsListCache';
+import { invalidateApplicationsListQueries } from '@/lib/applicationsListQuerySync';
+import { invalidateUnderwriterPipelineCounts } from '@/lib/underwriterPipelineCounts';
 import { recordApplicationDetailResponse, invalidateApplicationDetailCache } from '@/lib/applicationDetailCache';
 import type {
     CreateApplicationPayload,
@@ -22,24 +26,28 @@ export const createApplication = createAsyncThunk(
     'application/create',
     async ({ data, files }: { data: CreateApplicationPayload; files?: File[] }, { rejectWithValue }) => {
         try {
-            const formData = new FormData();
-
-            // Append form fields
-            Object.entries(data).forEach(([key, value]) => {
-                if (value !== undefined && value !== null && value !== '') {
-                    formData.append(key, String(value));
-                }
-            });
-
-            // Append files only if available
-            if (files && files.length > 0) {
-                files.forEach((file) => {
-                    formData.append('files', file);
-                });
+            const hasFiles = Boolean(files && files.length > 0);
+            const response = hasFiles
+                ? await axiosPostFormData('/applications', (() => {
+                    const formData = new FormData();
+                    Object.entries(data).forEach(([key, value]) => {
+                        if (value !== undefined && value !== null && value !== '') {
+                            formData.append(key, String(value));
+                        }
+                    });
+                    files!.forEach((file) => {
+                        formData.append('files', file);
+                    });
+                    return formData;
+                })())
+                : await axiosPost('/applications', data);
+            const created = response.data?.data ?? response.data;
+            prependApplicationToListCache(created);
+            invalidateApplicationsListQueries();
+            invalidateUnderwriterPipelineCounts();
+            if (data.createNewClient) {
+                invalidateClientsListCache();
             }
-
-            const response = await axiosPostFormData('/applications', formData);
-            await invalidateApplicationsListCache();
             return response.data;
         } catch (error: any) {
             console.error('Create application error:', error);

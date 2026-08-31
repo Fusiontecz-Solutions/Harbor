@@ -35,8 +35,13 @@ export const DISCLOSURE_EDITOR_FIELD_CATALOG: ReadonlyArray<{ id: string; label:
         id: "disclosure_avg_monthly_revenue",
         label: "Estimated merchant average monthly revenue",
     },
+    { id: "disclosure_purchase_price", label: "Purchase price / amount of financing" },
     { id: "disclosure_amount_financed", label: "Amount financed" },
     { id: "disclosure_recipient_funds", label: "Recipient funds" },
+    {
+        id: "disclosure_fees_deducted",
+        label: "Fees deducted or withheld at disbursement",
+    },
     { id: "disclosure_apr", label: "Estimated annual percentage rate (APR)" },
     { id: "disclosure_finance_charge", label: "Finance charge" },
     { id: "disclosure_total_payment", label: "Estimated total payment amount" },
@@ -69,21 +74,28 @@ const EDITOR_TO_PDF_FIELD_IDS: Record<string, readonly string[]> = {
         "avarage_monthly_income",
         "etimated_average_income",
     ],
+    disclosure_purchase_price: [
+        "disclosure_purchase_price",
+        "total_amount_commercial_financing",
+        "total_amount_sales_based_financing",
+        "total_amount_business_fund",
+        "total_amount_of_fund_provided",
+        "total_amount_of_funds_provided",
+        // Do NOT alias onto CA/NY `funding_provided` (that box is net after fees).
+    ],
     disclosure_amount_financed: [
         "disclosure_amount_financed",
-        "total_amount_business_fund",
+        "amountFinanced",
         // funding_provided is forced from purchase_amount (offer) in the envelope expander —
         // do not alias amount-financed-after-fees onto it.
-        // Connecticut total_amount_commercial_financing = purchase price (forced in expand).
-        "amountFinanced",
-        "total_amount_of_fund_provided",
-        "total_amount_sales_based_financing",
+        // Connecticut total_commerical_financing (disbursement) is forced in expand.
     ],
     disclosure_recipient_funds: [
         "disclosure_recipient_funds",
         "total_amount_of_fund_disbursed",
         "total_amount_fund_disbursed",
         "disbursement_amount",
+        "funding_provided_direct",
         // Do NOT alias onto main RPA `net_to_merchant`.
     ],
     /** Connecticut / Virginia page-1 fees deducted from amount financed. */
@@ -169,6 +181,7 @@ const EDITOR_TO_PDF_FIELD_IDS: Record<string, readonly string[]> = {
         "Signature_date",
         "signature_date",
         "signature1_date",
+        "initials_date",
     ],
 };
 
@@ -195,6 +208,13 @@ function parseDisclosurePrefillMoney(value: unknown): number | undefined {
     if (!raw) return undefined;
     const n = Number.parseFloat(raw.replace(/[$,%\s]/g, ""));
     return Number.isFinite(n) ? n : undefined;
+}
+
+/** Non-zero money string; treats "", "0", and "0.00" as missing. */
+function positiveMoneyString(value: unknown): string {
+    const raw = String(value ?? "").trim();
+    const n = parseDisclosurePrefillMoney(raw);
+    return n !== undefined && n > 0 ? raw : "";
 }
 
 /** Collapse legacy PDF-key blobs into canonical editor keys for the form UI. */
@@ -253,13 +273,13 @@ function applyConnecticutPage1AmountFields(
     out: Record<string, string>,
 ): void {
     const hasSeparatePurchase = Boolean(
-        String(editorValues.funding_provided ?? "").trim() ||
-            String(editorValues.disclosure_purchase_price ?? "").trim(),
+        String(editorValues.disclosure_purchase_price ?? "").trim() ||
+            String(editorValues.funding_provided ?? "").trim(),
     );
     const purchase = String(
-        editorValues.funding_provided ??
-            editorValues.disclosure_purchase_price ??
-            out.funding_provided ??
+        editorValues.disclosure_purchase_price ??
+            editorValues.funding_provided ??
+            out.total_amount_commercial_financing ??
             out.purchase_amount ??
             "",
     ).trim();
@@ -267,12 +287,12 @@ function applyConnecticutPage1AmountFields(
     const recipientRaw = String(
         editorValues.disclosure_recipient_funds ?? out.disclosure_recipient_funds ?? "",
     ).trim();
-    let fees = String(
+    let fees = positiveMoneyString(
         editorValues.disclosure_fees_deducted ??
             out.deducted_at_disbursement ??
             out.fees_deducted ??
             "",
-    ).trim();
+    );
 
     const purchaseFinal = purchase || (!hasSeparatePurchase ? amountFinancedRaw : "");
     const purchaseN = parseDisclosurePrefillMoney(purchaseFinal);
@@ -280,14 +300,17 @@ function applyConnecticutPage1AmountFields(
     const recipientN = parseDisclosurePrefillMoney(recipientRaw);
     let feesN = parseDisclosurePrefillMoney(fees);
 
-    if (
-        !fees &&
-        purchaseN !== undefined &&
-        amountN !== undefined &&
-        amountN < purchaseN - 0.009
-    ) {
-        fees = formatDisclosureUsd(Math.max(0, purchaseN - amountN));
-        feesN = parseDisclosurePrefillMoney(fees);
+    if (!fees && purchaseN !== undefined) {
+        const netAfterFees =
+            amountN !== undefined && amountN < purchaseN - 0.009
+                ? amountN
+                : recipientN !== undefined && recipientN < purchaseN - 0.009
+                  ? recipientN
+                  : undefined;
+        if (netAfterFees !== undefined) {
+            fees = formatDisclosureUsd(Math.max(0, purchaseN - netAfterFees));
+            feesN = parseDisclosurePrefillMoney(fees);
+        }
     }
 
     let amountFinanced = "";
@@ -344,27 +367,57 @@ export function expandDisclosureEditorValuesToPdfFields(
         }
     }
 
-    // Connecticut / Virginia page-1 "fees deducted" = amount financed − recipient funds
-    // when not already set explicitly (editor may omit this derived slot).
-    const explicitFees = String(editorValues.disclosure_fees_deducted ?? "").trim();
+    // Fees deducted = origination (underwriting + platform), never amount-financed − recipient
+    // (those two are both net on no-refi, which previously wrote 0.00 on every disclosure).
+    const explicitFees = positiveMoneyString(editorValues.disclosure_fees_deducted);
     const financed = parseDisclosurePrefillMoney(
         editorValues.disclosure_amount_financed ?? out.disclosure_amount_financed,
     );
     const recipient = parseDisclosurePrefillMoney(
         editorValues.disclosure_recipient_funds ?? out.disclosure_recipient_funds,
     );
-    const derivedFees =
-        explicitFees ||
-        (financed !== undefined && recipient !== undefined
-            ? formatDisclosureUsd(Math.max(0, financed - recipient))
-            : "");
+    const purchaseAmt = parseDisclosurePrefillMoney(
+        editorValues.disclosure_purchase_price ??
+            editorValues.funding_provided ??
+            out.total_amount_commercial_financing ??
+            out.purchase_amount,
+    );
+    const netAfterFees =
+        financed !== undefined &&
+        purchaseAmt !== undefined &&
+        financed < purchaseAmt - 0.009
+            ? financed
+            : recipient !== undefined &&
+                purchaseAmt !== undefined &&
+                recipient < purchaseAmt - 0.009
+              ? recipient
+              : financed;
+    const derivedFromPurchase =
+        purchaseAmt !== undefined &&
+        netAfterFees !== undefined &&
+        netAfterFees < purchaseAmt - 0.009
+            ? formatDisclosureUsd(Math.max(0, purchaseAmt - netAfterFees))
+            : "";
+    const derivedFees = explicitFees || derivedFromPurchase;
     if (derivedFees) {
         for (const pdfId of EDITOR_TO_PDF_FIELD_IDS.disclosure_fees_deducted ?? []) {
-            if (!String(out[pdfId] ?? "").trim()) out[pdfId] = derivedFees;
+            if (!positiveMoneyString(out[pdfId])) out[pdfId] = derivedFees;
         }
     }
 
     applyConnecticutPage1AmountFields(editorValues, out);
+
+    if (!String(out.funding_provided_direct ?? "").trim()) {
+        out.funding_provided_direct =
+            String(out.disclosure_recipient_funds ?? "").trim() ||
+            String(out.funding_provided ?? "").trim();
+    }
+    if (!String(out.income_lookback_months ?? "").trim()) {
+        out.income_lookback_months = "4";
+    }
+    if (!String(out.estimated_annual_percentage_rate ?? "").trim()) {
+        out.estimated_annual_percentage_rate = String(out.disclosure_apr ?? "").trim();
+    }
 
     const INLINE_PERCENT_TAB_IDS = new Set([
         "payement_exceeded_percent",
@@ -418,7 +471,7 @@ export function buildDisclosureEditorFieldsFromContext(
         ? ctx.actualDisbursement || netFunding
         : netFunding;
     const originationFee =
-        ctx.feesDeducted?.trim() ||
+        positiveMoneyString(ctx.feesDeducted) ||
         (coercePositiveMoney(ctx.brokerFeePaidToBroker)
             ? String(ctx.brokerFeePaidToBroker).trim()
             : "");
@@ -452,7 +505,7 @@ export function buildDisclosureEditorFieldsFromContext(
         funding_provided_direct: ctx.isRefinance
             ? ctx.actualDisbursement || netFunding
             : netFunding || ctx.fundingProvidedDirect || ctx.fundingProvided || "",
-        disclosure_fees_deducted: originationFee || ctx.feesDeducted || "",
+        disclosure_fees_deducted: originationFee,
         disclosure_apr: ctx.estimatedAnnualPercentageRate ?? "",
         disclosure_finance_charge: ctx.financeCharge || ctx.totalDollarCost || "",
         /** Receivables = repayment amount. */

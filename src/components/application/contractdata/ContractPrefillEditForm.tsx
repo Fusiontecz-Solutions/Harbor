@@ -267,8 +267,8 @@ function contractPrefillSectionKeys(section: ContractPrefillSection): ContractPr
 }
 
 /**
- * Harbor View Capital 2026 contract layout only (`contract.layout.json` data labels).
- * Omits legacy addendum fields that are not on the Harbor PDF.
+ * Shared Harbor View Capital / Clear Capital 2026 contract (`contract.layout.json` data labels).
+ * Omits legacy addendum fields that are not on the main contract PDF.
  * `refinanceAmount` is included for recipient-funds math even when not a DocuSign placement.
  */
 const CONTRACT_PREFILL_SECTIONS: ContractPrefillSection[] = [

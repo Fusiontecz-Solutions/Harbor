@@ -143,6 +143,9 @@ export const applicationsSlice = createSlice({
             state.isRefreshing = false;
             state.error = null;
         },
+        patchApplicationFields: (state, action: PayloadAction<Record<string, unknown>>) => {
+            patchApplicationInList(state, action.payload);
+        },
     },
     extraReducers: (builder) => {
         builder
@@ -345,6 +348,9 @@ export const applicationDetailSlice = createSlice({
             state.loading = false;
             state.isRefreshing = false;
             state.error = null;
+        },
+        patchApplicationDetailFields: (state, action: PayloadAction<Record<string, unknown>>) => {
+            mergeApplicationDetailFromUpdate(state, action.payload);
         },
     },
     extraReducers: (builder) => {
@@ -851,13 +857,14 @@ export const uploadDocumentsSlice = createSlice({
 });
 
 // Export actions
-export const { clearApplications, hydrateApplicationsListFromCache } =
+export const { clearApplications, hydrateApplicationsListFromCache, patchApplicationFields } =
     applicationsSlice.actions;
 export const { clearApplicationStats } = applicationStatsSlice.actions;
 export const { resetCreateApplication } = createApplicationSlice.actions;
 export const {
     clearApplicationDetail,
     hydrateApplicationDetailFromCache,
+    patchApplicationDetailFields,
 } = applicationDetailSlice.actions;
 export const setApplicationDetail = hydrateApplicationDetailFromCache;
 export const { clearClientApplications } = clientApplicationsSlice.actions;

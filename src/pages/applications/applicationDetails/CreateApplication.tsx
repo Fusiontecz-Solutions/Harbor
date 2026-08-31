@@ -13,14 +13,13 @@ import {
     uploadApplicationDocuments,
     getApplicationsByClient,
 } from '@/redux/actions/applicationActions'
-import { getClients, createClient } from '@/redux/actions/clientActions'
+import { getClients } from '@/redux/actions/clientActions'
 import {
     resetCreateApplication,
     resetUpdateApplication,
     clearApplicationDetail,
     resetUploadDocuments,
 } from '@/redux/slices/applicationSlice'
-import { resetCreateClient } from '@/redux/slices/clientSlice'
 import { toast } from 'react-toastify'
 import {
     ArrowLeft,
@@ -89,13 +88,6 @@ interface ApplicationFormValues {
 const DEFAULT_APPLICATION_PRIORITY = 'High'
 const DEFAULT_APPLICATION_TYPE = 'New'
 const REFINANCE_APPLICATION_TYPE = 'Refinance'
-const emptyClientAddress = {
-    address1: '',
-    address2: '',
-    city: '',
-    state: '',
-    zipCode: '',
-}
 
 // Validation Schema
 const applicationSchema = yup.object({
@@ -238,7 +230,6 @@ const CreateApplication = () => {
         useState<ClientDealForRefinance | null>(null)
     const [clientDeals, setClientDeals] = useState<ClientDealForRefinance[]>([])
     const [clientDealsLoading, setClientDealsLoading] = useState(false)
-    const [creatingClient, setCreatingClient] = useState(false)
 
     // Determine if we're in edit mode
     const isEditMode = !!applicationId
@@ -350,10 +341,11 @@ const CreateApplication = () => {
         setSelectedRefinanceDeal(null)
     }, [watchedClient])
 
-    // Fetch clients on mount
+    // Fetch clients when the existing-client picker is shown
     useEffect(() => {
+        if (isCreatingNewClient) return
         dispatch(getClients({ limit: 100 }))
-    }, [dispatch])
+    }, [dispatch, isCreatingNewClient])
 
     // Fetch application data when in edit mode
     useEffect(() => {
@@ -586,71 +578,23 @@ const CreateApplication = () => {
                 toast.error('Business name and owner first name are required to create a client.')
                 return
             }
-            setCreatingClient(true)
-            try {
-                const created = await dispatch(
-                    createClient({
-                        business: {
-                            name: businessName,
-                            email: '',
-                            number: String(data.newBusinessPhone ?? '').trim(),
-                            website: '',
-                            incorporationDate: '',
-                            incorporationState: '',
-                            businessEntityType: '',
-                            einNumber: String(data.newEin ?? '').trim(),
-                            monthlyRevenue: '',
-                            address: { ...emptyClientAddress },
-                        },
-                        owners: [
-                            {
-                                firstName: ownerFirstName,
-                                middleName: '',
-                                lastName: String(data.newOwnerLastName ?? '').trim(),
-                                email: '',
-                                mobileNumber: '',
-                                dateOfBirth: '',
-                                ssn: '',
-                                ficoScore: '',
-                                ownershipStartDate: '',
-                                ownershipPercentage: '',
-                                address: { ...emptyClientAddress },
-                            },
-                        ],
-                    }),
-                ).unwrap()
-                const createdClient = (created as { data?: { _id?: string; id?: string } })?.data ?? created
-                clientId = String(
-                    (createdClient as { _id?: string; id?: string })?._id ??
-                        (createdClient as { id?: string })?.id ??
-                        '',
-                ).trim()
-                if (!clientId) {
-                    toast.error('Client was created but its id could not be determined.')
-                    return
-                }
-                dispatch(resetCreateClient())
-                void dispatch(getClients({ limit: 100 }))
-            } catch (err: unknown) {
-                const message =
-                    typeof err === 'string'
-                        ? err
-                        : (err as { message?: string })?.message || 'Failed to create client'
-                toast.error(String(message))
-                return
-            } finally {
-                setCreatingClient(false)
-            }
-        }
-
-        if (!clientId) {
+        } else if (!clientId) {
             toast.error('Client is required.')
             return
         }
 
         const existingType = String(applicationData?.type ?? '').trim()
         const payload = {
-            client: clientId,
+            ...(createNewClient
+                ? {
+                      createNewClient: true,
+                      newBusinessName: String(data.newBusinessName ?? '').trim(),
+                      newOwnerFirstName: String(data.newOwnerFirstName ?? '').trim(),
+                      newOwnerLastName: String(data.newOwnerLastName ?? '').trim(),
+                      newEin: String(data.newEin ?? '').trim(),
+                      newBusinessPhone: String(data.newBusinessPhone ?? '').trim(),
+                  }
+                : { client: clientId }),
             loanAmount: (() => {
                 if (!data.loanAmount || !String(data.loanAmount).trim()) return null
                 const n = parseNumberUS(data.loanAmount)
@@ -1341,7 +1285,7 @@ const CreateApplication = () => {
                             <Button
                                 type="submit"
                                 className="px-4 shadow-[0px_0px_0px_1px_#5E5ADB] py-2 gap-2 bg-[image:var(--brand-gradient)] text-white hover:opacity-90 cursor-pointer disabled:opacity-50 disabled:pointer-events-none"
-                                loading={isLoading || creatingClient}
+                                loading={isLoading}
                                 disabled={
                                     !isValid ||
                                     (isRefinanceType && !selectedRefinanceDeal)

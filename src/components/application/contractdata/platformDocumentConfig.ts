@@ -8,6 +8,7 @@ export const PLATFORM_LAYOUT_KEYS = {
     addendum_ca: "addendum_ca",
     addendum_ny: "addendum_ny",
     addendum_va: "addendum_va",
+    addendum_epa: "addendum_epa",
 } as const;
 
 export type PlatformLayoutKey =

@@ -18,6 +18,10 @@ import {
     resolveCaliforniaEstimatedTermDays,
 } from "./california_disclosure";
 import { getStateDisclosurePrefillFieldsByName } from "./stateDisclosurePrefill";
+import {
+    buildDisclosureEditorFieldsFromContext,
+    expandDisclosureEditorValuesToPdfFields,
+} from "./disclosureEditorFields";
 
 function fieldMap(fields: { id: string; value: string }[]): Record<string, string> {
     const out: Record<string, string> = {};
@@ -140,6 +144,33 @@ test("TEST 3 California REFI Daily funding L/R", () => {
     assert.equal(map.funding_provided_direct, "65000.00");
 });
 
+test("California daily NO REFI fills direct funding and lookback months", () => {
+    const fields = getStateDisclosurePrefillFieldsByName("daily_california", {
+        fundingProvided: "500.00",
+        fundingDisbursed: "500.00",
+        netContractedFunding: "500.00",
+        totalRepayment: "725.00",
+        financeCharge: "225.00",
+        estimatedPayment: "2.90",
+        estimatedMonthlyCost: "58.00",
+        estimatedAnnualPercentageRate: "199.60",
+        averageMonthlyIncome: "8000.00",
+        paymentExceededPercent: "2.90",
+        estimatedTermDays: "60",
+        frequency: "Daily",
+        isRefinance: false,
+        recipientName: "BIZ LLC",
+        funderName: "Clear Capital",
+        signatureDate: "08/17/2026",
+    });
+    const map = fieldMap(fields);
+    assert.equal(map.funding_provided, "500.00");
+    assert.equal(map.funding_provided_direct, "500.00");
+    assert.equal(map.estimated_annual_percentage_rate, "199.60");
+    assert.equal(map.income_lookback_months, "4");
+    assert.equal(map.payement_exceeded_percent, "2.90");
+});
+
 // --- TEST 4: Connecticut + REFI ---
 test("TEST 4 Connecticut REFI disbursement", () => {
     const m = calculateRefinanceDealMetrics({
@@ -181,6 +212,7 @@ test("TEST 4 Connecticut REFI disbursement", () => {
     const map = fieldMap(fields);
     assert.equal(map.total_commerical_financing, "40000.00");
     assert.equal(map.total_amount_commercial_financing, "100000.00");
+    assert.equal(map.deducted_at_disbursement, "10000.00");
 });
 
 // --- TEST 5: FL REFI disbursed = net (not CA cash-out) ---
@@ -306,6 +338,13 @@ test("TEST 9 Virginia keeps weeks as weeks", () => {
         map.estimated_number_of_payments ??
         map.estimated_term;
     assert.equal(term, "20");
+    assert.equal(map.weekly_payments, "7500.00");
+    assert.equal(map.fordailypayments, "7500.00");
+    assert.equal(map.recipient_address, "1 MAIN ST");
+    assert.equal(map.fees_deducted, "10000.00");
+    assert.equal(map.disclosure_date, "08/11/2026");
+    assert.equal(map.signature_date, undefined);
+    assert.equal(map.signature_date2, undefined);
 });
 
 // --- TEST 10: Addendum rules ---
@@ -415,7 +454,61 @@ test("Guide Utah provider-pays field left blank", () => {
     const map = fieldMap(fields);
     assert.equal(map.purchase_amount, "90000.00");
     assert.equal(map.net_to_merchant, "90000.00");
+    assert.equal(map.total_amount_fund_disbursed, "90000.00");
     assert.ok(!map.appendix_underwriting_fees, "provider pays must be blank per Guide");
+});
+
+test("Editor catalog keeps fees deducted (not dropped before PDF expand)", () => {
+    const fields = buildDisclosureEditorFieldsFromContext({
+        fundingProvided: "100000.00",
+        fundingDisbursed: "89950.00",
+        netContractedFunding: "89950.00",
+        feesDeducted: "10050.00",
+        totalRepayment: "150000.00",
+        financeCharge: "50000.00",
+        isRefinance: false,
+        recipientName: "Biz LLC",
+    });
+    const map = fieldMap(fields);
+    assert.equal(map.disclosure_purchase_price, "100000.00");
+    assert.equal(map.disclosure_fees_deducted, "10050.00");
+});
+
+test("PDF expand writes origination onto CT/VA fees-deducted tabs", () => {
+    const out = expandDisclosureEditorValuesToPdfFields({
+        disclosure_purchase_price: "100000.00",
+        disclosure_amount_financed: "89950.00",
+        disclosure_recipient_funds: "89950.00",
+        disclosure_fees_deducted: "10050.00",
+        client_name: "Biz LLC",
+        funder_name: "CLEAR CAPITAL",
+    });
+    assert.equal(out.deducted_at_disbursement, "10050.00");
+    assert.equal(out.fees_deducted, "10050.00");
+    assert.equal(out.total_amount_commercial_financing, "100000.00");
+    assert.equal(out.total_amount_sales_based_financing, "100000.00");
+    assert.notEqual(out.deducted_at_disbursement, "0.00");
+});
+
+test("PDF expand derives fees from purchase minus net, not net minus recipient", () => {
+    const equalNet = expandDisclosureEditorValuesToPdfFields({
+        disclosure_purchase_price: "100000.00",
+        disclosure_amount_financed: "89950.00",
+        disclosure_recipient_funds: "89950.00",
+        client_name: "Biz LLC",
+        funder_name: "CLEAR CAPITAL",
+    });
+    assert.equal(equalNet.deducted_at_disbursement, "10,050.00");
+    assert.equal(equalNet.fees_deducted, "10,050.00");
+
+    const missingPurchase = expandDisclosureEditorValuesToPdfFields({
+        disclosure_amount_financed: "89950.00",
+        disclosure_recipient_funds: "89950.00",
+        client_name: "Biz LLC",
+        funder_name: "CLEAR CAPITAL",
+    });
+    assert.notEqual(missingPurchase.deducted_at_disbursement, "0.00");
+    assert.ok(!missingPurchase.deducted_at_disbursement);
 });
 
 console.log(`\n${passed} tests passed`);

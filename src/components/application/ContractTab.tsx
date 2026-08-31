@@ -7,10 +7,8 @@ import { getOfferDecisionByApplication } from "@/redux/actions/offerDecisionActi
 import {
     getApplicationByApplicationId,
     getApplicationById,
-    reinitiateContract,
     updateApplication,
 } from "@/redux/actions/applicationActions";
-import { applicationNeedsContractReinitiation } from "@/lib/contractReinitiation";
 import { isApplicationUuid } from "@/lib/paymentDealApplicationId";
 import {
     OFFER_DECISION_UPDATED_EVENT,
@@ -32,6 +30,7 @@ import {
 import { getBankDetails } from "@/redux/actions/bankDetailActions";
 import {
     mergeAndSendDocuSignEnvelope,
+    resendDocuSignEnvelope,
     voidBoldSignDocument,
 } from "@/redux/actions/boldSignActions";
 import { mergeWithDefaultCcEmails } from "./docusignCcList";
@@ -63,13 +62,14 @@ import OwnerModal, { type OwnerEntry } from "./OwnerModal";
 import BusinessInfoModal from "./BusinessInfoModal";
 import type { TermsOffer } from "@/types/termsOfferTypes";
 import { toast } from "react-toastify";
-import { Ban, Eye, FileText, Landmark, Loader2, RefreshCw } from "lucide-react";
+import { Ban, Eye, FileText, Landmark, Loader2, MailPlus, RefreshCw, Send } from "lucide-react";
 import {
     filterBankDetailsForApplication,
 } from "@/lib/bankDetailUtils";
 import PDFViewerModal from "./PDFViewerModal";
 import PDFViewerDocsModal from "./PDFViewerDocsModal";
 import ACHFormViewerModal from "./ACHFormViewerModal";
+import { fetchMainContractTemplatePreview } from "./contractdata/contractTemplatePreview";
 import { axiosDelete, axiosGet, axiosPost } from "@/redux/axios";
 // import { US_STATES } from "@/constants/usStates";
 import {
@@ -414,10 +414,11 @@ export default function ContractTab({
     const [ownerModalOpen, setOwnerModalOpen] = useState(false);
     const [pdfViewerOpen, setPdfViewerOpen] = useState(false);
     const [pdfViewerInitialRightPaneTab, setPdfViewerInitialRightPaneTab] = useState<"template" | "prefilled">("template");
+    const [pdfViewerInitialIncludeMainContract, setPdfViewerInitialIncludeMainContract] = useState(true);
     const [achTemplateMappings, setAchTemplateMappings] = useState<AchDocumentTemplateMappingRow[]>([]);
     const [loadingAchMappings, setLoadingAchMappings] = useState(false);
     const [achViewerOpen, setAchViewerOpen] = useState(false);
-    const [, setPreparingAchViewer] = useState(false);
+    const [_preparingAchViewer, setPreparingAchViewer] = useState(false);
     /** Which Info Required ACH row feeds the ACH Form modal (first / last picked). */
     const [selectedAchRecordId, setSelectedAchRecordId] = useState<string | null>(null);
     const [pdfUrl, setPdfUrl] = useState<string | null>(null);
@@ -430,10 +431,10 @@ export default function ContractTab({
         null,
     );
     const [creatingEnvelope, setCreatingEnvelope] = useState(false);
-    const [regeneratingContract, setRegeneratingContract] = useState(false);
     const [viewingSignedContract, setViewingSignedContract] = useState(false);
     const [viewingSignedEnvelopeId, setViewingSignedEnvelopeId] = useState<string | null>(null);
     const [voidingContract, setVoidingContract] = useState(false);
+    const [resendingContract, setResendingContract] = useState(false);
     const [viewingAchDocument, setViewingAchDocument] = useState(false);
     const [refreshingSigningStatus, setRefreshingSigningStatus] = useState(false);
     const [contractSyncError, setContractSyncError] = useState<string | null>(null);
@@ -446,7 +447,8 @@ export default function ContractTab({
     const contractStateForFunders = String(
         (fetchedContract as { state?: string | null } | null)?.state ?? "",
     ).trim();
-    const { resolveLayoutKey, findFunder, findFunderById } = useFunderProfiles(contractStateForFunders || null);
+    const { resolveLayoutKey, resolveLayoutKeyForProfile, findFunder, findFunderById, previewNameFor } =
+        useFunderProfiles(contractStateForFunders || null);
 
     const persistContractFunderMeta = useCallback(
         async (
@@ -542,7 +544,7 @@ export default function ContractTab({
                 const contract = (res as any)?.data ?? res ?? null;
                 setFetchedContract(contract);
                 const contractId = Number((contract as any)?.id);
-                setSelectedContractId(Number.isFinite(contractId) ? contractId : null);
+                setSelectedContractId(Number.isFinite(contractId) && contractId > 0 ? contractId : null);
             } catch {
                 setFetchedContract(null);
                 setSelectedContractId(null);
@@ -552,19 +554,63 @@ export default function ContractTab({
         fetchByApplication();
     }, [dispatch, applicationUuid]);
 
-    // Fetch created contract details by id when available
+    // Warm the contract PDF cache while the tab is open so Generate/View is instant.
     useEffect(() => {
-        const fetchById = async () => {
-            if (!selectedContractId) return;
+        const contract =
+            fetchedContract && typeof fetchedContract === "object"
+                ? (fetchedContract as Record<string, unknown>)
+                : null;
+        const funderName = String(contract?.funderName ?? "").trim();
+        const state = String(contract?.state ?? contractStateForFunders ?? "").trim() || undefined;
+        if (!funderName && !globalTemplateUrl) return;
+        const profile = findFunder(funderName);
+        const layoutKey = profile
+            ? resolveLayoutKeyForProfile(profile)
+            : resolveLayoutKey(funderName);
+        void fetchMainContractTemplatePreview({
+            layoutKey,
+            funderName,
+            funderProfileId: profile?.id ?? null,
+            state,
+            previewName: previewNameFor(funderName, profile?.id),
+            fallbackUrl: globalTemplateUrl,
+            fallbackName: globalTemplateName,
+            findFunder,
+            findFunderById,
+        });
+    }, [
+        fetchedContract,
+        contractStateForFunders,
+        globalTemplateUrl,
+        globalTemplateName,
+        findFunder,
+        findFunderById,
+        resolveLayoutKey,
+        resolveLayoutKeyForProfile,
+        previewNameFor,
+    ]);
+
+    // Fetch created contract details by id when available (skip if already loaded).
+    useEffect(() => {
+        if (!selectedContractId) return;
+        const existingId = Number((fetchedContract as { id?: unknown } | null)?.id);
+        if (existingId === selectedContractId) return;
+        let cancelled = false;
+        void (async () => {
             try {
                 const res = await dispatch(getByIdContract(Number(selectedContractId))).unwrap();
-                console.log("fetched contract", res);
-                setFetchedContract((res as any)?.data ?? res ?? null);
+                if (!cancelled) {
+                    setFetchedContract((res as { data?: unknown })?.data ?? res ?? null);
+                }
             } catch {
-                setFetchedContract(null);
+                /* keep the application-scoped contract row if this lookup fails */
             }
+        })();
+        return () => {
+            cancelled = true;
         };
-        fetchById();
+        // fetchedContract is read only to skip a duplicate GET after getByApplicationIdContract.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [dispatch, selectedContractId]);
 
     useEffect(() => {
@@ -857,13 +903,17 @@ export default function ContractTab({
         const matchId = applicationUuid ?? appId;
         if (!matchId) return;
         const onOfferDecisionUpdated = (event: Event) => {
-            const detail = (event as CustomEvent<{ applicationId?: string }>).detail;
+            const detail = (event as CustomEvent<{
+                applicationId?: string;
+                skipReload?: boolean;
+            }>).detail;
             if (
                 !offerDecisionUpdateMatchesApplication(detail?.applicationId, matchId) &&
                 !offerDecisionUpdateMatchesApplication(detail?.applicationId, appId)
             ) {
                 return;
             }
+            if (detail?.skipReload) return;
             void dispatch(getOfferDecisionByApplication(String(matchId)));
             if (applicationUuid) {
                 void dispatch(getApplicationById(String(applicationUuid)));
@@ -916,10 +966,6 @@ export default function ContractTab({
             )
         );
     }, [latestTermsOffer, fetchedContract]);
-
-    const needsContractReinitiation = applicationNeedsContractReinitiation(
-        applicationData as Record<string, unknown> | null,
-    );
 
     const hasGeneratedContract = useMemo(() => {
         const fetchedId = Number((fetchedContract as { id?: unknown } | null)?.id);
@@ -1479,12 +1525,9 @@ export default function ContractTab({
         if (!applicationUuid) return false;
         const templateUrl = globalTemplateUrl;
         if (!templateUrl) return false;
-        try {
-            const byApp = await dispatch(
-                getByApplicationIdContract(String(applicationUuid)),
-            ).unwrap();
-            const contract = (byApp as any)?.data ?? byApp;
-            const byAppContractId = Number((contract as any)?.id);
+
+        const openWithContract = (contract: Record<string, unknown>) => {
+            const byAppContractId = Number((contract as { id?: unknown }).id);
             if (!Number.isFinite(byAppContractId) || byAppContractId <= 0) {
                 return false;
             }
@@ -1493,11 +1536,31 @@ export default function ContractTab({
             setPdfUrl(templateUrl);
             setPdfName(globalTemplateName || "Contract.pdf");
             const linkedEnvelopeId = String(
-                (contract as any)?.application?.document?.envelopeId ?? "",
+                (contract as { application?: { document?: { envelopeId?: string } } })
+                    ?.application?.document?.envelopeId ?? "",
             ).trim();
             setPdfViewerInitialRightPaneTab(linkedEnvelopeId ? "prefilled" : "template");
+            setPdfViewerInitialIncludeMainContract(true);
             setPdfViewerOpen(true);
             return true;
+        };
+
+        const existing =
+            fetchedContract && typeof fetchedContract === "object"
+                ? (fetchedContract as Record<string, unknown>)
+                : null;
+        if (existing && openWithContract(existing)) {
+            return true;
+        }
+
+        try {
+            const byApp = await dispatch(
+                getByApplicationIdContract(String(applicationUuid)),
+            ).unwrap();
+            const contract = ((byApp as { data?: Record<string, unknown> } | null)?.data ??
+                byApp) as Record<string, unknown> | null;
+            if (!contract || typeof contract !== "object") return false;
+            return openWithContract(contract);
         } catch {
             return false;
         }
@@ -1646,7 +1709,7 @@ export default function ContractTab({
         const contract = (res as { data?: unknown })?.data ?? res ?? null;
         setFetchedContract(contract);
         const contractId = Number((contract as { id?: unknown })?.id);
-        if (Number.isFinite(contractId)) setSelectedContractId(contractId);
+        if (Number.isFinite(contractId) && contractId > 0) setSelectedContractId(contractId);
         return contract;
     }, [applicationUuid, dispatch]);
 
@@ -1883,6 +1946,38 @@ export default function ContractTab({
         }
     };
 
+    const handleResendEnvelopeRow = async (row: ContractSendTableRow) => {
+        const envelopeId = String(row.envelopeId ?? "").trim();
+        if (!envelopeId || resendingContract) return;
+        const confirmed = window.confirm(
+            `Resend "${row.label}" signing notification to recipients?`,
+        );
+        if (!confirmed) return;
+
+        setResendingContract(true);
+        try {
+            const funderAuth = resolveContractSendRowFunderAuth(contractRecordForActions, row);
+            await dispatch(
+                resendDocuSignEnvelope({
+                    envelopeId,
+                    ...(applicationUuid ? { applicationId: String(applicationUuid) } : {}),
+                    ...funderAuth,
+                }),
+            ).unwrap();
+            toast.success(`Signing notification resent for ${row.label}.`);
+        } catch (err: unknown) {
+            const msg =
+                typeof err === "string"
+                    ? err
+                    : String(
+                          (err as { message?: string })?.message || "Failed to resend envelope.",
+                      );
+            toast.error(msg);
+        } finally {
+            setResendingContract(false);
+        }
+    };
+
     const handleViewAchDocument = async () => {
         const envelopeId = String(achAuthorizationDocuSign?.envelopeId ?? "").trim();
         if (!envelopeId) {
@@ -1934,43 +2029,12 @@ export default function ContractTab({
             return;
         }
 
-        if (needsContractReinitiation) {
-            setRegeneratingContract(true);
-            try {
-                await dispatch(reinitiateContract(String(applicationUuid))).unwrap();
-                const byApp = await dispatch(
-                    getByApplicationIdContract(String(applicationUuid)),
-                ).unwrap();
-                const contract = (byApp as { data?: Record<string, unknown> } | null)?.data ?? byApp;
-                if (contract && typeof contract === "object") {
-                    setFetchedContract(contract);
-                    const contractId = Number((contract as { id?: unknown }).id);
-                    setSelectedContractId(Number.isFinite(contractId) ? contractId : null);
-                }
-                if (applicationUuid) {
-                    void dispatch(getApplicationById(String(applicationUuid)));
-                }
-            } catch (error: unknown) {
-                const message =
-                    typeof error === "string"
-                        ? error
-                        : (error as { message?: string })?.message ||
-                          "Failed to archive the prior contract before generating a new one.";
-                toast.error(String(message));
-                return;
-            } finally {
-                setRegeneratingContract(false);
-            }
-        } else {
-            // Re-open existing contract before any DB-mutating createContract call so a webhook-driven
-            // status (SENT/VIEWED/SIGNED/COMPLETED) is never clobbered back to DRAFT by the upsert.
-            const reopenedExisting = await tryOpenExistingDraftViewer();
-            if (reopenedExisting) return;
-        }
+        // Re-open existing contract before any DB-mutating createContract call so a webhook-driven
+        // status (SENT/VIEWED/SIGNED/COMPLETED) is never clobbered back to DRAFT by the upsert.
+        const reopenedExisting = await tryOpenExistingDraftViewer();
+        if (reopenedExisting) return;
 
         const anyApp = applicationData as any;
-
-        await persistContractGeneratedStage();
 
         const userFromRedux = loginData?.user as { _id?: string; id?: string } | undefined;
         const userFromStorage = (() => {
@@ -2009,8 +2073,14 @@ export default function ContractTab({
             anyApp?.bankDetail?.id;
 
         setCreatingEnvelope(true);
+        setPdfUrl(globalTemplateUrl);
+        setPdfName(globalTemplateName || "Contract.pdf");
+        setPdfViewerInitialRightPaneTab("template");
+        setPdfViewerInitialIncludeMainContract(true);
+        setPdfViewerOpen(true);
+        void persistContractGeneratedStage();
         try {
-            await dispatch(
+            const createdRes = await dispatch(
                 createContract({
                     applicationId: String(applicationUuid),
                     clientId: anyApp?.clientId ?? anyApp?.client?._id ?? anyApp?.client?.id,
@@ -2034,27 +2104,39 @@ export default function ContractTab({
                 }),
             ).unwrap();
 
+            const createdContract =
+                (createdRes as { data?: Record<string, unknown> } | null)?.data ??
+                (createdRes as Record<string, unknown> | null);
+            const createdId = Number((createdContract as { id?: unknown } | null)?.id);
+            if (Number.isFinite(createdId) && createdId > 0) {
+                setSelectedContractId(createdId);
+                if (createdContract && typeof createdContract === "object") {
+                    setFetchedContract(createdContract);
+                }
+            } else {
+                try {
+                    const byApp = await dispatch(
+                        getByApplicationIdContract(String(applicationUuid)),
+                    ).unwrap();
+                    const contract = (byApp as { data?: unknown })?.data ?? byApp;
+                    const byAppContractId = Number((contract as { id?: unknown } | null)?.id);
+                    setSelectedContractId(
+                        Number.isFinite(byAppContractId) && byAppContractId > 0 ? byAppContractId : null,
+                    );
+                    if (contract && typeof contract === "object") {
+                        setFetchedContract(contract);
+                    }
+                } catch {
+                    /* contract id may already be set from create response */
+                }
+            }
+
             const numericAppId = anyApp?.applicationId;
             if (numericAppId != null && String(numericAppId).trim() !== "" && !Number.isNaN(Number(numericAppId))) {
                 void dispatch(getApplicationByApplicationId(Number(numericAppId)));
             } else if (applicationUuid) {
                 void dispatch(getApplicationById(String(applicationUuid)));
             }
-
-            try {
-                const byApp = await dispatch(
-                    getByApplicationIdContract(String(applicationUuid)),
-                ).unwrap();
-                const contract = (byApp as any)?.data ?? byApp;
-                const byAppContractId = Number((contract as any)?.id);
-                setSelectedContractId(Number.isFinite(byAppContractId) ? byAppContractId : null);
-            } catch {
-                /* contract id may already be set from create response */
-            }
-            setPdfUrl(globalTemplateUrl);
-            setPdfName(globalTemplateName || "Contract.pdf");
-            setPdfViewerInitialRightPaneTab("template");
-            setPdfViewerOpen(true);
         } catch (error: any) {
             // `createContract` is a thunk that rejects via `rejectWithValue(<string>)`, so
             // `.unwrap()` throws a plain string. Fall back to object shapes for other errors.
@@ -3708,6 +3790,26 @@ export default function ContractTab({
                                             />
                                         </Button>
                                     ) : null}
+                                    {row.isCurrent && !rowFullySigned && !rowIsVoided && row.envelopeId ? (
+                                        <Button
+                                            type="button"
+                                            variant="ghost"
+                                            size="icon"
+                                            onClick={() => void handleResendEnvelopeRow(row)}
+                                            disabled={resendingContract}
+                                            className={`h-7 w-7 shrink-0 ${brandActionButtonClass}`}
+                                            title={`Resend ${row.label}`}
+                                        >
+                                            {resendingContract ? (
+                                                <Loader2
+                                                    className="h-3.5 w-3.5 animate-spin"
+                                                    aria-hidden
+                                                />
+                                            ) : (
+                                                <MailPlus className="h-3.5 w-3.5" aria-hidden />
+                                            )}
+                                        </Button>
+                                    ) : null}
                                     {rowCanVoid ? (
                                         <Button
                                             type="button"
@@ -3867,21 +3969,38 @@ export default function ContractTab({
 
                     </div>
                     <div className="flex items-center gap-3">
+                        {/* Send ACH Form button — hidden for now */}
+                        {!isReadOnly && hasGeneratedContract ? (
+                            <Button
+                                type="button"
+                                onClick={() => {
+                                    if (globalTemplateUrl) {
+                                        setPdfUrl(globalTemplateUrl);
+                                        setPdfName(globalTemplateName || "Contract.pdf");
+                                    }
+                                    setPdfViewerInitialIncludeMainContract(false);
+                                    setPdfViewerInitialRightPaneTab("template");
+                                    setPdfViewerOpen(true);
+                                }}
+                                disabled={creatingEnvelope}
+                                variant="outline"
+                                className="rounded-md border-[var(--brand)] text-[var(--brand)] hover:bg-[var(--brand)]/10 cursor-pointer px-6 py-2 h-10 font-medium disabled:opacity-70 disabled:cursor-not-allowed"
+                            >
+                                <Send className="h-4 w-4 mr-2" />
+                                Send Addendums Standalone
+                            </Button>
+                        ) : null}
                         <Button
                             type="button"
                             onClick={handleGenerateContract}
-                            loading={creatingEnvelope || regeneratingContract}
+                            loading={creatingEnvelope}
                             className="rounded-md bg-[image:var(--brand-gradient)] text-white hover:opacity-90 cursor-pointer  px-6 py-2 h-10 font-medium disabled:opacity-70 disabled:cursor-not-allowed"
                         >
-                            {creatingEnvelope || regeneratingContract
-                                ? regeneratingContract
-                                    ? "Reinitiating contract..."
-                                    : "Generating contract..."
-                                : needsContractReinitiation
-                                  ? "Regenerate Contract"
-                                  : isReadOnly || hasGeneratedContract
-                                    ? "View Contract"
-                                    : "Generate Contract"}
+                            {creatingEnvelope
+                                ? "Generating contract..."
+                                : isReadOnly || hasGeneratedContract
+                                  ? "View Contract"
+                                  : "Generate Contract"}
                         </Button>
 
                     </div>
@@ -4472,8 +4591,14 @@ export default function ContractTab({
                 fileName={pdfName}
                 contractId={selectedContractId}
                 applicationId={applicationUuid ? String(applicationUuid) : null}
+                initialContract={
+                    fetchedContract && typeof fetchedContract === "object"
+                        ? (fetchedContract as Record<string, unknown>)
+                        : null
+                }
                 templateId={null}
                 initialRightPaneTab={pdfViewerInitialRightPaneTab}
+                initialIncludeMainContract={pdfViewerInitialIncludeMainContract}
                 onPrepareDocuSignDraft={
                     isReadOnly ? undefined : (payload) => prepareDocuSignDraft(payload)
                 }

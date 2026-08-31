@@ -288,23 +288,30 @@ const BankAnalysis = ({
         const loanOk = await persistRequestedLoanAmount();
         if (!loanOk) return false;
 
-        try {
-            const banksOk = (await saveAllBanksRef.current?.()) ?? true;
-            if (!banksOk) return false;
-        } catch (err) {
-            console.error("Failed to save bank analysis on approve:", err);
-            return false;
+        const extraSaves: Promise<boolean>[] = [];
+        if (saveAllBanksRef.current) {
+            extraSaves.push(
+                Promise.resolve()
+                    .then(() => saveAllBanksRef.current?.() ?? true)
+                    .catch((err) => {
+                        console.error("Failed to save bank analysis on approve:", err);
+                        return false;
+                    }),
+            );
         }
-
-        try {
-            const positionsOk = (await saveAllPositionsRef.current?.()) ?? true;
-            if (!positionsOk) return false;
-        } catch (err) {
-            console.error("Failed to save positions on approve:", err);
-            return false;
+        if (saveAllPositionsRef.current) {
+            extraSaves.push(
+                Promise.resolve()
+                    .then(() => saveAllPositionsRef.current?.() ?? true)
+                    .catch((err) => {
+                        console.error("Failed to save positions on approve:", err);
+                        return false;
+                    }),
+            );
         }
-
-        return true;
+        if (extraSaves.length === 0) return true;
+        const results = await Promise.all(extraSaves);
+        return results.every(Boolean);
     }, [persistRequestedLoanAmount]);
 
     // Local state for bank details (for optimistic updates)

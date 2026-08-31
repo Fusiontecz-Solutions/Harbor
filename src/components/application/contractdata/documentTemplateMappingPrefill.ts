@@ -53,6 +53,10 @@ import {
     buildAddendumVaContractPrefillFields,
     type AddendumVaContractPrefillFields,
 } from "./ADDENDUM_VA";
+import {
+    buildAddendumEpaContractPrefillFields,
+    type AddendumEpaContractPrefillFields,
+} from "./ADDENDUM_EPA";
 import { resolveRefiLabelName } from "./refinanceDealCalculations";
 import {
     buildStateDisclosurePrefillContextFromContract,
@@ -880,6 +884,24 @@ function buildAddendumVaComputed(
     });
 }
 
+function buildAddendumEpaComputed(
+    contract: Record<string, unknown> | null,
+    sctx: StateDisclosureContext,
+): ContractPrefillField[] {
+    const c = contract ?? {};
+    const today = todayUsDate();
+    const label = resolveRefiLabelName(
+        sctx.funderName || str(c.funderName) || PLATFORM_DISCLOSURE_FUNDER_NAME,
+    );
+    return buildAddendumEpaContractPrefillFields({
+        agreementDated: today,
+        funderName: label,
+        printName: sctx.merchantName || str(c.clientName) || sctx.recipientName,
+        printTitle: "OWNER",
+        signatureDate: today,
+    });
+}
+
 function dotAddendumP(): AddendumPContractPrefillFields {
     return {
         addendumDated: DUMMY,
@@ -933,6 +955,16 @@ function dotAddendumVa(): AddendumVaContractPrefillFields {
     };
 }
 
+function dotAddendumEpa(): AddendumEpaContractPrefillFields {
+    return {
+        agreementDated: DUMMY,
+        funderName: DUMMY,
+        printName: DUMMY,
+        printTitle: "OWNER",
+        signatureDate: DUMMY,
+    };
+}
+
 function dotDiscoverRefi(): DiscoverRefiBalanceTransferAddendumContractPrefillFields {
     return {
         loanAgreementDated: DUMMY,
@@ -971,7 +1003,8 @@ type AddendumKind =
     | "addendum_p"
     | "addendum_ca"
     | "addendum_ny"
-    | "addendum_va";
+    | "addendum_va"
+    | "addendum_epa";
 
 const ADDENDUM_GUID = Object.fromEntries(
     Object.entries(DOCUSIGN_ADDENDUM_TEMPLATE_IDS).map(([k, v]) => [k, String(v).trim().toLowerCase()]),
@@ -1007,27 +1040,38 @@ function resolveAddendumKind(
         return "balance_transfer_sheet";
     }
     if (
+        key === DOCUSIGN_ADDENDUM_LAYOUT_KEYS.ADDENDUM_EPA ||
+        key.endsWith("_addendum_epa") ||
+        key.includes("addendum_epa_")
+    ) {
+        return "addendum_epa";
+    }
+    if (
         key === DOCUSIGN_ADDENDUM_LAYOUT_KEYS.ADDENDUM_P ||
         key.endsWith("_addendum_p") ||
-        key.endsWith("_addendum_p_refi")
+        key.endsWith("_addendum_p_refi") ||
+        key.includes("addendum_p_")
     ) {
         return "addendum_p";
     }
     if (
         key === DOCUSIGN_ADDENDUM_LAYOUT_KEYS.ADDENDUM_CA ||
-        key.endsWith("_addendum_ca")
+        key.endsWith("_addendum_ca") ||
+        key.includes("addendum_ca_")
     ) {
         return "addendum_ca";
     }
     if (
         key === DOCUSIGN_ADDENDUM_LAYOUT_KEYS.ADDENDUM_NY ||
-        key.endsWith("_addendum_ny")
+        key.endsWith("_addendum_ny") ||
+        key.includes("addendum_ny_")
     ) {
         return "addendum_ny";
     }
     if (
         key === DOCUSIGN_ADDENDUM_LAYOUT_KEYS.ADDENDUM_VA ||
-        key.endsWith("_addendum_va")
+        key.endsWith("_addendum_va") ||
+        key.includes("addendum_va_")
     ) {
         return "addendum_va";
     }
@@ -1051,6 +1095,8 @@ function resolveAddendumKind(
         return "addendum_ny";
     if (normName.includes("addendum") && (normName.includes(" va") || normName.endsWith("_va") || normName.includes("virginia")))
         return "addendum_va";
+    if (normName.includes("addendum") && (normName.includes(" epa") || normName.endsWith("_epa") || /\bepa\b/.test(normName)))
+        return "addendum_epa";
     return null;
 }
 
@@ -1143,6 +1189,8 @@ function addendumAllDefs(kind: AddendumKind): ContractPrefillField[] {
             return buildAddendumNyContractPrefillFields(dotAddendumNy());
         case "addendum_va":
             return buildAddendumVaContractPrefillFields(dotAddendumVa());
+        case "addendum_epa":
+            return buildAddendumEpaContractPrefillFields(dotAddendumEpa());
         default:
             return [];
     }
@@ -1173,6 +1221,8 @@ function addendumComputed(
             return buildAddendumNyComputed(contract, sctx);
         case "addendum_va":
             return buildAddendumVaComputed(contract, sctx);
+        case "addendum_epa":
+            return buildAddendumEpaComputed(contract, sctx);
         default:
             return [];
     }
@@ -1854,6 +1904,7 @@ export function buildExpandedDisclosurePrefillFieldsForMapping(args: {
         const utahPdfKeys = [
             "purchase_amount",
             "net_to_merchant",
+            "total_amount_fund_disbursed",
             "purchase_price",
             "finance_charge",
             "remittance",

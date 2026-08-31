@@ -87,7 +87,7 @@ export function buildPackageEnvelopeEmailSubject(
     if (selection.includeMainContract) {
         return buildContractEnvelopeEmailSubject(business, offerAmount, lender);
     }
-    // Addendum / disclosure-only: same Funder: Business $Amount pattern.
+    // Addendum / disclosure-only: same Funder: Business pattern.
     return buildContractEnvelopeEmailSubject(business, offerAmount, lender);
 }
 

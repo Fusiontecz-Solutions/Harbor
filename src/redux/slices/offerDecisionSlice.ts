@@ -22,11 +22,16 @@ export const offerDecisionSlice = createSlice({
       state.data = null
       state.error = null
     },
+    setOfferDecision: (state, action) => {
+      state.loading = false
+      state.data = action.payload ?? null
+      state.error = null
+    },
   },
   extraReducers: (builder) => {
     builder
       .addCase(getOfferDecisionByApplication.pending, (state) => {
-        state.loading = true
+        if (!state.data) state.loading = true
         state.error = null
       })
       .addCase(getOfferDecisionByApplication.fulfilled, (state, action) => {
@@ -40,5 +45,5 @@ export const offerDecisionSlice = createSlice({
   },
 })
 
-export const { clearOfferDecision } = offerDecisionSlice.actions
+export const { clearOfferDecision, setOfferDecision } = offerDecisionSlice.actions
 

@@ -8,7 +8,7 @@ const FIELD_IDS = {
     totalRepaymentAmount: ["total_repayment_amount"],
     estimatedTimePeriodicPaymement: ["estimated_time_periodic_paymement", "disclosure_term_days"],
     disclosureBrokerFee: ["disclosure_broker_fee"],
-    disclosureDate: ["disclosure_date"],
+    disclosureDate: ["disclosure_date", "initials_date"],
     recipientName: ["recipient_name"],
     recipientAddress: ["recipient_address"],
     funderName: ["funder_name"],

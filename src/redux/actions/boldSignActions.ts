@@ -228,6 +228,20 @@ export const voidBoldSignDocument = createAsyncThunk(
   }
 );
 
+export const resendDocuSignEnvelope = createAsyncThunk(
+  "boldSign/resendEnvelope",
+  async (payload: Record<string, any>, { rejectWithValue }) => {
+    try {
+      const response = await axiosPost("/docusign/resend-envelope", payload);
+      return response.data;
+    } catch (error: any) {
+      return rejectWithValue(
+        error.response?.data?.message || "Failed to resend envelope"
+      );
+    }
+  }
+);
+
 export const getBoldSignDocumentProperties = createAsyncThunk(
   "boldSign/getDocumentProperties",
   async (documentId: string, { rejectWithValue }) => {
