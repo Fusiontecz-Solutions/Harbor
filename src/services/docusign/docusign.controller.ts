@@ -219,6 +219,26 @@ export const getEmbeddedSignLink = async (req: Request, res: Response) => {
   }
 };
 
+export const resendEnvelope = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user.id;
+    const { envelopeId, funderName, funderProfileId, contractState } = req.body;
+    if (!envelopeId) {
+      return res.status(400).json({ message: 'Missing envelopeId' });
+    }
+    const result = await docusignService.resendEnvelope(userId, envelopeId, {
+      funderName: typeof funderName === 'string' ? funderName.trim() : undefined,
+      funderProfileId:
+        typeof funderProfileId === 'string' ? funderProfileId.trim() : undefined,
+      contractState: typeof contractState === 'string' ? contractState.trim() : undefined,
+    });
+    return res.json(result);
+  } catch (error: any) {
+    const { status, message } = formatDocusignRouteError(error);
+    return res.status(status).json({ message });
+  }
+};
+
 export const voidDocument = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user.id;

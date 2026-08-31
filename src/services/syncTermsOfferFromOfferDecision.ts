@@ -9,6 +9,24 @@ function parseTermInt(term: unknown): number {
     return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : 10;
 }
 
+export type SyncTermsOfferPreload = {
+    offerDecision?: {
+        decision?: string | null;
+        offer?: number | null;
+        rate?: number | null;
+        totalRemit?: number | null;
+        repayPerPeriod?: number | null;
+        term?: string | number | null;
+        frequency?: string | null;
+        position?: string | null;
+    } | null;
+    application?: {
+        commissionPercentage?: number | null;
+        createdById?: string | null;
+        salesRepresentativeId?: string | null;
+    } | null;
+};
+
 /**
  * Mirror the persisted offer-decision onto the latest terms offer (or create one)
  * so ISO public approval links show the same amounts the scrubbing approved.
@@ -20,24 +38,29 @@ function parseTermInt(term: unknown): number {
 export async function syncTermsOfferFromOfferDecision(
     applicationId: string,
     actorUserId?: string | null,
+    preloaded?: SyncTermsOfferPreload | null,
 ): Promise<void> {
-    const offerDecision = await prisma.offerDecision.findUnique({
-        where: { applicationId },
-    });
+    const offerDecision =
+        preloaded?.offerDecision ??
+        (await prisma.offerDecision.findUnique({
+            where: { applicationId },
+        }));
     if (!offerDecision || offerDecision.decision === 'declined') return;
 
     const offer = offerDecision.offer != null ? Number(offerDecision.offer) : null;
     const rate = offerDecision.rate != null ? Number(offerDecision.rate) : null;
     if (!offer || offer <= 0 || !rate || rate <= 0) return;
 
-    const application = await prisma.application.findUnique({
-        where: { id: applicationId },
-        select: {
-            commissionPercentage: true,
-            createdById: true,
-            salesRepresentativeId: true,
-        },
-    });
+    const application =
+        preloaded?.application ??
+        (await prisma.application.findUnique({
+            where: { id: applicationId },
+            select: {
+                commissionPercentage: true,
+                createdById: true,
+                salesRepresentativeId: true,
+            },
+        }));
     if (!application) return;
 
     const termLength = parseTermInt(offerDecision.term);
@@ -88,10 +111,18 @@ export async function syncTermsOfferFromOfferDecision(
         return;
     }
 
-    const createdById = await resolveApplicationAttributedUserIdForActor(actorUserId, {
-        createdById: application.createdById,
-        salesRepresentativeId: application.salesRepresentativeId,
-    });
+    const attributionContext: {
+        createdById: string | null;
+        salesRepresentativeId: string;
+    } = {
+        createdById: application.createdById ?? null,
+        salesRepresentativeId: application.salesRepresentativeId ?? '',
+    };
+
+    const createdById = await resolveApplicationAttributedUserIdForActor(
+        actorUserId,
+        attributionContext,
+    );
 
     await prisma.termsOffer.create({
         data: {

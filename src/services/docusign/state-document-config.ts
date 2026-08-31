@@ -42,6 +42,9 @@ export interface StateDocumentFieldConfig {
     y: string;
     pageNumber?: string;
     signerParty?: StateDocumentTabParty;
+    scaleValue?: string;
+    width?: string;
+    height?: string;
   }[];
   dateTabs: {
     x: string;
@@ -62,7 +65,14 @@ export interface StateDocumentFieldConfig {
     /** When true, signer cannot edit (CRM prefill only). */
     lockedForSigner?: boolean;
   }[];
-  initialHereTabs?: { x: string; y: string; pageNumber?: string }[];
+  initialHereTabs?: {
+    x: string;
+    y: string;
+    pageNumber?: string;
+    scaleValue?: string;
+    width?: string;
+    height?: string;
+  }[];
 }
 
 type TextTabs = StateDocumentFieldConfig['textTabs'];
@@ -98,25 +108,18 @@ const MISSOURI_WEEKLY_DISCLOSURE_PAGE1_TEXT_TABS = FLORIDA_WEEKLY_DISCLOSURE_PAG
 const GEORGIA_DAILY_DISCLOSURE_PAGE1_TEXT_TABS = FLORIDA_DAILY_DISCLOSURE_PAGE1_TEXT_TABS;
 const GEORGIA_WEEKLY_DISCLOSURE_PAGE1_TEXT_TABS = FLORIDA_WEEKLY_DISCLOSURE_PAGE1_TEXT_TABS;
 
-/** Utah — measured right-column blanks from UT disclosure PDFs. */
-const UTAH_DISCLOSURE_PAGE2_SIGN_AND_DATE: Pick<
+/**
+ * Utah ACH disclosure (ver. 7/2/25 UT ACH) has no signature or date lines.
+ * Page 1 = offer-summary money blanks. Page 2 is only the leftover
+ * “daily to weekly…” paragraph plus an empty left cell. Sign/Date on
+ * page 2 floats in that whitespace.
+ */
+const UTAH_DISCLOSURE_NO_SIGN_OR_DATE: Pick<
   StateDocumentFieldConfig,
   'signHere' | 'dateTabs'
 > = {
-  signHere: [
-    { x: '92', y: '92', pageNumber: '2' },
-    { x: '431', y: '91', pageNumber: '2', signerParty: 'secondary' },
-  ],
-  dateTabs: [
-    { x: '90', y: '165', pageNumber: '2', tabLabel: 'Signature_date' },
-    {
-      x: '431',
-      y: '165',
-      pageNumber: '2',
-      tabLabel: 'Signature_date',
-      signerParty: 'secondary',
-    },
-  ],
+  signHere: [],
+  dateTabs: [],
 };
 
 const UTAH_DAILY_DISCLOSURE_PAGE1_TEXT_TABS: TextTabs = asTabs(UT_DAILY_TEXT_TABS);
@@ -138,29 +141,49 @@ const KANSAS_WEEKLY_DISCLOSURE_PAGE1_TEXT_TABS: TextTabs = [
 ];
 
 /**
- * Virginia — Harbor View / Clear Capital PDFs (money blanks on page 1;
- * signatures on pages 2 + 4; payment-method blanks on page 3).
+ * Virginia — Harbor View / Clear Capital PDFs (letter 612×792). Header geometry
+ * is identical on daily/weekly. Address wrap box sits in the gap between
+ * "Recipient's Address:" (y≈115–128) and "Provider's Name:" (y≈156).
+ * Signature/Date underscores: page 2 (y≈52) and page 4 (y≈94). Primary signs
+ * both acknowledgements so a single-owner envelope is not left blank on page 4.
  */
 const VIRGINIA_PAGE1_OPEN_TEXT_TABS: TextTabs = [
-  { tabLabel: 'disclosure_date', x: '480', y: '51', lockedForSigner: true },
-  { tabLabel: 'disclosure_name', x: '480', y: '79', lockedForSigner: true },
-  { tabLabel: 'recipient_address', x: '480', y: '106', height: '36', lockedForSigner: true },
+  { tabLabel: 'disclosure_date', x: '476', y: '62', lockedForSigner: true },
+  { tabLabel: 'disclosure_name', x: '484', y: '89', lockedForSigner: true },
+  {
+    tabLabel: 'recipient_address',
+    x: '370',
+    y: '129',
+    width: '186',
+    height: '28',
+    lockedForSigner: true,
+  },
+];
+
+const VIRGINIA_PAGE3_OPEN_TEXT_TABS: TextTabs = [
+  { tabLabel: 'recipient_name2', x: '156', y: '67', pageNumber: '3', lockedForSigner: true },
+  {
+    tabLabel: 'recipient_address1',
+    x: '166',
+    y: '93',
+    pageNumber: '3',
+    width: '154',
+    height: '34',
+    lockedForSigner: true,
+  },
+  { tabLabel: 'disclosure_date2', x: '436', y: '67', pageNumber: '3', lockedForSigner: true },
 ];
 
 const VIRGINIA_DAILY_DISCLOSURE_TEXT_TABS: TextTabs = [
   ...VIRGINIA_PAGE1_OPEN_TEXT_TABS,
   ...asTabs(VA_DAILY_TEXT_TABS),
-  { tabLabel: 'recipient_name2', x: '152', y: '56', pageNumber: '3', lockedForSigner: true },
-  { tabLabel: 'recipient_address1', x: '150', y: '84', pageNumber: '3', height: '36', lockedForSigner: true },
-  { tabLabel: 'disclosure_date2', x: '416', y: '56', pageNumber: '3', lockedForSigner: true },
+  ...VIRGINIA_PAGE3_OPEN_TEXT_TABS,
 ];
 
 const VIRGINIA_WEEKLY_DISCLOSURE_TEXT_TABS: TextTabs = [
   ...VIRGINIA_PAGE1_OPEN_TEXT_TABS,
   ...asTabs(VA_WEEKLY_TEXT_TABS),
-  { tabLabel: 'recipient_name2', x: '152', y: '56', pageNumber: '3', lockedForSigner: true },
-  { tabLabel: 'recipient_address1', x: '150', y: '84', pageNumber: '3', height: '36', lockedForSigner: true },
-  { tabLabel: 'disclosure_date2', x: '416', y: '56', pageNumber: '3', lockedForSigner: true },
+  ...VIRGINIA_PAGE3_OPEN_TEXT_TABS,
 ];
 
 const VIRGINIA_DISCLOSURE_SIGN_AND_DATE: Pick<
@@ -168,35 +191,63 @@ const VIRGINIA_DISCLOSURE_SIGN_AND_DATE: Pick<
   'signHere' | 'dateTabs'
 > = {
   signHere: [
-    { x: '72', y: '40', pageNumber: '2' },
-    { x: '72', y: '82', pageNumber: '4', signerParty: 'secondary' },
+    {
+      x: '72',
+      y: '34',
+      pageNumber: '2',
+      scaleValue: '0.8',
+      width: '200',
+      height: '36',
+    },
+    {
+      x: '72',
+      y: '78',
+      pageNumber: '4',
+      scaleValue: '0.8',
+      width: '200',
+      height: '36',
+    },
   ],
   dateTabs: [
-    { x: '396', y: '40', pageNumber: '2', tabLabel: 'agreement_date' },
-    {
-      x: '396',
-      y: '82',
-      pageNumber: '4',
-      tabLabel: 'agreement_date',
-      signerParty: 'secondary',
-    },
+    { x: '396', y: '46', pageNumber: '2', tabLabel: 'signature_date' },
+    { x: '396', y: '90', pageNumber: '4', tabLabel: 'signature_date' },
   ],
 };
 
 /**
- * Connecticut — measured money blanks (Harbor View PDFs). Recipient / disclosure-date
- * are open fields beside printed labels (no underscores).
+ * Connecticut — header geometry is identical on Harbor View and Clear Capital
+ * daily/weekly PDFs (letter 612×792).
+ *
+ * Recipient name/address use ACH-style sit-on-blank tabs (no wrap height):
+ * left-aligned on the printed blank, compact 14px box hugging the line.
+ * Page 1 address sits on the blank line under "Recipient's Address:" (same
+ * pattern as ACH Account Holder Address). Page 2 sits after that header label.
  */
 const CONNECTICUT_PAGE1_OPEN_TEXT_TABS: TextTabs = [
-  { tabLabel: 'recipient_name', x: '480', y: '111', lockedForSigner: true },
-  { tabLabel: 'recipient_address', x: '480', y: '159', height: '36', lockedForSigner: true },
-  { tabLabel: 'disclosure_broker_fee', x: '400', y: '597', lockedForSigner: true },
+  { tabLabel: 'recipient_name', x: '378', y: '137', lockedForSigner: true },
+  {
+    tabLabel: 'recipient_address',
+    x: '384',
+    y: '176',
+    width: '176',
+    height: '28',
+    lockedForSigner: true,
+  },
+  { tabLabel: 'disclosure_broker_fee', x: '394', y: '603', lockedForSigner: true },
 ];
 
 const CONNECTICUT_PAGE2_OPEN_TEXT_TABS: TextTabs = [
-  { tabLabel: 'recipient_name2', x: '160', y: '62', pageNumber: '2', lockedForSigner: true },
-  { tabLabel: 'recipient_address2', x: '160', y: '82', pageNumber: '2', lockedForSigner: true },
-  { tabLabel: 'disclosure_date2', x: '420', y: '62', pageNumber: '2', lockedForSigner: true },
+  { tabLabel: 'recipient_name2', x: '172', y: '72', pageNumber: '2', lockedForSigner: true },
+  {
+    tabLabel: 'recipient_address2',
+    x: '169',
+    y: '92',
+    pageNumber: '2',
+    width: '176',
+    height: '28',
+    lockedForSigner: true,
+  },
+  { tabLabel: 'disclosure_date2', x: '396', y: '71', pageNumber: '2', lockedForSigner: true },
 ];
 
 const CONNECTICUT_DAILY_NOREFI_DISCLOSURE_TEXT_TABS: TextTabs = [
@@ -227,21 +278,40 @@ const CONNECTICUT_DISCLOSURE_SIGN_INITIAL_AND_DATES: Pick<
   StateDocumentFieldConfig,
   'signHere' | 'dateTabs' | 'initialHereTabs'
 > = {
-  initialHereTabs: [{ x: '180', y: '710' }],
+  // Larger stamp, lifted above the printed "Initials" label (y≈720).
+  initialHereTabs: [
+    { x: '178', y: '689', scaleValue: '0.7', width: '98', height: '30' },
+  ],
   dateTabs: [
-    { x: '480', y: '62', tabLabel: 'disclosure_date' },
-    { x: '100', y: '64', pageNumber: '3', tabLabel: 'signature1_date' },
+    { x: '468', y: '71', tabLabel: 'disclosure_date' },
+    { x: '428', y: '698', tabLabel: 'initials_date' },
+    { x: '112', y: '66', pageNumber: '3', tabLabel: 'signature1_date' },
     {
-      x: '100',
-      y: '103',
+      x: '112',
+      y: '113',
       pageNumber: '3',
       tabLabel: 'signature2_date',
       signerParty: 'secondary',
     },
   ],
   signHere: [
-    { x: '204', y: '45', pageNumber: '3' },
-    { x: '269', y: '84', pageNumber: '3', signerParty: 'secondary' },
+    {
+      x: '208',
+      y: '37',
+      pageNumber: '3',
+      scaleValue: '0.8',
+      width: '140',
+      height: '36',
+    },
+    {
+      x: '268',
+      y: '79',
+      pageNumber: '3',
+      scaleValue: '0.8',
+      width: '140',
+      height: '36',
+      signerParty: 'secondary',
+    },
   ],
 };
 
@@ -254,9 +324,9 @@ const CALIFORNIA_DISCLOSURE_SIGN_AND_DATE: Pick<
   'signHere' | 'dateTabs'
 > = {
   // Underscore top − 1 — sit-on-blank uplift for text tabs.
-  signHere: [{ x: '72', y: '544', pageNumber: '2' }],
+  signHere: [{ x: '72', y: '540', pageNumber: '2' }],
   dateTabs: [
-    { x: '252', y: '544', pageNumber: '2', tabLabel: 'signature_date' },
+    { x: '252', y: '552', pageNumber: '2', tabLabel: 'signature_date' },
   ],
 };
 
@@ -272,14 +342,28 @@ const CALIFORNIA_WEEKLY_NOREFI_DISCLOSURE_TEXT_TABS: TextTabs = asTabs(
 const CALIFORNIA_WEEKLY_REFI_DISCLOSURE_TEXT_TABS: TextTabs = asTabs(CA_WEEKLY_REFI_TEXT_TABS);
 const CALIFORNIA_WEEKLY_DISCLOSURE_TEXT_TABS = CALIFORNIA_WEEKLY_NOREFI_DISCLOSURE_TEXT_TABS;
 
-/** New York — signatures on page 3; itemization on page 4. */
+/**
+ * New York — signatures on page 3; itemization on page 4.
+ * Measured from NY daily/weekly PDFs (letter 612×792, DocuSign top-left):
+ *   Recipient Signature underscores: x=72–222, y=165.5–178.8
+ *   Date underscores:                x=252–354, y=165.5–178.8
+ *   Labels ("Recipient Signature" / "Date") start at y≈179.3
+ * Scale the SignHere stamp so it sits on the blank instead of covering the label.
+ */
 const NEW_YORK_DISCLOSURE_SIGN_AND_DATE: Pick<
   StateDocumentFieldConfig,
   'signHere' | 'dateTabs'
 > = {
-  signHere: [{ x: '72', y: '154', pageNumber: '3' }],
+  signHere: [
+    {
+      x: '72',
+      y: '153',
+      pageNumber: '3',
+      scaleValue: '0.8',
+    },
+  ],
   dateTabs: [
-    { x: '252', y: '154', pageNumber: '3', tabLabel: 'signature_date' },
+    { x: '252', y: '160', pageNumber: '3', tabLabel: 'signature_date' },
   ],
 };
 
@@ -475,14 +559,14 @@ export const STATE_DOCUMENT_CONFIG: Record<string, StateDocumentFieldConfig> = {
   dailyUtah: {
     documentId: '1',
     pageNumber: '1',
-    ...UTAH_DISCLOSURE_PAGE2_SIGN_AND_DATE,
+    ...UTAH_DISCLOSURE_NO_SIGN_OR_DATE,
     textTabs: UTAH_DAILY_DISCLOSURE_PAGE1_TEXT_TABS,
   },
 
   weeklyUtah: {
     documentId: '1',
     pageNumber: '1',
-    ...UTAH_DISCLOSURE_PAGE2_SIGN_AND_DATE,
+    ...UTAH_DISCLOSURE_NO_SIGN_OR_DATE,
     textTabs: UTAH_WEEKLY_DISCLOSURE_PAGE1_TEXT_TABS,
   },
 

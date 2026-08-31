@@ -47,6 +47,11 @@ export const PLATFORM_DOCUMENTS: Record<DocumentLayoutKey, PlatformDocumentDefin
     name: 'Addendum VA',
     type: 'addendum_va',
   },
+  [DOCUMENT_LAYOUT_KEYS.addendum_epa]: {
+    layoutKey: DOCUMENT_LAYOUT_KEYS.addendum_epa,
+    name: 'EPA Addendum',
+    type: 'addendum_epa',
+  },
 };
 
 /** Supplemental documents available in the addendum picker (excludes main contract). */
@@ -55,6 +60,7 @@ export const SUPPLEMENTAL_PLATFORM_DOCUMENTS: PlatformDocumentDefinition[] = [
   PLATFORM_DOCUMENTS[DOCUMENT_LAYOUT_KEYS.addendum_ca],
   PLATFORM_DOCUMENTS[DOCUMENT_LAYOUT_KEYS.addendum_ny],
   PLATFORM_DOCUMENTS[DOCUMENT_LAYOUT_KEYS.addendum_va],
+  PLATFORM_DOCUMENTS[DOCUMENT_LAYOUT_KEYS.addendum_epa],
 ];
 
 const LAYOUT_KEY_SET = new Set<string>(Object.values(DOCUMENT_LAYOUT_KEYS));

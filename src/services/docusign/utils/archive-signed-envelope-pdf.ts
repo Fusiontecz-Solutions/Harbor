@@ -1,5 +1,9 @@
 import prisma from '../../../config/prismaClient';
 import uploadService from '../../uploadService';
+import {
+  fetchCloudinaryAssetBuffer,
+  fetchCloudinaryAssetByPublicId,
+} from '../../cloudinaryAssetDownload';
 import { slugifyFunderDocumentToken } from '../../../utils/funderContractLayout';
 import { resolveEnvelopeFunderAuthHints } from './envelope-funder-auth';
 import { findSignedPdfUrlInContractSendHistory, appendContractSendHistoryEntry } from './contract-send-history';
@@ -23,7 +27,15 @@ export function buildSignedContractsFolder(args: {
 export function isSignedPhaseArchiveUrl(url: string | null | undefined): boolean {
   const href = String(url || '').trim();
   if (!href) return false;
-  return /_signed\.pdf(\?|$)/i.test(href) || /\/signed-contract\//i.test(href);
+  // Delivery URLs often omit `.pdf` (`image/upload/.../file_signed`).
+  return /_signed(?:\.pdf)?(?:\?|#|$)/i.test(href) || /\/signed-contract\//i.test(href);
+}
+
+/** True when the archive filename is the sent/unsigned package (`_sent`). */
+export function isSentPhaseArchiveUrl(url: string | null | undefined): boolean {
+  const href = String(url || '').trim();
+  if (!href) return false;
+  return /_sent(?:\.pdf)?(?:\?|#|$)/i.test(href);
 }
 
 /** True when Document.status indicates the envelope is fully signed. */
@@ -126,23 +138,35 @@ export async function getStoredSignedPdfUrl(envelopeId: string): Promise<string 
 }
 
 /** Fetch a previously archived envelope PDF (Cloudinary / HTTPS). */
-export async function fetchStoredSignedPdfBuffer(url: string): Promise<Buffer | null> {
+export async function fetchStoredSignedPdfBuffer(
+  url: string,
+  publicId?: string | null,
+): Promise<Buffer | null> {
   const href = String(url || '').trim();
   if (!href.startsWith('http://') && !href.startsWith('https://')) return null;
   try {
-    const res = await fetch(href);
-    if (!res.ok) {
-      console.warn(
-        `[DocuSign] stored envelope PDF fetch failed (${res.status}) for ${href.slice(0, 120)}`,
-      );
-      return null;
-    }
-    const buf = Buffer.from(await res.arrayBuffer());
-    return buf.length ? buf : null;
+    const buf = await fetchCloudinaryAssetBuffer(href);
+    if (buf?.length) return buf;
   } catch (err) {
-    console.warn('[DocuSign] stored envelope PDF fetch error:', err);
-    return null;
+    console.warn(
+      `[DocuSign] stored envelope PDF fetch failed for ${href.slice(0, 120)}:`,
+      (err as { message?: string })?.message || err,
+    );
   }
+
+  const pid = String(publicId || '').trim();
+  if (pid) {
+    try {
+      const buf = await fetchCloudinaryAssetByPublicId(pid);
+      if (buf?.length) return buf;
+    } catch (err) {
+      console.warn(
+        `[DocuSign] stored envelope PDF publicId fetch failed (${pid}):`,
+        (err as { message?: string })?.message || err,
+      );
+    }
+  }
+  return null;
 }
 
 /**

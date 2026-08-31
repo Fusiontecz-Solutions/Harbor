@@ -5,7 +5,7 @@
 
 export const CA_DAILY_NOREFI_TEXT_TABS = [
   { tabLabel: 'funding_provided', x: '188', y: '124', lockedForSigner: true },
-  { tabLabel: 'funding_provided_direct', x: '345', y: '149', lockedForSigner: true },
+  { tabLabel: 'funding_provided_direct', x: '294', y: '150', lockedForSigner: true },
   { tabLabel: 'estimated_annual_percentage_rate', x: '185', y: '292', width: '70', lockedForSigner: true },
   { tabLabel: 'avarage_monthly_income', x: '293', y: '348', lockedForSigner: true },
   { tabLabel: 'finance_charge', x: '187', y: '444', lockedForSigner: true },
@@ -15,7 +15,8 @@ export const CA_DAILY_NOREFI_TEXT_TABS = [
   { tabLabel: 'estimated_payment', x: '312', y: '676', lockedForSigner: true },
   { tabLabel: 'payement_exceeded_percent', x: '439', y: '676', width: '40', lockedForSigner: true },
   { tabLabel: 'monthly_income', x: '411', y: '688', lockedForSigner: true },
-  { tabLabel: 'payement_exceeded_percent', x: '184', y: '160', pageNumber: '2', width: '40', lockedForSigner: true },
+  { tabLabel: 'income_lookback_months', x: '229', y: '69', pageNumber: '2', width: '28', lockedForSigner: true },
+  { tabLabel: 'payement_exceeded_percent', x: '184', y: '117', pageNumber: '2', width: '40', lockedForSigner: true },
   { tabLabel: 'estimated_term', x: '184', y: '349', pageNumber: '2', width: '60', lockedForSigner: true },
   { tabLabel: 'avarage_monthly_income', x: '350', y: '402', pageNumber: '2', lockedForSigner: true },
   { tabLabel: 'finance_charge', x: '371', y: '437', pageNumber: '2', lockedForSigner: true },
@@ -28,7 +29,7 @@ export const CA_DAILY_NOREFI_TEXT_TABS = [
 
 export const CA_DAILY_REFI_TEXT_TABS = [
   { tabLabel: 'funding_provided', x: '189', y: '125', lockedForSigner: true },
-  { tabLabel: 'funding_provided_direct', x: '345', y: '149', lockedForSigner: true },
+  { tabLabel: 'funding_provided_direct', x: '296', y: '140', lockedForSigner: true },
   { tabLabel: 'previous_agreement_date', x: '317', y: '192', optional: true, lockedForSigner: true },
   { tabLabel: 'estimated_annual_percentage_rate', x: '185', y: '292', width: '70', lockedForSigner: true },
   { tabLabel: 'avarage_monthly_income', x: '333', y: '342', lockedForSigner: true },
@@ -39,7 +40,7 @@ export const CA_DAILY_REFI_TEXT_TABS = [
   { tabLabel: 'estimated_payment', x: '312', y: '676', lockedForSigner: true },
   { tabLabel: 'payement_exceeded_percent', x: '437', y: '676', width: '40', lockedForSigner: true },
   { tabLabel: 'monthly_income', x: '411', y: '688', lockedForSigner: true },
-  { tabLabel: 'payement_exceeded_percent', x: '184', y: '160', pageNumber: '2', width: '40', lockedForSigner: true },
+  { tabLabel: 'payement_exceeded_percent', x: '184', y: '119', pageNumber: '2', width: '40', lockedForSigner: true },
   { tabLabel: 'estimated_term', x: '188', y: '360', pageNumber: '2', width: '80', lockedForSigner: true },
   { tabLabel: 'avarage_monthly_income', x: '349', y: '402', pageNumber: '2', lockedForSigner: true },
   { tabLabel: 'finance_charge', x: '369', y: '437', pageNumber: '2', lockedForSigner: true },
@@ -54,7 +55,7 @@ export const CA_DAILY_REFI_TEXT_TABS = [
 
 export const CA_WEEKLY_NOREFI_TEXT_TABS = [
   { tabLabel: 'funding_provided', x: '190', y: '146', lockedForSigner: true },
-  { tabLabel: 'funding_provided_direct', x: '443', y: '123', lockedForSigner: true },
+  { tabLabel: 'funding_provided_direct', x: '443', y: '125', lockedForSigner: true },
   { tabLabel: 'estimated_annual_percentage_rate', x: '183', y: '289', width: '70', lockedForSigner: true },
   { tabLabel: 'avarage_monthly_income', x: '310', y: '342', lockedForSigner: true },
   { tabLabel: 'finance_charge', x: '186', y: '448', lockedForSigner: true },
@@ -77,7 +78,7 @@ export const CA_WEEKLY_NOREFI_TEXT_TABS = [
 
 export const CA_WEEKLY_REFI_TEXT_TABS = [
   { tabLabel: 'funding_provided', x: '188', y: '133', lockedForSigner: true },
-  { tabLabel: 'funding_provided_direct', x: '443', y: '123', lockedForSigner: true },
+  { tabLabel: 'funding_provided_direct', x: '443', y: '128', lockedForSigner: true },
   { tabLabel: 'previous_agreement_date', x: '398', y: '181', optional: true, lockedForSigner: true },
   { tabLabel: 'estimated_annual_percentage_rate', x: '183', y: '296', width: '70', lockedForSigner: true },
   { tabLabel: 'avarage_monthly_income', x: '332', y: '342', lockedForSigner: true },
@@ -178,6 +179,7 @@ export const NY_WEEKLY_REFI_TEXT_TABS = [
   { tabLabel: 'estimated_annual_percentage_rate', x: '183', y: '294', width: '70', lockedForSigner: true },
   { tabLabel: 'avarage_monthly_income', x: '369', y: '342', lockedForSigner: true },
   { tabLabel: 'finance_charge', x: '188', y: '461', lockedForSigner: true },
+  { tabLabel: 'disclosure_page3_line_2', x: '296', y: '541', width: '55', optional: true, lockedForSigner: true },
   { tabLabel: 'payment_total', x: '190', y: '569', lockedForSigner: true },
   { tabLabel: 'estimated_monthly_cost', x: '187', y: '600', lockedForSigner: true },
   { tabLabel: 'estimated_payment', x: '189', y: '657', lockedForSigner: true },
@@ -187,7 +189,7 @@ export const NY_WEEKLY_REFI_TEXT_TABS = [
   { tabLabel: 'payement_exceeded_percent', x: '316', y: '160', pageNumber: '2', width: '40', lockedForSigner: true },
   { tabLabel: 'avarage_monthly_income', x: '296', y: '448', pageNumber: '2', lockedForSigner: true },
   { tabLabel: 'estimated_term', x: '182', y: '457', pageNumber: '2', width: '70', lockedForSigner: true },
-  { tabLabel: 'finance_charge', x: '373', y: '632', pageNumber: '2', lockedForSigner: true },
+  { tabLabel: 'finance_charge', x: '373', y: '636', pageNumber: '2', width: '55', lockedForSigner: true },
   { tabLabel: 'disclosure_recipient_funds', x: '452', y: '321', pageNumber: '4', lockedForSigner: true },
   { tabLabel: 'disclosure_page3_line_1', x: '447', y: '349', pageNumber: '4', optional: true, lockedForSigner: true },
   { tabLabel: 'previous_agreement_date', x: '337', y: '377', pageNumber: '4', optional: true, lockedForSigner: true },
@@ -198,53 +200,53 @@ export const NY_WEEKLY_REFI_TEXT_TABS = [
 ] as const;
 
 export const CT_DAILY_NOREFI_TEXT_TABS = [
-  { tabLabel: 'total_amount_commercial_financing', x: '301', y: '75', lockedForSigner: true },
-  { tabLabel: 'deducted_at_disbursement', x: '301', y: '111', lockedForSigner: true },
-  { tabLabel: 'total_commerical_financing', x: '300', y: '149', lockedForSigner: true },
-  { tabLabel: 'finance_charge', x: '301', y: '194', lockedForSigner: true },
-  { tabLabel: 'total_repayment_amount', x: '300', y: '218', lockedForSigner: true },
-  { tabLabel: 'estimated_time_periodic_paymement', x: '295', y: '251', width: '60', lockedForSigner: true },
-  { tabLabel: 'theestimatedpayment', x: '82', y: '219', pageNumber: '2', width: '50', lockedForSigner: true },
-  { tabLabel: 'payment_exceed_percent', x: '353', y: '259', pageNumber: '2', width: '36', lockedForSigner: true },
+  { tabLabel: 'total_amount_commercial_financing', x: '306', y: '75', lockedForSigner: true },
+  { tabLabel: 'deducted_at_disbursement', x: '306', y: '114', lockedForSigner: true },
+  { tabLabel: 'total_commerical_financing', x: '305', y: '149', lockedForSigner: true },
+  { tabLabel: 'finance_charge', x: '306', y: '194', lockedForSigner: true },
+  { tabLabel: 'total_repayment_amount', x: '305', y: '218', lockedForSigner: true },
+  { tabLabel: 'estimated_time_periodic_paymement', x: '300', y: '253', width: '60', lockedForSigner: true },
+  { tabLabel: 'theestimatedpayment', x: '80', y: '225', pageNumber: '2', width: '50', lockedForSigner: true },
+  { tabLabel: 'payment_exceed_percent', x: '351', y: '262', pageNumber: '2', width: '36', lockedForSigner: true },
 ] as const;
 
 export const CT_DAILY_REFI_TEXT_TABS = [
-  { tabLabel: 'total_amount_commercial_financing', x: '301', y: '75', lockedForSigner: true },
-  { tabLabel: 'deducted_at_disbursement', x: '302', y: '115', lockedForSigner: true },
-  { tabLabel: 'total_commerical_financing', x: '303', y: '154', lockedForSigner: true },
-  { tabLabel: 'finance_charge', x: '300', y: '192', lockedForSigner: true },
-  { tabLabel: 'total_repayment_amount', x: '301', y: '218', lockedForSigner: true },
-  { tabLabel: 'estimated_time_periodic_paymement', x: '295', y: '247', width: '60', lockedForSigner: true },
-  { tabLabel: 'theestimatedpayment', x: '82', y: '219', pageNumber: '2', width: '50', lockedForSigner: true },
-  { tabLabel: 'payment_exceed_percent', x: '353', y: '259', pageNumber: '2', width: '36', lockedForSigner: true },
-  { tabLabel: 'outstanding_sales_based_financing', x: '476', y: '527', pageNumber: '2', width: '66', optional: true, lockedForSigner: true },
-  { tabLabel: 'total_amount_new_financing', x: '479', y: '553', pageNumber: '2', width: '66', optional: true, lockedForSigner: true },
-  { tabLabel: 'unpaid_finance_charges', x: '478', y: '602', pageNumber: '2', width: '66', optional: true, lockedForSigner: true },
+  { tabLabel: 'total_amount_commercial_financing', x: '306', y: '75', lockedForSigner: true },
+  { tabLabel: 'deducted_at_disbursement', x: '306', y: '114', lockedForSigner: true },
+  { tabLabel: 'total_commerical_financing', x: '305', y: '149', lockedForSigner: true },
+  { tabLabel: 'finance_charge', x: '306', y: '194', lockedForSigner: true },
+  { tabLabel: 'total_repayment_amount', x: '305', y: '218', lockedForSigner: true },
+  { tabLabel: 'estimated_time_periodic_paymement', x: '300', y: '253', width: '60', lockedForSigner: true },
+  { tabLabel: 'theestimatedpayment', x: '80', y: '225', pageNumber: '2', width: '50', lockedForSigner: true },
+  { tabLabel: 'payment_exceed_percent', x: '351', y: '262', pageNumber: '2', width: '36', lockedForSigner: true },
+  { tabLabel: 'outstanding_sales_based_financing', x: '481', y: '524', pageNumber: '2', width: '66', optional: true, lockedForSigner: true },
+  { tabLabel: 'total_amount_new_financing', x: '484', y: '550', pageNumber: '2', width: '66', optional: true, lockedForSigner: true },
+  { tabLabel: 'unpaid_finance_charges', x: '483', y: '599', pageNumber: '2', width: '66', optional: true, lockedForSigner: true },
 ] as const;
 
 export const CT_WEEKLY_NOREFI_TEXT_TABS = [
-  { tabLabel: 'total_amount_commercial_financing', x: '299', y: '73', lockedForSigner: true },
-  { tabLabel: 'deducted_at_disbursement', x: '301', y: '114', lockedForSigner: true },
-  { tabLabel: 'total_commerical_financing', x: '300', y: '152', lockedForSigner: true },
-  { tabLabel: 'finance_charge', x: '300', y: '192', lockedForSigner: true },
-  { tabLabel: 'total_repayment_amount', x: '303', y: '215', lockedForSigner: true },
-  { tabLabel: 'estimated_time_periodic_paymement', x: '299', y: '258', width: '60', lockedForSigner: true },
-  { tabLabel: 'theestimatedpayment', x: '83', y: '245', pageNumber: '2', width: '50', lockedForSigner: true },
-  { tabLabel: 'payment_exceed_percent', x: '341', y: '284', pageNumber: '2', width: '36', lockedForSigner: true },
+  { tabLabel: 'total_amount_commercial_financing', x: '306', y: '75', lockedForSigner: true },
+  { tabLabel: 'deducted_at_disbursement', x: '306', y: '114', lockedForSigner: true },
+  { tabLabel: 'total_commerical_financing', x: '305', y: '149', lockedForSigner: true },
+  { tabLabel: 'finance_charge', x: '306', y: '194', lockedForSigner: true },
+  { tabLabel: 'total_repayment_amount', x: '305', y: '218', lockedForSigner: true },
+  { tabLabel: 'estimated_time_periodic_paymement', x: '300', y: '253', width: '60', lockedForSigner: true },
+  { tabLabel: 'theestimatedpayment', x: '80', y: '225', pageNumber: '2', width: '50', lockedForSigner: true },
+  { tabLabel: 'payment_exceed_percent', x: '351', y: '262', pageNumber: '2', width: '36', lockedForSigner: true },
 ] as const;
 
 export const CT_WEEKLY_REFI_TEXT_TABS = [
-  { tabLabel: 'total_amount_commercial_financing', x: '300', y: '75', lockedForSigner: true },
-  { tabLabel: 'deducted_at_disbursement', x: '300', y: '113', lockedForSigner: true },
-  { tabLabel: 'total_commerical_financing', x: '299', y: '150', lockedForSigner: true },
-  { tabLabel: 'finance_charge', x: '301', y: '192', lockedForSigner: true },
-  { tabLabel: 'total_repayment_amount', x: '301', y: '218', lockedForSigner: true },
-  { tabLabel: 'estimated_time_periodic_paymement', x: '296', y: '247', width: '60', lockedForSigner: true },
-  { tabLabel: 'theestimatedpayment', x: '82', y: '219', pageNumber: '2', width: '50', lockedForSigner: true },
-  { tabLabel: 'payment_exceed_percent', x: '340', y: '259', pageNumber: '2', width: '36', lockedForSigner: true },
-  { tabLabel: 'outstanding_sales_based_financing', x: '466', y: '528', pageNumber: '2', width: '66', optional: true, lockedForSigner: true },
-  { tabLabel: 'total_amount_new_financing', x: '469', y: '555', pageNumber: '2', width: '66', optional: true, lockedForSigner: true },
-  { tabLabel: 'unpaid_finance_charges', x: '469', y: '603', pageNumber: '2', width: '66', optional: true, lockedForSigner: true },
+  { tabLabel: 'total_amount_commercial_financing', x: '306', y: '75', lockedForSigner: true },
+  { tabLabel: 'deducted_at_disbursement', x: '306', y: '114', lockedForSigner: true },
+  { tabLabel: 'total_commerical_financing', x: '305', y: '149', lockedForSigner: true },
+  { tabLabel: 'finance_charge', x: '306', y: '194', lockedForSigner: true },
+  { tabLabel: 'total_repayment_amount', x: '305', y: '218', lockedForSigner: true },
+  { tabLabel: 'estimated_time_periodic_paymement', x: '300', y: '253', width: '60', lockedForSigner: true },
+  { tabLabel: 'theestimatedpayment', x: '80', y: '225', pageNumber: '2', width: '50', lockedForSigner: true },
+  { tabLabel: 'payment_exceed_percent', x: '351', y: '262', pageNumber: '2', width: '36', lockedForSigner: true },
+  { tabLabel: 'outstanding_sales_based_financing', x: '481', y: '524', pageNumber: '2', width: '66', optional: true, lockedForSigner: true },
+  { tabLabel: 'total_amount_new_financing', x: '484', y: '550', pageNumber: '2', width: '66', optional: true, lockedForSigner: true },
+  { tabLabel: 'unpaid_finance_charges', x: '483', y: '599', pageNumber: '2', width: '66', optional: true, lockedForSigner: true },
 ] as const;
 
 export const FL_MULTI_DAILY_TEXT_TABS = [
@@ -284,27 +286,27 @@ export const KS_MULTI_DAILY_TEXT_TABS = [
 ] as const;
 
 export const UT_DAILY_TEXT_TABS = [
-  { tabLabel: 'purchase_amount', x: '481', y: '114', lockedForSigner: true },
-  { tabLabel: 'net_to_merchant', x: '481', y: '170', lockedForSigner: true },
-  { tabLabel: 'purchase_price', x: '481', y: '226', lockedForSigner: true },
-  { tabLabel: 'finance_charge', x: '481', y: '268', lockedForSigner: true },
-  { tabLabel: 'remittance', x: '481', y: '310', lockedForSigner: true },
-  { tabLabel: 'estimated_payment_amount', x: '246', y: '360', lockedForSigner: true },
-  { tabLabel: 'appendix_underwriting_fees', x: '481', y: '573', lockedForSigner: true },
-  { tabLabel: 'payment_terms_percent', x: '240', y: '637', width: '50', lockedForSigner: true },
-  { tabLabel: 'payment_terms_percent', x: '261', y: '660', width: '50', lockedForSigner: true },
+  { tabLabel: 'purchase_amount', x: '481', y: '112', lockedForSigner: true },
+  { tabLabel: 'total_amount_fund_disbursed', x: '481', y: '168', lockedForSigner: true },
+  { tabLabel: 'net_to_merchant', x: '481', y: '224', lockedForSigner: true },
+  { tabLabel: 'purchase_price', x: '481', y: '266', lockedForSigner: true },
+  { tabLabel: 'finance_charge', x: '481', y: '308', lockedForSigner: true },
+  { tabLabel: 'remittance', x: '246', y: '358', width: '50', lockedForSigner: true },
+  { tabLabel: 'appendix_underwriting_fees', x: '481', y: '571', lockedForSigner: true },
+  { tabLabel: 'payment_terms_percent', x: '240', y: '635', width: '50', lockedForSigner: true },
+  { tabLabel: 'payment_terms_percent', x: '261', y: '658', width: '50', lockedForSigner: true },
 ] as const;
 
 export const UT_WEEKLY_TEXT_TABS = [
-  { tabLabel: 'purchase_amount', x: '481', y: '114', lockedForSigner: true },
-  { tabLabel: 'net_to_merchant', x: '481', y: '170', lockedForSigner: true },
-  { tabLabel: 'purchase_price', x: '481', y: '226', lockedForSigner: true },
-  { tabLabel: 'finance_charge', x: '481', y: '268', lockedForSigner: true },
-  { tabLabel: 'remittance', x: '481', y: '310', lockedForSigner: true },
-  { tabLabel: 'estimated_payment_amount', x: '246', y: '349', lockedForSigner: true },
-  { tabLabel: 'appendix_underwriting_fees', x: '481', y: '573', lockedForSigner: true },
-  { tabLabel: 'payment_terms_percent', x: '241', y: '637', width: '50', lockedForSigner: true },
-  { tabLabel: 'payment_terms_percent', x: '264', y: '660', width: '50', lockedForSigner: true },
+  { tabLabel: 'purchase_amount', x: '481', y: '112', lockedForSigner: true },
+  { tabLabel: 'total_amount_fund_disbursed', x: '481', y: '168', lockedForSigner: true },
+  { tabLabel: 'net_to_merchant', x: '481', y: '224', lockedForSigner: true },
+  { tabLabel: 'purchase_price', x: '481', y: '266', lockedForSigner: true },
+  { tabLabel: 'finance_charge', x: '481', y: '308', lockedForSigner: true },
+  { tabLabel: 'remittance', x: '246', y: '347', width: '50', lockedForSigner: true },
+  { tabLabel: 'appendix_underwriting_fees', x: '481', y: '571', lockedForSigner: true },
+  { tabLabel: 'payment_terms_percent', x: '241', y: '635', width: '50', lockedForSigner: true },
+  { tabLabel: 'payment_terms_percent', x: '264', y: '658', width: '50', lockedForSigner: true },
 ] as const;
 
 export const VA_DAILY_TEXT_TABS = [
@@ -313,9 +315,9 @@ export const VA_DAILY_TEXT_TABS = [
   { tabLabel: 'disbursement_amount', x: '279', y: '141', lockedForSigner: true },
   { tabLabel: 'finance_charge', x: '277', y: '180', lockedForSigner: true },
   { tabLabel: 'total_repayment_amount', x: '279', y: '204', lockedForSigner: true },
-  { tabLabel: 'estimated_number_of_payement', x: '276', y: '246', width: '50', lockedForSigner: true },
+  { tabLabel: 'estimated_number_of_payement', x: '276', y: '243', width: '50', lockedForSigner: true },
   { tabLabel: 'prepayment_discount', x: '396', y: '594', lockedForSigner: true },
-  { tabLabel: 'fordailypayments', x: '156', y: '269', pageNumber: '3', lockedForSigner: true },
+  { tabLabel: 'fordailypayments', x: '156', y: '272', pageNumber: '3', lockedForSigner: true },
   { tabLabel: 'payment_exceeded_percent', x: '391', y: '352', pageNumber: '3', width: '50', lockedForSigner: true },
 ] as const;
 
@@ -326,7 +328,7 @@ export const VA_WEEKLY_TEXT_TABS = [
   { tabLabel: 'finance_charge', x: '279', y: '178', lockedForSigner: true },
   { tabLabel: 'total_repayment_amount', x: '279', y: '205', lockedForSigner: true },
   { tabLabel: 'estimated_number_of_payement', x: '277', y: '254', width: '50', lockedForSigner: true },
-  { tabLabel: 'prepayment_discount', x: '415', y: '595', lockedForSigner: true },
-  { tabLabel: 'weekly_payments', x: '53', y: '296', pageNumber: '3', lockedForSigner: true },
+  { tabLabel: 'appendix_underwriting_fees', x: '415', y: '595', width: '60', lockedForSigner: true },
+  { tabLabel: 'weekly_payments', x: '53', y: '299', pageNumber: '3', lockedForSigner: true },
   { tabLabel: 'payment_exceeded_percent', x: '211', y: '379', pageNumber: '3', width: '50', lockedForSigner: true },
 ] as const;

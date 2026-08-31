@@ -28,7 +28,7 @@ function textPlacements(
       x: tab.x,
       y: tab.y,
       width: tab.width && tab.width !== 'auto' ? tab.width : undefined,
-      height: tab.height || '18',
+      height: tab.height || '14',
       optional: tab.optional === true,
       lockedForSigner: tab.lockedForSigner === true,
       signerParty: 'primary',
@@ -54,7 +54,7 @@ function datePlacements(
       pageNumber: tab.pageNumber || config.pageNumber,
       x: tab.x,
       y: tab.y,
-      height: '18',
+      height: '14',
       signerParty: tab.signerParty === 'secondary' ? 'secondary' : 'primary',
     });
     id += 1;
@@ -78,7 +78,7 @@ function signaturePlacements(
       x: tab.x,
       y: tab.y,
       width: '140',
-      height: '36',
+      height: '22',
       signerParty: tab.signerParty === 'secondary' ? 'secondary' : 'primary',
     });
     id += 1;
@@ -169,7 +169,7 @@ export function buildAddendumDocumentLayout(
 ): DocumentLayout | null {
   const key = resolveAddendumDocumentConfigKey(configKey);
   if (!key || key === 'guarantorAddendum') return null;
-  const config = getAddendumDocumentConfig(key, variant);
+  const config = getAddendumDocumentConfig(configKey, variant);
   if (!config) return null;
   return buildDocumentLayoutFromAddendumDocumentConfig({
     configKey: key,
@@ -217,6 +217,7 @@ export async function tryBuildAddendumLayoutFromDbRow(row: {
     funderName,
     name: row.name,
     pdfUrl: row.pdfUrl,
+    layoutKey: row.layoutKey,
     fileName,
   });
 
@@ -224,7 +225,7 @@ export async function tryBuildAddendumLayoutFromDbRow(row: {
   if (!config) return null;
 
   return buildDocumentLayoutFromAddendumDocumentConfig({
-    configKey,
+    configKey: resolveAddendumDocumentConfigKey(configKey) || configKey,
     config,
     name:
       String(row.name || '').trim() ||

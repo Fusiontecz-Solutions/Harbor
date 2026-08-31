@@ -7,6 +7,7 @@ import {
 import type { ApplicationFieldChange } from './applicationUpdateActivityLog';
 import { markActivityLogged } from './outboundCommunicationService';
 import type { AuthenticatedUser } from './applicationService';
+import { resolveExistingApplicationId } from '../utils/resolveExistingApplicationId';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -37,18 +38,7 @@ function actionTypeForField(field: string): ApplicationActivityActionType {
 }
 
 async function resolveApplicationUuid(ref: unknown): Promise<string | null> {
-  const raw = Array.isArray(ref) ? ref[0] : ref;
-  const str = String(raw ?? '').trim();
-  if (!str) return null;
-  if (UUID_RE.test(str)) return str;
-  if (/^\d+$/.test(str)) {
-    const row = await prisma.application.findUnique({
-      where: { applicationId: Number(str) },
-      select: { id: true },
-    });
-    return row?.id ?? null;
-  }
-  return null;
+  return resolveExistingApplicationId(ref);
 }
 
 function extractApplicationUuidFromPath(path: string): string | null {
@@ -194,7 +184,7 @@ async function buildRouteActivityPlan(
   const parts = normalized.split('/').filter(Boolean);
   const resource = parts[0] ?? '';
 
-  const pathAppId = extractApplicationUuidFromPath(path);
+  const pathAppId = await resolveApplicationUuid(extractApplicationUuidFromPath(path));
   if (pathAppId && resource === 'applications') {
     const sub = parts[2] ?? '';
     if (!sub && (method === 'PUT' || method === 'PATCH')) {
@@ -216,14 +206,13 @@ async function buildRouteActivityPlan(
     };
   }
 
-  const bodyAppRef =
-    body.application ??
-    body.applicationId ??
-    (resource === 'offer-decisions' ? body.application : undefined);
-
   let applicationId = pathAppId;
-  if (!applicationId && bodyAppRef) {
-    applicationId = await resolveApplicationUuid(bodyAppRef);
+  if (!applicationId) {
+    const bodyRefs = [body.applicationId, body.application];
+    for (const bodyRef of bodyRefs) {
+      applicationId = await resolveApplicationUuid(bodyRef);
+      if (applicationId) break;
+    }
   }
 
   if (!applicationId && resource === 'bank-analysis' && method !== 'POST') {

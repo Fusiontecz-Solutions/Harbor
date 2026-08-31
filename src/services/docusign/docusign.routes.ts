@@ -10,6 +10,7 @@ import {
   prefillFormFields,
   getEmbeddedRequestUrl,
   getEmbeddedSignLink,
+  resendEnvelope,
   voidDocument,
   getDocumentProperties,
   downloadSignedPdf,
@@ -42,6 +43,7 @@ router.post('/merge-and-send', authenticateToken, mergeAndSendTemplates);
 router.post('/embedded-request-url', authenticateToken, getEmbeddedRequestUrl);
 router.post('/embedded-sign-link', authenticateToken, getEmbeddedSignLink);
 router.post('/void-document', authenticateToken, voidDocument);
+router.post('/resend-envelope', authenticateToken, resendEnvelope);
 router.get('/document-properties/:documentId', authenticateToken, getDocumentProperties);
 router.get(
   '/prefilled-pdf/application/:applicationId',

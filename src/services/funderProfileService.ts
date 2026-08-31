@@ -580,10 +580,12 @@ async function upsertFunderSupplementalBoldSignTemplate(
           ? 'Addendum NY'
           : supplementalType === 'addendum_va'
             ? 'Addendum VA'
-            : supplementalType === 'ach_authorization' ||
-                supplementalType === 'ach_authorization_texas'
-              ? 'ACH Authorization'
-              : 'Addendum';
+            : supplementalType === 'addendum_epa'
+              ? 'EPA Addendum'
+              : supplementalType === 'ach_authorization' ||
+                  supplementalType === 'ach_authorization_texas'
+                ? 'ACH Authorization'
+                : 'Addendum';
   const templateData = {
     name: `${funderName} ${label}`,
     type: supplementalType,

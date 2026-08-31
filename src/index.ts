@@ -136,6 +136,8 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 // Start the HTTP server after DB is ready (seed default templates)
 void (async () => {
   await connectDB();
+  const { warmupDealIdSequence } = await import('./services/nextDealIdService');
+  warmupDealIdSequence();
   httpServer.listen(PORT, () => {
     console.log(`Server is running on http://localhost:${PORT}`);
     console.log(`Socket.IO server initialized`);

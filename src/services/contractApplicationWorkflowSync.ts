@@ -169,6 +169,18 @@ function isApplicationPastContractSignedStage(app: {
   );
 }
 
+/** True when Create & Save Offer should move the deal to Contract Pending. */
+export function shouldAdvanceApplicationToContractPending(app: {
+  currentQueue?: string | null;
+  currentState?: string | null;
+}): boolean {
+  return !(
+    normalizeWorkflowToken(app.currentQueue) === 'contractpending' ||
+    normalizeWorkflowToken(app.currentState) === 'contractpending' ||
+    isApplicationPastContractSignedStage(app)
+  );
+}
+
 async function syncApplicationWorkflowStage(
   prismaClient: PrismaLike,
   applicationId: string,
@@ -242,10 +254,7 @@ export async function syncApplicationToContractPending(
     applicationId,
     contractPendingApplicationUpdateData(),
     meta,
-    (app) =>
-      normalizeWorkflowToken(app.currentQueue) === 'contractpending' ||
-      normalizeWorkflowToken(app.currentState) === 'contractpending' ||
-      isApplicationPastContractSignedStage(app),
+    (app) => !shouldAdvanceApplicationToContractPending(app),
   );
 }
 

@@ -251,6 +251,7 @@ const SUPPLEMENTAL_GENERIC_DISPLAY_NAMES: Record<string, string> = {
   addendum_ca: "Addendum CA",
   addendum_ny: "Addendum NY",
   addendum_va: "Addendum VA",
+  addendum_epa: "EPA Addendum",
   ach_authorization: "ACH Authorization",
   ach_authorization_standalone: "ACH Authorization",
   ach_authorization_texas: "ACH Authorization",

@@ -1,10 +1,15 @@
+import { isClearCapitalFunderName } from './utils/clear-capital-contract-layout';
+
 /**
  * Addendum PDF tab coordinates for DocuSign merged envelopes.
  *
+ * Harbor View Capital is the source of truth (same sit-on-blank mapping as
+ * `ADDENDUM_P` / CA / NY / VA). Clear Capital reuses those coords; CA page 3
+ * and VA page 2 only shift because the printed funder name is shorter.
+ *
  * Measured from Harbor View Capital + Clear Capital addendum PDFs
- * (letter 612×792, top-left origin). Guarantee pages (CA p3 / VA p2) differ by
- * funder because the printed funder name length shifts the merchant blank and
- * signature blocks — use `resolveAddendumPdfVariant` when building layouts.
+ * (letter 612×792, top-left origin). Use `resolveAddendumPdfVariant` when
+ * building layouts so Clear Capital gets the guarantee-page offsets.
  *
  * `tabLabel` values are unscoped PDF variables — CRM prefill ids are
  * `{scope}{tabLabel}` via `layout-prefill-scope.ts` (e.g. `addendum_p_addendum_dated`).
@@ -50,11 +55,21 @@ export interface AddendumDocumentFieldConfig {
   initialHereTabs?: { x: string; y: string; pageNumber?: string }[];
 }
 
-/** Sit-on-blank: measured underscore yTop minus 1 so text/sign sit above the line. */
-const ADDENDUM_BLANK_UPLIFT_PX = 1;
+/**
+ * Sit-on-blank (same visual as ACH Account Holder fields):
+ * measured underscore y is the printed line. DocuSign yPosition is the TOP
+ * of a 14px tab — lift so the bottom edge *touches* the blank from above
+ * instead of sitting on / cutting through the line and the labels under it.
+ */
+const ADDENDUM_BLANK_UPLIFT_PX = 8;
+/**
+ * SignHere extra lift aligns the ~22px Sign box bottom with the 14px
+ * Print Name / Print Title tabs on the same underscore.
+ */
+const ADDENDUM_SIGN_HERE_EXTRA_UPLIFT_PX = 8;
 
-const sitOnBlankY = (y: number): string =>
-  String(Math.max(0, Math.round(y) - ADDENDUM_BLANK_UPLIFT_PX));
+const sitOnBlankY = (y: number, extraUplift = 0): string =>
+  String(Math.max(0, Math.round(y) - ADDENDUM_BLANK_UPLIFT_PX - extraUplift));
 
 const lockedText = (
   tabLabel: string,
@@ -67,7 +82,30 @@ const lockedText = (
   y: sitOnBlankY(y),
   pageNumber: opts?.pageNumber,
   width: opts?.width != null ? String(Math.round(opts.width)) : undefined,
-  height: opts?.height != null ? String(Math.round(opts.height)) : '18',
+  height: opts?.height != null ? String(Math.round(opts.height)) : '14',
+  optional: opts?.optional === true,
+  lockedForSigner: true,
+});
+
+/**
+ * Paragraph underscores (dates / merchant / APR in the sentence).
+ * DocuSign y is the TOP of the tab. Lift so the baseline sits on the blank
+ * (touching from above) without covering the words on the same line.
+ */
+const ADDENDUM_INLINE_UPLIFT_PX = 8;
+
+const lockedInlineText = (
+  tabLabel: string,
+  x: number,
+  y: number,
+  opts?: { pageNumber?: string; width?: number; height?: number; optional?: boolean },
+): AddendumDocumentFieldConfig['textTabs'][number] => ({
+  tabLabel,
+  x: String(Math.round(x)),
+  y: String(Math.max(0, Math.round(y) - ADDENDUM_INLINE_UPLIFT_PX)),
+  pageNumber: opts?.pageNumber,
+  width: opts?.width != null ? String(Math.round(opts.width)) : undefined,
+  height: opts?.height != null ? String(Math.round(opts.height)) : '11',
   optional: opts?.optional === true,
   lockedForSigner: true,
 });
@@ -78,60 +116,101 @@ const signHereTab = (
   opts?: { pageNumber?: string; signerParty?: AddendumDocumentTabParty },
 ): AddendumDocumentFieldConfig['signHere'][number] => ({
   x: String(Math.round(x)),
-  y: sitOnBlankY(y),
+  y: sitOnBlankY(y, ADDENDUM_SIGN_HERE_EXTRA_UPLIFT_PX),
   pageNumber: opts?.pageNumber,
   signerParty: opts?.signerParty,
 });
 
-/** Addendum P (REFI) — 1 page. Identical blanks on Harbor View + Clear Capital. */
-const ADDENDUM_P_CONFIG: AddendumDocumentFieldConfig = {
+const ADDENDUM_P_SIGNATURE_TEXT: AddendumDocumentFieldConfig['textTabs'] = [
+  lockedText('print_name', 93, 529, { width: 140 }),
+  lockedText('print_title', 243, 529, { width: 140 }),
+];
+
+/** Addendum P (REFI) — Harbor View: merchant blank on the line above ("Merchant"). */
+const ADDENDUM_P_HARBOR_VIEW: AddendumDocumentFieldConfig = {
   documentId: '1',
   pageNumber: '1',
   textTabs: [
-    lockedText('addendum_dated', 271, 129, { width: 120 }),
-    lockedText('agreement_dated', 357, 157, { width: 180 }),
-    // Merchant blank after printed funder name (setup guide: business name).
-    lockedText('funder_and_business_name', 72, 212, { width: 340 }),
-    lockedText('pay_up_to_amount', 343, 239, { width: 107 }),
-    lockedText('agreement_to_label_name', 72, 295, { width: 347 }),
-    lockedText('print_name', 93, 529, { width: 140 }),
-    lockedText('print_title', 243, 529, { width: 140 }),
+    lockedInlineText('addendum_dated', 271, 132, { width: 120 }),
+    lockedInlineText('agreement_dated', 357, 160, { width: 160 }),
+    lockedInlineText('funder_and_business_name', 72, 214, { width: 430 }),
+    lockedInlineText('pay_up_to_amount', 343, 242, { width: 107 }),
+    lockedInlineText('agreement_to_label_name', 72, 298, { width: 347 }),
+    ...ADDENDUM_P_SIGNATURE_TEXT,
   ],
   dateTabs: [],
   signHere: [signHereTab(394, 529)],
 };
 
-/** Addendum NY — 1 page. Harbor View / Clear Capital blanks match (±1px). */
-const ADDENDUM_NY_CONFIG: AddendumDocumentFieldConfig = {
+/**
+ * Addendum P — Clear Capital. Opening-sentence blanks use inline tabs (the 8px
+ * ACH lift floats them into the line above). Merchant sits on the long
+ * underscore above ("Merchant"), not on the CLEAR CAPITAL line.
+ */
+const ADDENDUM_P_CLEAR_CAPITAL: AddendumDocumentFieldConfig = {
   documentId: '1',
   pageNumber: '1',
   textTabs: [
-    lockedText('agreement_dated', 254, 129, { width: 120 }),
-    lockedText('agreement_dated_2', 308, 142, { width: 180 }),
-    lockedText('funder_and_business_name', 72, 170, { width: 340 }),
-    lockedText('print_name', 93, 479, { width: 140 }),
-    lockedText('print_title', 243, 479, { width: 140 }),
+    lockedInlineText('addendum_dated', 271, 132, { width: 120 }),
+    lockedInlineText('agreement_dated', 357, 160, { width: 160 }),
+    lockedInlineText('funder_and_business_name', 72, 214, { width: 430 }),
+    lockedInlineText('pay_up_to_amount', 343, 242, { width: 107 }),
+    lockedInlineText('agreement_to_label_name', 72, 298, { width: 347 }),
+    ...ADDENDUM_P_SIGNATURE_TEXT,
+  ],
+  dateTabs: [],
+  signHere: [signHereTab(394, 529)],
+};
+
+const ADDENDUM_NY_SIGNATURE_TEXT: AddendumDocumentFieldConfig['textTabs'] = [
+  lockedText('print_name', 93, 479, { width: 140 }),
+  lockedText('print_title', 243, 479, { width: 140 }),
+];
+
+/** Addendum NY — Harbor View: merchant blank on the wrapped line. */
+const ADDENDUM_NY_HARBOR_VIEW: AddendumDocumentFieldConfig = {
+  documentId: '1',
+  pageNumber: '1',
+  textTabs: [
+    lockedInlineText('agreement_dated', 254, 132, { width: 120 }),
+    lockedInlineText('agreement_dated_2', 308, 145, { width: 180 }),
+    lockedInlineText('funder_and_business_name', 72, 173, { width: 430 }),
+    ...ADDENDUM_NY_SIGNATURE_TEXT,
   ],
   dateTabs: [],
   signHere: [signHereTab(394, 479)],
 };
 
-/** Shared CA pages 1–2 (identical on both funder PDFs). */
-const ADDENDUM_CA_PAGES_1_2_TEXT: AddendumDocumentFieldConfig['textTabs'] = [
-  lockedText('agreement_dated', 254, 142, { width: 120 }),
-  lockedText('agreement_dated_2', 308, 156, { width: 180 }),
-  lockedText('funder_and_business_name', 72, 184, { width: 340 }),
-  lockedText('agreement_apr_percent', 167, 584, { width: 40 }),
+/** Addendum NY — Clear Capital: merchant blank on the line under FUNDER, not on CLEAR CAPITAL. */
+const ADDENDUM_NY_CLEAR_CAPITAL: AddendumDocumentFieldConfig = {
+  documentId: '1',
+  pageNumber: '1',
+  textTabs: [
+    lockedInlineText('agreement_dated', 254, 132, { width: 120 }),
+    lockedInlineText('agreement_dated_2', 308, 145, { width: 180 }),
+    lockedInlineText('funder_and_business_name', 72, 173, { width: 430 }),
+    ...ADDENDUM_NY_SIGNATURE_TEXT,
+  ],
+  dateTabs: [],
+  signHere: [signHereTab(394, 479)],
+};
+
+/** Shared CA pages 1–2 dates / APR / signatures (both funder PDFs). */
+const ADDENDUM_CA_PAGES_1_2_SHARED: AddendumDocumentFieldConfig['textTabs'] = [
+  lockedInlineText('agreement_dated', 254, 145, { width: 120 }),
+  lockedInlineText('agreement_dated_2', 308, 159, { width: 180 }),
+  lockedInlineText('agreement_apr_percent', 167, 584, { width: 48 }),
   lockedText('print_name', 93, 177, { pageNumber: '2', width: 140 }),
   lockedText('print_title', 243, 177, { pageNumber: '2', width: 140 }),
 ];
 
-/** Harbor View CA — guarantee page: funder name wraps, merchant blank on next line. */
+/** Harbor View CA — page 1 merchant wraps; guarantee page merchant on next line. */
 const ADDENDUM_CA_HARBOR_VIEW: AddendumDocumentFieldConfig = {
   documentId: '1',
   pageNumber: '1',
   textTabs: [
-    ...ADDENDUM_CA_PAGES_1_2_TEXT,
+    ...ADDENDUM_CA_PAGES_1_2_SHARED,
+    lockedInlineText('funder_and_business_name', 72, 187, { width: 430 }),
     lockedText('agreement_dated_page3', 254, 142, { pageNumber: '3', width: 120 }),
     lockedText('agreement_dated_page3b', 110, 156, { pageNumber: '3', width: 120 }),
     lockedText('agreement_dated_page3', 199, 170, { pageNumber: '3', width: 180 }),
@@ -150,12 +229,13 @@ const ADDENDUM_CA_HARBOR_VIEW: AddendumDocumentFieldConfig = {
   ],
 };
 
-/** Clear Capital CA — guarantee page: merchant blank continues on funder line. */
+/** Clear Capital CA — merchant blank continues on the funder line (page 1 and p3). */
 const ADDENDUM_CA_CLEAR_CAPITAL: AddendumDocumentFieldConfig = {
   documentId: '1',
   pageNumber: '1',
   textTabs: [
-    ...ADDENDUM_CA_PAGES_1_2_TEXT,
+    ...ADDENDUM_CA_PAGES_1_2_SHARED,
+    lockedInlineText('funder_and_business_name', 72, 184, { width: 430 }),
     lockedText('agreement_dated_page3', 254, 142, { pageNumber: '3', width: 120 }),
     lockedText('agreement_dated_page3b', 110, 156, { pageNumber: '3', width: 120 }),
     lockedText('agreement_dated_page3', 196, 170, { pageNumber: '3', width: 180 }),
@@ -174,21 +254,20 @@ const ADDENDUM_CA_CLEAR_CAPITAL: AddendumDocumentFieldConfig = {
   ],
 };
 
-/** Shared VA page 1 (identical on both funder PDFs). */
-const ADDENDUM_VA_PAGE_1_TEXT: AddendumDocumentFieldConfig['textTabs'] = [
+const ADDENDUM_VA_PAGE_1_SHARED: AddendumDocumentFieldConfig['textTabs'] = [
   lockedText('agreement_dated', 254, 129, { width: 120 }),
   lockedText('agreement_dated_2', 308, 142, { width: 180 }),
-  lockedText('funder_and_business_name', 72, 170, { width: 340 }),
   lockedText('print_name', 93, 557, { width: 140 }),
   lockedText('print_title', 243, 557, { width: 140 }),
 ];
 
-/** Harbor View VA — guarantee page wraps after HARBOR VIEW. */
+/** Harbor View VA — merchant blank on the wrapped line. */
 const ADDENDUM_VA_HARBOR_VIEW: AddendumDocumentFieldConfig = {
   documentId: '1',
   pageNumber: '1',
   textTabs: [
-    ...ADDENDUM_VA_PAGE_1_TEXT,
+    ...ADDENDUM_VA_PAGE_1_SHARED,
+    lockedText('funder_and_business_name', 72, 170, { width: 340 }),
     lockedText('agreement_dated_page2', 254, 129, { pageNumber: '2', width: 120 }),
     lockedText('agreement_dated_page2b', 110, 142, { pageNumber: '2', width: 120 }),
     lockedText('agreement_dated_page2', 199, 156, { pageNumber: '2', width: 180 }),
@@ -207,16 +286,23 @@ const ADDENDUM_VA_HARBOR_VIEW: AddendumDocumentFieldConfig = {
   ],
 };
 
-/** Clear Capital VA — merchant blank on funder line; signature block higher. */
+/** Clear Capital VA — page-1 opening blanks sit in the sentence (not ACH-style). */
 const ADDENDUM_VA_CLEAR_CAPITAL: AddendumDocumentFieldConfig = {
   documentId: '1',
   pageNumber: '1',
   textTabs: [
-    ...ADDENDUM_VA_PAGE_1_TEXT,
-    lockedText('agreement_dated_page2', 254, 129, { pageNumber: '2', width: 120 }),
-    lockedText('agreement_dated_page2b', 110, 142, { pageNumber: '2', width: 120 }),
-    lockedText('agreement_dated_page2', 196, 156, { pageNumber: '2', width: 180 }),
-    lockedText('funder_and_business_name_page2', 200, 170, {
+    // "This is an Addendum dated ________" — after "dated", on the first line.
+    lockedInlineText('agreement_dated', 272, 132, { width: 108 }),
+    // "Agreement (\u201cAgreement\u201d) dated ________ by and"
+    lockedInlineText('agreement_dated_2', 318, 146, { width: 140 }),
+    // Long merchant underscore on the line under CLEAR CAPITAL ("FUNDER") and
+    lockedInlineText('funder_and_business_name', 72, 174, { width: 430 }),
+    lockedText('print_name', 93, 557, { width: 140 }),
+    lockedText('print_title', 243, 557, { width: 140 }),
+    lockedInlineText('agreement_dated_page2', 254, 129, { pageNumber: '2', width: 120 }),
+    lockedInlineText('agreement_dated_page2b', 110, 142, { pageNumber: '2', width: 120 }),
+    lockedInlineText('agreement_dated_page2', 196, 156, { pageNumber: '2', width: 180 }),
+    lockedInlineText('funder_and_business_name_page2', 200, 170, {
       pageNumber: '2',
       width: 340,
     }),
@@ -231,16 +317,47 @@ const ADDENDUM_VA_CLEAR_CAPITAL: AddendumDocumentFieldConfig = {
   ],
 };
 
+/**
+ * EPA / EPD Pre-Payment Addendum — measured from
+ * `EPD- ADDENDUM.pdf` / `EPD- ADDENDUM Cleard.pdf` (letter 612×792).
+ * Both funder PDFs share the same geometry (7EVEN CAPITAL is white-inked).
+ *
+ * Opening line: date blank after "dated" (x 292–363), funder over "7EVEN CAPITAL".
+ * Signature block: By: line (x=91, y=430.2 w=235), Name / Title / Date labels.
+ */
+const ADDENDUM_EPA_HARBOR_VIEW: AddendumDocumentFieldConfig = {
+  documentId: '1',
+  pageNumber: '1',
+  textTabs: [
+    lockedInlineText('agreement_dated', 292, 165, { width: 68 }),
+    lockedInlineText('funder_name', 410, 167, { width: 130 }),
+    lockedText('print_name', 110, 449, { width: 216 }),
+    lockedText('signature_date', 100, 511, { width: 140 }),
+  ],
+  dateTabs: [],
+  signHere: [signHereTab(91, 415)],
+};
+
+const ADDENDUM_EPA_CLEAR_CAPITAL: AddendumDocumentFieldConfig = {
+  ...ADDENDUM_EPA_HARBOR_VIEW,
+};
+
 export const ADDENDUM_DOCUMENT_CONFIG: Record<string, AddendumDocumentFieldConfig> = {
-  addendum_p: ADDENDUM_P_CONFIG,
+  addendum_p: ADDENDUM_P_HARBOR_VIEW,
   addendum_ca: ADDENDUM_CA_HARBOR_VIEW,
-  addendum_ny: ADDENDUM_NY_CONFIG,
+  addendum_ny: ADDENDUM_NY_HARBOR_VIEW,
   addendum_va: ADDENDUM_VA_HARBOR_VIEW,
-  // Explicit variant keys (optional; preferred path is resolve via funder name).
+  addendum_epa: ADDENDUM_EPA_HARBOR_VIEW,
+  addendum_p_harbor_view: ADDENDUM_P_HARBOR_VIEW,
+  addendum_ny_harbor_view: ADDENDUM_NY_HARBOR_VIEW,
   addendum_ca_harbor_view: ADDENDUM_CA_HARBOR_VIEW,
-  addendum_ca_clear_capital: ADDENDUM_CA_CLEAR_CAPITAL,
   addendum_va_harbor_view: ADDENDUM_VA_HARBOR_VIEW,
+  addendum_epa_harbor_view: ADDENDUM_EPA_HARBOR_VIEW,
+  addendum_p_clear_capital: ADDENDUM_P_CLEAR_CAPITAL,
+  addendum_ny_clear_capital: ADDENDUM_NY_CLEAR_CAPITAL,
+  addendum_ca_clear_capital: ADDENDUM_CA_CLEAR_CAPITAL,
   addendum_va_clear_capital: ADDENDUM_VA_CLEAR_CAPITAL,
+  addendum_epa_clear_capital: ADDENDUM_EPA_CLEAR_CAPITAL,
   // Legacy guarantor multi-entity form (kept for BoldSign / older paths).
   guarantorAddendum: {
     documentId: '1',
@@ -291,38 +408,113 @@ export const ADDENDUM_LAYOUT_DISPLAY_NAMES: Record<string, string> = {
   addendum_ca: 'Addendum CA',
   addendum_ny: 'Addendum NY',
   addendum_va: 'Addendum VA',
+  addendum_epa: 'EPA Addendum',
 };
+
+const ADDENDUM_CANONICAL_KEYS = [
+  'addendum_p',
+  'addendum_ca',
+  'addendum_ny',
+  'addendum_va',
+  'addendum_epa',
+] as const;
+export type CanonicalAddendumLayoutKey = (typeof ADDENDUM_CANONICAL_KEYS)[number];
+
+function haystackLooksLikeClearCapital(value?: string | null): boolean {
+  const hay = String(value || '').toLowerCase();
+  if (!hay) return false;
+  return (
+    isClearCapitalFunderName(value) ||
+    hay.includes('clear_capital') ||
+    hay.includes('clear-capital') ||
+    hay.includes('clear capital') ||
+    /addendum[^a-z0-9]+(?:ca|va|ny|p)[^a-z0-9]+clear/.test(hay) ||
+    /(?:^|_)clear_capital(?:_|$)/.test(hay)
+  );
+}
 
 /**
  * Detect which addendum PDF geometry to use.
  * Clear Capital guarantee pages shift blanks ~14–28px vs Harbor View.
+ * Detection matches the main-contract helper (`isClearCapitalFunderName`) so
+ * "Clear" / "CLEAR CAPITAL" funder rows pick the same variant.
  */
 export function resolveAddendumPdfVariant(hints?: {
   name?: string | null;
   pdfUrl?: string | null;
   funderName?: string | null;
   fileName?: string | null;
+  layoutKey?: string | null;
 }): AddendumPdfVariant {
-  const haystack = [
+  const parts = [
     hints?.funderName,
     hints?.name,
     hints?.fileName,
     hints?.pdfUrl,
-  ]
-    .map((v) => String(v || '').toLowerCase())
-    .join(' ');
-
-  if (
-    haystack.includes('clear capital') ||
-    haystack.includes('clear_capital') ||
-    haystack.includes('clear-capital') ||
-    /addendum[^a-z0-9]+(?:ca|va|ny|p)[^a-z0-9]+clear/.test(haystack)
-  ) {
+    hints?.layoutKey,
+  ];
+  if (parts.some((v) => haystackLooksLikeClearCapital(v))) {
     return 'clear_capital';
   }
-
-  // Platform default PDFs / Harbor View / unspecified funders.
   return 'harbor_view';
+}
+
+/** Map funder / variant keys (`funder_<id>_addendum_ca`, `addendum_ca_clear_capital`) to P/CA/NY/VA. */
+export function canonicalAddendumLayoutKey(
+  layoutKeyOrType?: string | null,
+): CanonicalAddendumLayoutKey | null {
+  const raw = String(layoutKeyOrType || '')
+    .trim()
+    .toLowerCase();
+  if (!raw) return null;
+
+  if (
+    raw === 'addendum_epa' ||
+    raw === 'addendum_epa_harbor_view' ||
+    raw === 'addendum_epa_clear_capital' ||
+    raw.endsWith('_addendum_epa') ||
+    raw.includes('addendum_epa_')
+  ) {
+    return 'addendum_epa';
+  }
+  if (
+    raw === 'addendum_p' ||
+    raw === 'addendum_p_harbor_view' ||
+    raw === 'addendum_p_clear_capital' ||
+    raw.endsWith('_addendum_p') ||
+    raw.endsWith('_addendum_p_refi') ||
+    raw.includes('addendum_p_')
+  ) {
+    return 'addendum_p';
+  }
+  if (
+    raw === 'addendum_ca' ||
+    raw === 'addendum_ca_harbor_view' ||
+    raw === 'addendum_ca_clear_capital' ||
+    raw.endsWith('_addendum_ca') ||
+    raw.includes('addendum_ca_')
+  ) {
+    return 'addendum_ca';
+  }
+  if (
+    raw === 'addendum_ny' ||
+    raw === 'addendum_ny_harbor_view' ||
+    raw === 'addendum_ny_clear_capital' ||
+    raw.endsWith('_addendum_ny') ||
+    raw.includes('addendum_ny_')
+  ) {
+    return 'addendum_ny';
+  }
+  if (
+    raw === 'addendum_va' ||
+    raw === 'addendum_va_harbor_view' ||
+    raw === 'addendum_va_clear_capital' ||
+    raw.endsWith('_addendum_va') ||
+    raw.includes('addendum_va_')
+  ) {
+    return 'addendum_va';
+  }
+  return null;
 }
 
 export function resolveAddendumDocumentConfigKey(
@@ -332,32 +524,25 @@ export function resolveAddendumDocumentConfigKey(
     .trim()
     .toLowerCase();
   if (!raw) return null;
-
-  if (raw === 'addendum_ca_clear_capital' || raw === 'addendum_ca_harbor_view') {
-    return raw;
+  if (raw === 'guarantoraddendum' || raw === 'guarantor_addendum') {
+    return 'guarantorAddendum';
   }
-  if (raw === 'addendum_va_clear_capital' || raw === 'addendum_va_harbor_view') {
-    return raw;
-  }
-
-  if (ADDENDUM_DOCUMENT_CONFIG[raw] && raw !== 'guarantoraddendum') {
-    return raw;
-  }
-
-  if (raw.endsWith('_addendum_p') || raw.endsWith('_addendum_p_refi') || raw === 'addendum_p') {
-    return 'addendum_p';
-  }
-  if (raw.endsWith('_addendum_ca') || raw === 'addendum_ca') return 'addendum_ca';
-  if (raw.endsWith('_addendum_ny') || raw === 'addendum_ny') return 'addendum_ny';
-  if (raw.endsWith('_addendum_va') || raw === 'addendum_va') return 'addendum_va';
-
-  return null;
+  return canonicalAddendumLayoutKey(raw);
 }
 
 function configForKeyAndVariant(
   key: string,
   variant: AddendumPdfVariant,
 ): AddendumDocumentFieldConfig | null {
+  if (key === 'addendum_epa' || key === 'addendum_epa_harbor_view' || key === 'addendum_epa_clear_capital') {
+    return variant === 'clear_capital' ? ADDENDUM_EPA_CLEAR_CAPITAL : ADDENDUM_EPA_HARBOR_VIEW;
+  }
+  if (key === 'addendum_p' || key === 'addendum_p_harbor_view' || key === 'addendum_p_clear_capital') {
+    return variant === 'clear_capital' ? ADDENDUM_P_CLEAR_CAPITAL : ADDENDUM_P_HARBOR_VIEW;
+  }
+  if (key === 'addendum_ny' || key === 'addendum_ny_harbor_view' || key === 'addendum_ny_clear_capital') {
+    return variant === 'clear_capital' ? ADDENDUM_NY_CLEAR_CAPITAL : ADDENDUM_NY_HARBOR_VIEW;
+  }
   if (key === 'addendum_ca' || key === 'addendum_ca_harbor_view' || key === 'addendum_ca_clear_capital') {
     return variant === 'clear_capital'
       ? ADDENDUM_CA_CLEAR_CAPITAL
@@ -377,5 +562,10 @@ export function getAddendumDocumentConfig(
 ): AddendumDocumentFieldConfig | null {
   const key = resolveAddendumDocumentConfigKey(layoutKeyOrType);
   if (!key) return null;
-  return configForKeyAndVariant(key, variant);
+  const fromKey = resolveAddendumPdfVariant({
+    layoutKey: layoutKeyOrType,
+    name: layoutKeyOrType,
+  });
+  const effective = fromKey === 'clear_capital' ? 'clear_capital' : variant;
+  return configForKeyAndVariant(key, effective);
 }

@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express';
 import prisma from '../config/prismaClient';
+import { withDbRetry } from '../utils/dbRetry';
 import { resolveOptionalTenantUserId } from '../middleware/authMiddleware';
 import uploadService from '../services/uploadService';
 
@@ -68,9 +69,13 @@ class ContractTemplateController {
     // Get the most recently uploaded global contract template
     async getLatest(req: Request, res: Response) {
         try {
-            const latest = await prisma.contractTemplate.findFirst({
-                orderBy: { createdAt: 'desc' },
-            });
+            const latest = await withDbRetry(
+                () =>
+                    prisma.contractTemplate.findFirst({
+                        orderBy: { createdAt: 'desc' },
+                    }),
+                { label: 'contractTemplate.findFirst.latest' },
+            );
 
             return res.status(200).json({
                 success: true,

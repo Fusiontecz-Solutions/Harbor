@@ -7,6 +7,7 @@ export const FUNDER_SUPPLEMENTAL_LAYOUT_TYPES = [
   'addendum_ca',
   'addendum_ny',
   'addendum_va',
+  'addendum_epa',
 ] as const;
 
 export type FunderSupplementalLayoutType = string;

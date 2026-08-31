@@ -1,5 +1,6 @@
 ﻿import { Prisma } from '@prisma/client';
 import prisma from '../config/prismaClient';
+import { withDbRetry, isRetryableDbError } from '../utils/dbRetry';
 import uploadService from './uploadService';
 import { parseContractLengthDaysFromOfferTerm } from '../utils/deriveFrequencyFromTerm';
 import { sanitizePaymentFrequencyForPersist } from '../utils/sanitizePaymentFrequency';
@@ -25,7 +26,7 @@ import {
   renderReverseDisbursementSchedulePdf,
 } from './pdf/reverseDisbursementSchedule.service';
 import { mergePreservingDocuSignEnvelopeMeta } from './docusign/utils/preserve-docusign-prefill-meta';
-import { resolveApplicationWhere } from './applicationService';
+import { resolveExistingApplicationId } from '../utils/resolveExistingApplicationId';
 import { resolveFunderProfile } from './funderProfileService';
 import { buildPrefixedDealId } from '../utils/applyFunderDealIdPrefix';
 import {
@@ -33,23 +34,9 @@ import {
   normalizeContractStateToken,
 } from '../utils/usStateMatch';
 
-const APPLICATION_UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /** Accept Application UUID `id` or numeric display `applicationId` (e.g. "1115"). */
 async function resolveContractApplicationUuid(applicationRef: string): Promise<string | null> {
-  const ref = String(applicationRef ?? '').trim();
-  if (!ref) return null;
-  if (APPLICATION_UUID_RE.test(ref)) return ref;
-
-  const where = resolveApplicationWhere(ref);
-  if (!where) return null;
-
-  const app = await prisma.application.findUnique({
-    where,
-    select: { id: true },
-  });
-  return app?.id ?? null;
+  return resolveExistingApplicationId(applicationRef);
 }
 
 /**
@@ -396,9 +383,24 @@ class ContractService {
     documentType: string;
     order?: number;
   }) {
+    const contractId = Number(data.contractId);
+    if (!Number.isInteger(contractId) || contractId <= 0) {
+      const err = new Error('Contract not found');
+      (err as { statusCode?: number }).statusCode = 404;
+      throw err;
+    }
+    const contract = await (prisma as any).contract.findUnique({
+      where: { id: contractId },
+      select: { id: true },
+    });
+    if (!contract?.id) {
+      const err = new Error('Contract not found');
+      (err as { statusCode?: number }).statusCode = 404;
+      throw err;
+    }
     const templateId = await this.resolveBoldSignTemplateRowId(data.templateRef);
     const maxOrderRow = await (prisma as any).contractDocumentTemplateMapping.findFirst({
-      where: { contractId: data.contractId },
+      where: { contractId },
       orderBy: { order: 'desc' },
       select: { order: true },
     });
@@ -407,7 +409,7 @@ class ContractService {
       : Number(maxOrderRow?.order || 0) + 1;
     return (prisma as any).contractDocumentTemplateMapping.create({
       data: {
-        contractId: data.contractId,
+        contractId,
         templateId,
         documentType: String(data.documentType || '').trim() || 'other',
         order: nextOrder,
@@ -768,6 +770,9 @@ class ContractService {
   }
 
   async getUploadedContractDocuments(contractId: number) {
+    if (!Number.isInteger(contractId) || contractId <= 0) {
+      throw new Error('Contract not found');
+    }
     const contract = await (prisma as any).contract.findUnique({
       where: { id: contractId },
       select: { id: true },
@@ -1151,8 +1156,8 @@ class ContractService {
     };
 
     // Prisma upsert is SELECT-then-INSERT (not ON CONFLICT) with the JS driver adapter,
-    // so concurrent/repeated creates still throw P2002 and abort the Postgres tx.
-    // Retry the whole transaction: after a conflict the next attempt finds the row and updates.
+    // and SAVEPOINT recovery is unreliable on Neon/pgbouncer — a unique violation aborts
+    // the interactive tx. Retry the whole transaction: the next attempt finds the row and updates.
     const maxAttempts = 3;
     let lastError: unknown;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -1185,26 +1190,10 @@ class ContractService {
               include: contractInclude,
             });
           } else {
-            // SAVEPOINT so a unique violation does not abort the whole interactive tx;
-            // Prisma upsert is not atomic with the JS driver adapter (SELECT then INSERT).
-            await tx.$executeRaw`SAVEPOINT contract_create_sp`;
-            try {
-              created = await tx.contract.create({
-                data: contractData,
-                include: contractInclude,
-              });
-              await tx.$executeRaw`RELEASE SAVEPOINT contract_create_sp`;
-            } catch (createErr: any) {
-              await tx.$executeRaw`ROLLBACK TO SAVEPOINT contract_create_sp`;
-              if (createErr?.code !== 'P2002') throw createErr;
-              const raced = await findExistingContractRow();
-              if (!raced?.id) throw createErr;
-              created = await tx.contract.update({
-                where: { id: raced.id },
-                data: buildContractUpdateData(raced.status),
-                include: contractInclude,
-              });
-            }
+            created = await tx.contract.create({
+              data: contractData,
+              include: contractInclude,
+            });
           }
 
           const businessInfoId = normalizeBusinessInfoIdForFk(application?.businessInfo?.id);
@@ -1329,7 +1318,8 @@ class ContractService {
       } catch (err: any) {
         lastError = err;
         const isUniqueViolation = err?.code === 'P2002';
-        if (!isUniqueViolation || attempt >= maxAttempts) {
+        const isTransient = isRetryableDbError(err);
+        if ((!isUniqueViolation && !isTransient) || attempt >= maxAttempts) {
           throw err;
         }
       }
@@ -1420,8 +1410,10 @@ class ContractService {
     const applicationUuid = await resolveContractApplicationUuid(applicationId);
     if (!applicationUuid) return null;
 
-    const row = await (prisma as any).contract.findUnique({
-      where: { applicationId: applicationUuid },
+    const row = await withDbRetry<Record<string, unknown> | null>(
+      () =>
+        (prisma as any).contract.findUnique({
+          where: { applicationId: applicationUuid },
       include: {
         client: { select: { id: true, businessName: true, businessEmail: true, ownerFirstName: true, ownerLastName: true } },
         application: {
@@ -1456,8 +1448,10 @@ class ContractService {
         paymentTerms: { select: { id: true, paymentMethod: true, paymentFrequency: true } },
         paymentBank: { select: { id: true, bankName: true } },
       },
-    });
-    return row ? enrichContractRowForApi(row) : row;
+        }),
+      { label: 'contract.findUnique.byApplicationId' },
+    );
+    return row ? enrichContractRowForApi(row as Record<string, unknown>) : null;
   }
 
   async updateContract(
@@ -2399,10 +2393,14 @@ class ContractService {
       where.type = { equals: typeToken, mode: 'insensitive' };
     }
 
-    const rows = await (prisma as any).boldSignTemplate.findMany({
-      where,
-      orderBy: { createdAt: 'desc' },
-    });
+    const rows = await withDbRetry<Array<Record<string, unknown>>>(
+      () =>
+        (prisma as any).boldSignTemplate.findMany({
+          where,
+          orderBy: { createdAt: 'desc' },
+        }),
+      { label: 'boldSignTemplate.findMany' },
+    );
 
     const wantedState = normalizeContractStateToken(filters.state);
     const wantedFrequency = String(filters.frequency ?? '')

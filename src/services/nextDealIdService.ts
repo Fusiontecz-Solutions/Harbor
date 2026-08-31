@@ -8,42 +8,98 @@ import prisma from '../config/prismaClient';
 export const DEAL_ID_PREFIX = '';
 
 type TransactionClient = Prisma.TransactionClient;
+type DbClient = Prisma.TransactionClient | typeof prisma;
 
-/** Postgres advisory lock key for serializing deal id allocation. */
+/** Postgres advisory lock key for serializing deal id sequence initialization. */
 const ADVISORY_LOCK_KEY = 874_203_891;
 
-/**
- * Returns the next deal id as a bare number string (`"1"`, `"2"`, …).
- * Sequence is one greater than the highest trailing numeric suffix among existing
- * deal ids (e.g. `WF3`, `KK12`, `15` → next is `"16"`). Starts at `"1"` when none exist.
- */
-export async function allocateNextDealId(tx: TransactionClient): Promise<string> {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${ADVISORY_LOCK_KEY})`;
+let dealIdSeqReady: Promise<void> | null = null;
 
-    const rows = await tx.$queryRaw<Array<{ max_num: number | null }>>`
+async function currentMaxDealNumber(db: DbClient): Promise<number> {
+    const rows = await db.$queryRaw<Array<{ max_num: number | null }>>`
         SELECT MAX((regexp_match(trim("dealId"), '([0-9]+)$'))[1]::integer) AS max_num
         FROM "Application"
         WHERE "dealId" IS NOT NULL
           AND trim("dealId") <> ''
           AND trim("dealId") ~ '[0-9]+$'
     `;
-
     const maxNum = rows[0]?.max_num != null ? Number(rows[0].max_num) : 0;
-    const next = Number.isFinite(maxNum) && maxNum >= 0 ? maxNum + 1 : 1;
-    return String(next);
+    return Number.isFinite(maxNum) && maxNum >= 0 ? maxNum : 0;
 }
 
-/** Allocate a deal id and run `fn` inside the same transaction (safe under concurrent creates). */
+type SeqStatus = { last_value: string | number; is_called: boolean };
+
+async function readDealIdSeqStatus(): Promise<{ lastValue: number; isCalled: boolean }> {
+    const seqRows = await prisma.$queryRaw<SeqStatus[]>`
+        SELECT last_value::text AS last_value, is_called FROM application_deal_id_seq
+    `;
+    return {
+        lastValue: Number(seqRows[0]?.last_value ?? 1),
+        isCalled: Boolean(seqRows[0]?.is_called),
+    };
+}
+
+/**
+ * One-time per process: ensure the Postgres sequence exists. After it has issued
+ * ids, skip the full-table regexp scan — that scan was making the first create
+ * after every nodemon restart take many seconds.
+ */
+async function ensureDealIdSequence(): Promise<void> {
+    if (!dealIdSeqReady) {
+        dealIdSeqReady = (async () => {
+            await prisma.$executeRaw`CREATE SEQUENCE IF NOT EXISTS application_deal_id_seq`;
+            const status = await readDealIdSeqStatus();
+            if (status.isCalled && status.lastValue > 0) {
+                return;
+            }
+
+            await prisma.$executeRaw`SELECT pg_advisory_lock(${ADVISORY_LOCK_KEY})`;
+            try {
+                const locked = await readDealIdSeqStatus();
+                if (locked.isCalled && locked.lastValue > 0) {
+                    return;
+                }
+                const maxNum = await currentMaxDealNumber(prisma);
+                const issued = locked.isCalled ? locked.lastValue : locked.lastValue - 1;
+                const target = Math.max(issued, maxNum);
+                if (target > 0) {
+                    await prisma.$executeRaw`SELECT setval('application_deal_id_seq', ${target}::bigint, true)`;
+                }
+            } finally {
+                await prisma.$executeRaw`SELECT pg_advisory_unlock(${ADVISORY_LOCK_KEY})`;
+            }
+        })().catch((err) => {
+            dealIdSeqReady = null;
+            throw err;
+        });
+    }
+    await dealIdSeqReady;
+}
+
+/** Call on server boot so the first create is not paying for sequence init. */
+export function warmupDealIdSequence(): void {
+    void ensureDealIdSequence().catch((err) => {
+        console.error('[dealId] sequence warmup failed:', err);
+    });
+}
+
+/** Returns the next deal id as a bare number string (`"1"`, `"2"`, …). */
+export async function allocateNextDealId(tx?: TransactionClient): Promise<string> {
+    await ensureDealIdSequence();
+    const db: DbClient = tx ?? prisma;
+    const rows = await db.$queryRaw<Array<{ n: string | number }>>`
+        SELECT nextval('application_deal_id_seq')::text AS n
+    `;
+    return String(rows[0]?.n ?? 1);
+}
+
+/**
+ * Allocate a deal id, then run `fn`. Avoids Prisma interactive transactions,
+ * which wait up to 10s on Neon's pooled connections.
+ */
 export async function withAllocatedDealId<T>(
     fn: (dealId: string, tx: TransactionClient) => Promise<T>,
 ): Promise<T> {
-    // Default interactive tx timeout is 5s; allocate + create (with includes) can exceed that
-    // under concurrent load / advisory lock wait (P2028).
-    return prisma.$transaction(
-        async (tx) => {
-            const dealId = await allocateNextDealId(tx);
-            return fn(dealId, tx);
-        },
-        { maxWait: 10_000, timeout: 30_000 },
-    );
+    const dealId = await allocateNextDealId();
+    return fn(dealId, prisma as unknown as TransactionClient);
 }

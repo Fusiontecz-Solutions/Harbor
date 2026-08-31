@@ -83,6 +83,7 @@ export const PREFILL_DISPLAY_LABEL_BY_VARIABLE: Record<string, string> = {
   receivable_purchase_2: 'Receivables purchased — 2nd installment (Day 16)',
   addendum_date: 'Addendum date',
   agreement_date: 'Agreement date',
+  first_payment_date: 'First payment date',
   owner1_guarantor_name: 'Owner 1 — Name',
   owner2_guarantor_name: 'Merchant 2 — Name',
   merchant2_name: 'Merchant 2 / owner 2 name',

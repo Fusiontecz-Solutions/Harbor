@@ -1,4 +1,5 @@
 import type { DocumentLayout, DocumentLayoutPlacement } from './convert-docusign-template-export';
+import { isUsableDisclosureStreetLine } from '../../../utils/usStateMatch';
 
 /** CRM storage prefix — PDF tab labels on each layout stay unchanged for value lookup. */
 export const LAYOUT_CRM_PREFIX: Record<string, string> = {
@@ -10,6 +11,7 @@ export const LAYOUT_CRM_PREFIX: Record<string, string> = {
   addendum_ca: 'addendum_ca_',
   addendum_ny: 'addendum_ny_',
   addendum_va: 'addendum_va_',
+  addendum_epa: 'addendum_epa_',
   ach_authorization: 'ach_form_',
   ach_authorization_standalone: 'ach_form_',
   ach_authorization_texas: 'ach_form_texas_',
@@ -39,6 +41,71 @@ export const DISCLOSURE_MERCHANT_BUSINESS_NAME_VARS = new Set([
   'disclosure_name',
   'disclosure_merchant_name',
 ]);
+
+export const DISCLOSURE_RECIPIENT_ADDRESS_VARS = new Set([
+  'recipient_address',
+  'recipient_address1',
+  'recipient_address2',
+]);
+
+export const DISCLOSURE_ESTIMATED_PAYMENT_VARS = new Set([
+  'weekly_payments',
+  'fordailypayments',
+]);
+
+function pickPrefillValue(values: Record<string, string>, keys: string[]): string {
+  for (const key of keys) {
+    const v = String(values[key] ?? '').trim();
+    if (v) return v;
+  }
+  return '';
+}
+
+/** Full street line for disclosure recipient address — never the state name alone. */
+export function resolveDisclosureRecipientAddress(values: Record<string, string>): string {
+  const direct = pickPrefillValue(values, [
+    toDisclosureScopedPrefillId('recipient_address'),
+    toDisclosureScopedPrefillId('recipient_address2'),
+    toDisclosureScopedPrefillId('recipient_address1'),
+    'recipient_address',
+    'recipient_address2',
+    'recipient_address1',
+  ]);
+  if (direct && isUsableDisclosureStreetLine(direct)) return direct;
+
+  const street = pickPrefillValue(values, [
+    'business_address',
+    'security_business_address',
+    'ach_authorization_account_holder_address',
+  ]);
+  if (!isUsableDisclosureStreetLine(street)) return '';
+
+  const composed = [
+    street,
+    pickPrefillValue(values, ['business_address_city', 'security_business_address_city']),
+    pickPrefillValue(values, ['business_address_state', 'security_business_address_state']),
+    pickPrefillValue(values, ['business_address_zip', 'security_business_address_zip']),
+  ]
+    .filter(Boolean)
+    .join(', ');
+  return composed && isUsableDisclosureStreetLine(composed) ? composed : '';
+}
+
+export function resolveDisclosureEstimatedPayment(values: Record<string, string>): string {
+  return pickPrefillValue(values, [
+    toDisclosureScopedPrefillId('weekly_payments'),
+    toDisclosureScopedPrefillId('fordailypayments'),
+    toDisclosureScopedPrefillId('estimated_payment'),
+    toDisclosureScopedPrefillId('disclosure_estimated_payment'),
+    'weekly_payments',
+    'fordailypayments',
+    'estimated_payment',
+    'disclosure_estimated_payment',
+    'estimated_payment_amount',
+    'remittance',
+    'theestimatedpayment',
+  ]);
+}
 
 /**
  * Business / legal name for state disclosure merchant fields.
@@ -92,15 +159,29 @@ export function resolveCanonicalSupplementalLayoutKey(layoutKey: string): string
   }
   if (k === 'balance_transfer' || k.endsWith('_balance_transfer')) return 'balance_transfer';
   if (
+    k === 'addendum_epa' ||
+    k.endsWith('_addendum_epa') ||
+    k.includes('addendum_epa_')
+  ) {
+    return 'addendum_epa';
+  }
+  if (
     k === 'addendum_p' ||
     k.endsWith('_addendum_p') ||
-    k.endsWith('_addendum_p_refi')
+    k.endsWith('_addendum_p_refi') ||
+    k.includes('addendum_p_')
   ) {
     return 'addendum_p';
   }
-  if (k === 'addendum_ca' || k.endsWith('_addendum_ca')) return 'addendum_ca';
-  if (k === 'addendum_ny' || k.endsWith('_addendum_ny')) return 'addendum_ny';
-  if (k === 'addendum_va' || k.endsWith('_addendum_va')) return 'addendum_va';
+  if (k === 'addendum_ca' || k.endsWith('_addendum_ca') || k.includes('addendum_ca_')) {
+    return 'addendum_ca';
+  }
+  if (k === 'addendum_ny' || k.endsWith('_addendum_ny') || k.includes('addendum_ny_')) {
+    return 'addendum_ny';
+  }
+  if (k === 'addendum_va' || k.endsWith('_addendum_va') || k.includes('addendum_va_')) {
+    return 'addendum_va';
+  }
   if (
     k === 'ach_authorization' ||
     k === 'ach_authorization_standalone' ||
@@ -175,8 +256,18 @@ export function buildScopedValuesForLayout(
       const businessName = DISCLOSURE_MERCHANT_BUSINESS_NAME_VARS.has(pdfVarNorm)
         ? resolveDisclosureMerchantBusinessName(globalValues)
         : '';
+      const composedAddress = DISCLOSURE_RECIPIENT_ADDRESS_VARS.has(pdfVarNorm)
+        ? resolveDisclosureRecipientAddress(globalValues)
+        : '';
+      const estimatedPayment = DISCLOSURE_ESTIMATED_PAYMENT_VARS.has(pdfVarNorm)
+        ? resolveDisclosureEstimatedPayment(globalValues)
+        : '';
       const legacy = String(globalValues[pdfVar] ?? '').trim();
-      const val = perPlacement || scoped || businessName || legacy;
+      const raw = perPlacement || scoped || legacy;
+      const rawOk =
+        raw &&
+        !(DISCLOSURE_RECIPIENT_ADDRESS_VARS.has(pdfVarNorm) && !isUsableDisclosureStreetLine(raw));
+      const val = (rawOk ? raw : '') || composedAddress || estimatedPayment || businessName;
       if (val) {
         if (uniqueKey) out[uniqueKey] = val;
         out[pdfVar] = val;
