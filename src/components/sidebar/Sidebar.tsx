@@ -7,6 +7,7 @@ import People from "@mui/icons-material/People";
 import Dashboard from "@mui/icons-material/Dashboard";
 import Settings from "@mui/icons-material/Settings";
 import Notifications from "@mui/icons-material/Notifications";
+import Mail from "@mui/icons-material/Mail";
 import {
   Sidebar as UISidebar,
   SidebarHeader,
@@ -85,7 +86,7 @@ function NavIcon({ icon: Icon }: { icon: SidebarNavIcon }) {
 
 /**
  * Sidebar layout matching product screenshots:
- * MAIN → Dashboard / Notifications / Clients
+ * MAIN → Dashboard / Notifications / Clients / Letters
  * DEAL PIPELINE → Applications + Contract stages
  * SETTINGS → Settings (Profile / DocuSign / Funders tabs live on the page)
  */
@@ -96,6 +97,7 @@ const sidebarSections: SidebarNavSection[] = [
       { label: "Dashboard", url: "/", icon: Dashboard },
       { label: "Notifications", url: "/notifications", icon: Notifications },
       { label: "Clients", url: "/clients", icon: People },
+      { label: "Letters", url: "/letter-generator", icon: Mail },
     ],
   },
   {
@@ -226,6 +228,10 @@ function isNavItemActive(
     return pathname === "/notifications" || pathname.startsWith("/notifications/");
   }
 
+  if (item.url === "/letter-generator") {
+    return pathname === "/letter-generator" || pathname.startsWith("/letter-generator/");
+  }
+
   if (item.url === "/user-setting") {
     return pathname === "/user-setting" || pathname.startsWith("/user-setting/");
   }
@@ -350,9 +356,9 @@ const Sidebar = () => {
         className={`flex h-full min-h-0 flex-col ${sidebarShell}`}
         data-sidebar-scrollbar="default"
       >
-        <SidebarHeader className="p-4 mt-5 pb-3 group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:px-2">
-          <div className="flex items-center justify-between">
-            <div className="flex flex-col justify-center leading-tight">
+        <SidebarHeader className="items-center p-4 mt-5 pb-3 group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:px-2">
+          <div className="flex w-full items-center justify-center">
+            <div className="flex flex-col items-center justify-center leading-tight">
               <img
                 src={
                   isCollapsed
@@ -361,8 +367,8 @@ const Sidebar = () => {
                       : APP_SHORT_ICON_SRC
                     : resolveAppLogoSrc(isDark)
                 }
-                alt="Company logo"
-                className={`block object-contain ${isCollapsed ? "h-8 w-8 shrink-0" : "h-26 w-auto max-w-full"}`}
+                alt="Harbor View Capital"
+                className={`mx-auto block object-contain ${isCollapsed ? "h-8 w-8 shrink-0" : "h-26 w-auto max-w-full"}`}
               />
             </div>
           </div>

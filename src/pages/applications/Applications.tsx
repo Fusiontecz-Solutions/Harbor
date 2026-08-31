@@ -184,6 +184,8 @@ const Applications = () => {
   const isOperationsDashboardView =
     new URLSearchParams(location.search).get("fromDashboard") === "operations";
 
+  const isLetterGeneratorMode = location.pathname === "/letter-generator";
+
   const showUwDealPoolUi =
     sessionRoleKey === "SCRUBBING" && !isOperationsDashboardView;
 
@@ -465,6 +467,12 @@ const Applications = () => {
 
   const handleNavigateToApplication = useCallback(
     (app: Application, options?: { tab?: string }) => {
+      if (isLetterGeneratorMode) {
+        const uuid = app._id?.trim();
+        if (!uuid) return;
+        navigate(`/letter-generator/${encodeURIComponent(uuid)}`);
+        return;
+      }
       const role = (localStorage.getItem("role") || "").toUpperCase();
       const usePipelineTabs =
         role === "OPERATIONS" ||
@@ -507,7 +515,7 @@ const Applications = () => {
         state: { applicationPreview: app },
       });
     },
-    [dashboardStateFilter, navigate, location.search],
+    [dashboardStateFilter, isLetterGeneratorMode, navigate, location.search],
   );
 
   const handleUwClaimDeal = useCallback(
@@ -1079,6 +1087,10 @@ const Applications = () => {
             type="button"
             onClick={(e) => {
               e.stopPropagation();
+              if (isLetterGeneratorMode) {
+                handleNavigateToApplication(row.original);
+                return;
+              }
               handleOpenApplicationDetails(row.original);
             }}
             className="mx-auto flex h-8 w-8 items-center justify-center rounded-full bg-transparent text-[var(--brand)] hover:bg-transparent hover:text-[var(--brand-accent-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]/30 cursor-pointer"
@@ -1103,6 +1115,7 @@ const Applications = () => {
     getApplicationQueueLabel,
     handleNavigateToApplication,
     handleOpenApplicationDetails,
+    isLetterGeneratorMode,
     expandedProgressRowId,
     handleToggleApplicationProgress,
     showUwDealPoolUi,
@@ -1634,19 +1647,26 @@ const Applications = () => {
         >
           <div>
             <h1 className="text-[1.3rem] font-semibold text-foreground uppercase">
-              {contractWorkflowTitle
+              {isLetterGeneratorMode
+                ? "Letters"
+                : contractWorkflowTitle
                 ? contractWorkflowTitle
                 : showUwDealPoolUi
                 ? "Create Offer applications"
                 : "Add Application"}
             </h1>
-            {contractWorkflowHint ? (
+            {isLetterGeneratorMode ? (
+              <p className="mt-1 text-sm text-muted-foreground">
+                Select an application to send Payoff or Zero Balance letters.
+              </p>
+            ) : contractWorkflowHint ? (
               <p className="mt-1 text-sm text-muted-foreground">
                 {contractWorkflowHint}
               </p>
             ) : null}
           </div>
           <div className="flex items-center gap-3">
+            {!isLetterGeneratorMode ? (
             <div className="flex items-center gap-2">
               <input
                 ref={pdfInputRef}
@@ -1666,7 +1686,8 @@ const Applications = () => {
                 </Button>
               )}
             </div>
-            {canCreateNewApplication && (
+            ) : null}
+            {canCreateNewApplication && !isLetterGeneratorMode && (
               <Button
                 className="px-4 py-2 gap-2 bg-[image:var(--brand-gradient)] text-white hover:opacity-90 cursor-pointer"
                 onClick={() => navigate("/create-applications")}
@@ -1680,7 +1701,7 @@ const Applications = () => {
       )}
 
       {/* Stats — same contract-stage cards as OperationsDashboard */}
-      {!isOperationsDashboardView && (
+      {!isOperationsDashboardView && !isLetterGeneratorMode && (
         <section className="mt-6 mb-8 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           {summaryCards.map((card) => {
             const countNum = card.value;
@@ -2117,10 +2138,18 @@ const Applications = () => {
                           <button
                             type="button"
                             onClick={() => {
+                              if (isLetterGeneratorMode) {
+                                handleNavigateToApplication(app);
+                                return;
+                              }
                               void handleOpenApplicationDetails(app);
                             }}
                             className="flex h-8 w-8 items-center justify-center rounded-full border border-[var(--brand)] text-[var(--brand)] hover:bg-[var(--brand)]/10"
-                            aria-label="View application in drawer"
+                            aria-label={
+                              isLetterGeneratorMode
+                                ? "Open letters for this application"
+                                : "View application in drawer"
+                            }
                           >
                             <EyeIcon className="h-4 w-4" />
                           </button>

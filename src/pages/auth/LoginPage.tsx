@@ -85,8 +85,8 @@ export default function LoginPage() {
             <div className="flex items-center gap-3">
               <img
                 src={resolveAppLogoSrc(isDark)}
-                alt="Company logo"
-                className="h-16 w-auto max-w-[280px] rounded-lg object-contain"
+                alt="Harbor View Capital"
+                className="h-24 w-auto max-w-[220px] object-contain"
               />
 
             </div>

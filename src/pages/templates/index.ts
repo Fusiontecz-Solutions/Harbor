@@ -42,5 +42,13 @@ export {
   default as ApplicationApprovedEmail,
   APPLICATION_APPROVED_EMAIL_VARIABLES,
 } from "./ApplicationApprovedEmail";
-export { TEMPLATE_REGISTRY } from "./registry";
+export {
+  TEMPLATE_REGISTRY,
+  BUILTIN_FE_TEMPLATE_ID_PREFIX,
+  BUILTIN_FE_TEMPLATES,
+  getBuiltinReactTemplateDefinition,
+  isBuiltinFeTemplate,
+  mergeBuiltinFeTemplates,
+  renderBuiltinReactTemplateHtml,
+} from "./registry";
 export { default as TemplatePlayground } from "./TemplatePlayground";

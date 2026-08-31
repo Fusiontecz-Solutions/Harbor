@@ -3,18 +3,17 @@ import {
   escapeHtml,
   resolveDocumentRequestEmailFields,
 } from "./documentRequestEmailShared";
+import { APP_LOGO_SRC } from "@/constants/appLogo";
 
-/** Hosted logo for outbound email (Gmail/Outlook-safe absolute URL). */
-const DOCUMENT_REQUEST_EMAIL_LOGO_SRC =
-  "https://res.cloudinary.com/dehrku8og/image/upload/v1786111779/ChatGPT_Image_Aug_7_2026_07_39_08_PM_zri2ha.png";
+/** App / preview logo (new Harbor View Capital lighthouse mark). */
+const DOCUMENT_REQUEST_EMAIL_LOGO_SRC = APP_LOGO_SRC;
 
 /** Hosted PNG document icon shown in the "Required Documents" circle. */
 const DOCUMENT_REQUEST_EMAIL_ICON_SRC =
     "https://res.cloudinary.com/dehrku8og/image/upload/q_auto/f_auto/v1781888571/Document_Icon_1_etkhnd.png";
 
 /** Center faded background watermark layout image. */
-const DOCUMENT_REQUEST_EMAIL_WATERMARK_SRC =
-  "https://res.cloudinary.com/dehrku8og/image/upload/v1786111779/ChatGPT_Image_Aug_7_2026_07_39_08_PM_zri2ha.png";
+const DOCUMENT_REQUEST_EMAIL_WATERMARK_SRC = APP_LOGO_SRC;
 
 /** Use two columns when the list has this many items or more. */
 const TWO_COLUMN_MIN_ITEMS = 4;

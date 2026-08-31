@@ -32,7 +32,7 @@ const PublicDocumentRequestPage = () => {
   const brandLogo = (
     <img
       src={resolveAppLogoSrc(resolvedTheme === "dark")}
-      alt="Company logo"
+      alt="Harbor View Capital"
       className="mx-auto h-28 w-auto max-w-full object-contain sm:h-32 md:h-40"
     />
   );

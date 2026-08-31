@@ -17,6 +17,7 @@ import PublicDocumentRequestPage from '../pages/public/PublicDocumentRequestPage
 import PublicApplicationStatusPage from '../pages/public/PublicApplicationStatusPage';
 import OperationsDashboard from '../pages/dashboard/OperationsDashboard';
 import NotificationDashboard from '../pages/NotificationDashboard/NotificationDashboard';
+import LetterGeneratorDealById from '../pages/letterGenerator/LetterGeneratorDealById';
 import { applicationsPageLoader } from './applicationsLoader';
 
 /** Remount when `?query` changes so list state matches URL + route loader. */
@@ -151,6 +152,12 @@ const Routes: RouteObject[] = [
             { path: 'view-position/:positionId', element: <CreatePosition /> },
             { path: 'user-setting', element: <UserSetting /> },
             { path: 'notifications', element: <NotificationDashboard /> },
+            {
+                path: 'letter-generator',
+                element: <ApplicationsRouteEntry />,
+                loader: applicationsPageLoader,
+            },
+            { path: 'letter-generator/:letterGeneratorDealId', element: <LetterGeneratorDealById /> },
             { path: 'settings', element: <SettingsAliasRedirect /> },
             { path: 'settings/*', element: <SettingsAliasRedirect /> },
             // Catch-all: unused modules redirect into the contract workflow
