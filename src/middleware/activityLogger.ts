@@ -13,6 +13,9 @@ const SKIP_PATH_PREFIXES = [
   '/chat',
   '/team-chat',
   '/sendgrid',
+  // Infobip delivery receipts and inbound SMS arrive one callback per message.
+  // A 50k-recipient broadcast would otherwise write 50k audit rows.
+  '/messaging/webhooks',
 ];
 
 function shouldSkip(path: string, method: string): boolean {

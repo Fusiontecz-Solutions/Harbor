@@ -48,6 +48,14 @@ model User {
   termsOffers                TermsOffer[]
   verificationTokens         VerificationToken[]
   outbound_communications    outbound_communications[]
+  messagingContacts          MessagingContact[]            @relation("MessagingContactOwner")
+  messagingConversations     MessagingConversation[]       @relation("MessagingConversationOwner")
+  messagingMessagesSent      MessagingMessage[]            @relation("MessagingMessageSentBy")
+  smsBroadcasts              SmsBroadcast[]                @relation("SmsBroadcastCreatedBy")
+  messagingSuppressions      MessagingSuppression[]        @relation("MessagingSuppressionCreatedBy")
+  messagingDncChecks         MessagingDncCheck[]           @relation("MessagingDncCheckedBy")
+  messagingTemplates         MessagingTemplate[]           @relation("MessagingTemplateCreatedBy")
+  messagingCalls             MessagingCall[]               @relation("MessagingCallUser")
 }
 
 model AccessToken {
@@ -128,6 +136,7 @@ model Client {
   contractClients            ContractClient[]
   epos                       EPO[]
   fileMetadata               FileMetadata[]
+  messagingContacts          MessagingContact[]
 
   @@index([status])
   @@index([createdById])
