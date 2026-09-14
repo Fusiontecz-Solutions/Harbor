@@ -18,6 +18,10 @@ import PublicApplicationStatusPage from '../pages/public/PublicApplicationStatus
 import OperationsDashboard from '../pages/dashboard/OperationsDashboard';
 import NotificationDashboard from '../pages/NotificationDashboard/NotificationDashboard';
 import LetterGeneratorDealById from '../pages/letterGenerator/LetterGeneratorDealById';
+import Inbox from '../pages/messaging/Inbox';
+import Broadcasts from '../pages/messaging/Broadcasts';
+import BroadcastDetail from '../pages/messaging/BroadcastDetail';
+import MessagingContacts from '../pages/messaging/MessagingContacts';
 import { applicationsPageLoader } from './applicationsLoader';
 
 /** Remount when `?query` changes so list state matches URL + route loader. */
@@ -108,6 +112,12 @@ const Routes: RouteObject[] = [
         children: [
             { index: true, element: <OperationsDashboard /> },
             { path: 'clients', element: <Clients /> },
+            // Communication platform: SMS inbox, bulk broadcasts, lead import,
+            // block list and DNC.
+            { path: 'inbox', element: <Inbox /> },
+            { path: 'broadcasts', element: <Broadcasts /> },
+            { path: 'broadcasts/:broadcastId', element: <BroadcastDetail /> },
+            { path: 'messaging-contacts', element: <MessagingContacts /> },
             { path: 'create-clients', element: <CreateClient /> },
             { path: 'create-clients/:clientId', element: <CreateClient /> },
             {

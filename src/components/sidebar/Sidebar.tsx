@@ -8,6 +8,9 @@ import Dashboard from "@mui/icons-material/Dashboard";
 import Settings from "@mui/icons-material/Settings";
 import Notifications from "@mui/icons-material/Notifications";
 import Mail from "@mui/icons-material/Mail";
+import Forum from "@mui/icons-material/Forum";
+import Campaign from "@mui/icons-material/Campaign";
+import ContactPhone from "@mui/icons-material/ContactPhone";
 import {
   Sidebar as UISidebar,
   SidebarHeader,
@@ -98,6 +101,14 @@ const sidebarSections: SidebarNavSection[] = [
       { label: "Notifications", url: "/notifications", icon: Notifications },
       { label: "Clients", url: "/clients", icon: People },
       { label: "Letters", url: "/letter-generator", icon: Mail },
+    ],
+  },
+  {
+    title: "COMMUNICATION",
+    items: [
+      { label: "Inbox", url: "/inbox", icon: Forum },
+      { label: "Broadcasts", url: "/broadcasts", icon: Campaign },
+      { label: "Contacts & DNC", url: "/messaging-contacts", icon: ContactPhone },
     ],
   },
   {
