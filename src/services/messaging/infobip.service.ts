@@ -178,6 +178,19 @@ export function normalizeStatusGroup(groupName?: string | null): NormalizedStatu
   }
 }
 
+/**
+ * Infobip puts a human description on EVERY status, success included — a
+ * freshly accepted message comes back as PENDING_ENROUTE / "Message sent to
+ * next instance". Storing that in `errorMessage` painted a red error line under
+ * messages that had not failed, so only surface the description for a status
+ * group that actually means failure.
+ */
+function failureDescription(status?: { groupName?: string; description?: string } | null): string | null {
+  const group = String(status?.groupName || '').toUpperCase();
+  const isFailure = group === 'REJECTED' || group === 'UNDELIVERABLE' || group === 'EXPIRED';
+  return isFailure ? status?.description ?? null : null;
+}
+
 function classifyHttpFailure(status: number, body: unknown): InfobipRequestError {
   const requestError = (body as { requestError?: { serviceException?: { messageId?: string; text?: string } } })
     ?.requestError?.serviceException;
@@ -238,7 +251,7 @@ export async function sendSms(input: SendSmsInput): Promise<SendSmsResult> {
     segmentCount: typeof result?.smsCount === 'number' ? result.smsCount : null,
     rawStatusName: result?.status?.name ?? null,
     errorCode: result?.status?.groupName === 'REJECTED' ? String(result?.status?.id ?? '') || null : null,
-    errorMessage: result?.status?.description ?? null,
+    errorMessage: failureDescription(result?.status),
   };
 }
 
@@ -270,7 +283,7 @@ async function sendMms(input: SendSmsInput & { from: string }): Promise<SendSmsR
     segmentCount: null,
     rawStatusName: result?.status?.name ?? null,
     errorCode: null,
-    errorMessage: result?.status?.description ?? null,
+    errorMessage: failureDescription(result?.status),
   };
 }
 
@@ -318,6 +331,34 @@ export function parseInboundPayload(body: unknown): InboundMessage[] {
 }
 
 /** Parse a delivery-report callback body. Same envelope as inbound. */
+/**
+ * Pull the provider's own record for specific messages.
+ *
+ * Delivery receipts are fire-and-forget: Infobip posts a DLR once and if the
+ * callback is unreachable, misconfigured, or was never registered for the
+ * message, the final status simply never arrives and the message sits on
+ * "sent" forever — even though Infobip may have rejected it seconds later.
+ * This is the pull-side backstop, used by the reconciler.
+ *
+ * `/sms/1/logs` returns the same entry shape as the DLR webhook, so the
+ * existing parser applies unchanged.
+ */
+export async function fetchMessageLogs(providerMessageIds: string[]): Promise<DeliveryReport[]> {
+  const ids = providerMessageIds.filter(Boolean);
+  if (ids.length === 0) return [];
+
+  const params = new URLSearchParams();
+  // Infobip accepts the parameter repeated, not a comma-joined list.
+  for (const id of ids.slice(0, 50)) params.append('messageId', id);
+
+  const response = await client().get(`/sms/1/logs?${params.toString()}`);
+  if (response.status < 200 || response.status >= 300) {
+    throw classifyHttpFailure(response.status, response.data);
+  }
+
+  return parseDeliveryReportPayload(response.data);
+}
+
 export function parseDeliveryReportPayload(body: unknown): DeliveryReport[] {
   const results = (body as { results?: unknown[] })?.results;
   if (!Array.isArray(results)) return [];
