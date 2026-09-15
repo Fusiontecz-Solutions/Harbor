@@ -9,7 +9,7 @@ import {
   importContacts,
   listContacts,
 } from '../services/messaging/contact.service';
-import { listClientRecipients } from '../services/messaging/clientRecipients.service';
+import { findClientByPhone, listClientRecipients } from '../services/messaging/clientRecipients.service';
 import { normalizePhoneNumber } from '../services/messaging/phone';
 import {
   blockContact,
@@ -218,6 +218,114 @@ class MessagingContactController {
     } catch (err) {
       console.error('[messaging:contacts] client list failed:', err);
       res.status(500).json({ success: false, message: 'Failed to load clients' });
+    }
+  }
+
+  /**
+   * GET /messaging/contacts/profile?phoneNumber=
+   *
+   * The contact card shown beside a chat. Resolution order:
+   *   1. a saved MessagingContact for the number
+   *   2. the CRM client that owns the number
+   *
+   * Step 2 is what makes a chat started from the client picker show the
+   * merchant's name, company, email and location straight away. Without it the
+   * panel is blank until someone is separately imported into Contacts & DNC,
+   * which is never obvious to the agent looking at it.
+   *
+   * Nothing is written here — a card is read-only, and persisting a contact for
+   * a chat that may never be sent would recreate the empty-record problem.
+   */
+  async profile(req: Request, res: Response): Promise<void> {
+    try {
+      const phoneNumber = normalizePhoneNumber(req.query.phoneNumber);
+      if (!phoneNumber) {
+        res.status(400).json({ success: false, message: 'A valid phoneNumber is required' });
+        return;
+      }
+
+      const saved = await prisma.messagingContact.findFirst({
+        where: { phoneNumber },
+        // Prefer a row owned by this user, then the most recently created.
+        orderBy: [{ ownerUserId: 'desc' }, { createdAt: 'desc' }],
+        select: {
+          id: true,
+          phoneNumber: true,
+          firstName: true,
+          lastName: true,
+          emailAddress: true,
+          company: true,
+          city: true,
+          state: true,
+          tags: true,
+          status: true,
+          clientId: true,
+          createdAt: true,
+        },
+      });
+
+      const client = await findClientByPhone(phoneNumber);
+
+      if (!saved && !client) {
+        res.json({ success: true, data: null });
+        return;
+      }
+
+      if (!saved && client) {
+        // Synthesize a card from the CRM record. `id` is null so the FE can
+        // tell this is not an editable Contacts & DNC row.
+        res.json({
+          success: true,
+          data: {
+            id: null,
+            phoneNumber,
+            firstName: client.ownerFirstName || null,
+            lastName: client.ownerLastName || null,
+            emailAddress: client.businessEmail,
+            company: client.businessName,
+            city: client.businessCity,
+            state: client.businessState,
+            tags: ['crm-client'],
+            status: 'ACTIVE',
+            createdAt: null,
+            source: 'crm-client',
+            client: {
+              id: client.id,
+              clientNumber: client.clientId,
+              businessName: client.businessName,
+              status: client.status,
+            },
+          },
+        });
+        return;
+      }
+
+      // A saved contact wins, but fill any gaps from the CRM record — an
+      // imported sheet often has only a number and a first name.
+      res.json({
+        success: true,
+        data: {
+          ...saved,
+          firstName: saved!.firstName || client?.ownerFirstName || null,
+          lastName: saved!.lastName || client?.ownerLastName || null,
+          emailAddress: saved!.emailAddress || client?.businessEmail || null,
+          company: saved!.company || client?.businessName || null,
+          city: saved!.city || client?.businessCity || null,
+          state: saved!.state || client?.businessState || null,
+          source: 'contact',
+          client: client
+            ? {
+                id: client.id,
+                clientNumber: client.clientId,
+                businessName: client.businessName,
+                status: client.status,
+              }
+            : null,
+        },
+      });
+    } catch (err) {
+      console.error('[messaging:contacts] profile lookup failed:', err);
+      res.status(500).json({ success: false, message: 'Failed to load contact profile' });
     }
   }
 

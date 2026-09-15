@@ -31,6 +31,7 @@ router.post('/conversations', messagingController.openConversation.bind(messagin
 router.get('/conversations/:id/messages', messagingController.getMessages.bind(messagingController));
 router.patch('/conversations/:id/read', messagingController.markRead.bind(messagingController));
 router.patch('/conversations/:id/archive', messagingController.setArchived.bind(messagingController));
+router.delete('/conversations/:id', messagingController.deleteConversation.bind(messagingController));
 router.post('/send', messagingController.sendMessage.bind(messagingController));
 router.get('/unread-count', messagingController.getUnreadCount.bind(messagingController));
 
@@ -38,6 +39,7 @@ router.get('/unread-count', messagingController.getUnreadCount.bind(messagingCon
  * `status` is declared before `:id` so it is not swallowed by the param route. */
 router.get('/contacts', messagingContactController.list.bind(messagingContactController));
 router.get('/contacts/status', messagingContactController.status.bind(messagingContactController));
+router.get('/contacts/profile', messagingContactController.profile.bind(messagingContactController));
 router.post('/contacts', messagingContactController.create.bind(messagingContactController));
 router.post('/contacts/import', messagingContactController.import.bind(messagingContactController));
 router.post('/contacts/block', messagingContactController.block.bind(messagingContactController));

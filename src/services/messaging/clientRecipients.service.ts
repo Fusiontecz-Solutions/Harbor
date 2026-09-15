@@ -145,6 +145,110 @@ function toClientRecipient(row: {
   };
 }
 
+/** The Client columns every messaging path needs. Keep in step with the selects below. */
+const CLIENT_PROFILE_SELECT = {
+  id: true,
+  clientId: true,
+  businessName: true,
+  ownerFirstName: true,
+  ownerLastName: true,
+  ownerMobileNumber: true,
+  businessNumber: true,
+  businessEmail: true,
+  businessAddress1: true,
+  businessCity: true,
+  businessState: true,
+  businessZipCode: true,
+  status: true,
+} as const;
+
+type ClientProfileRow = Prisma.ClientGetPayload<{ select: typeof CLIENT_PROFILE_SELECT }>;
+
+/**
+ * Mirror a CRM client into `MessagingContact`, keyed on the number we will
+ * actually text. Shared by the broadcast audience resolver and the one-to-one
+ * send path so a chat started from the client picker shows the merchant's name,
+ * company and email rather than a bare phone number.
+ */
+export async function upsertContactFromClient(
+  client: Pick<
+    ClientProfileRow,
+    | 'id'
+    | 'ownerFirstName'
+    | 'ownerLastName'
+    | 'businessEmail'
+    | 'businessName'
+    | 'businessAddress1'
+    | 'businessCity'
+    | 'businessState'
+    | 'businessZipCode'
+  >,
+  phoneNumber: string,
+  ownerUserId: string | null,
+): Promise<{ id: string }> {
+  return prisma.messagingContact.upsert({
+    where: {
+      ownerUserId_phoneNumber: { ownerUserId, phoneNumber } as never,
+    },
+    create: {
+      phoneNumber,
+      firstName: client.ownerFirstName,
+      lastName: client.ownerLastName,
+      emailAddress: client.businessEmail,
+      company: client.businessName,
+      street: client.businessAddress1,
+      city: client.businessCity,
+      state: client.businessState,
+      zip: client.businessZipCode,
+      tags: ['crm-client'],
+      source: 'crm-client',
+      clientId: client.id,
+      ownerUserId,
+    },
+    // Only re-link and refresh the company: a contact may have been edited by
+    // hand in Contacts & DNC, and a send should not silently revert that.
+    update: { clientId: client.id, company: client.businessName },
+    select: { id: true },
+  });
+}
+
+/** Load one client with the columns {@link upsertContactFromClient} needs. */
+export async function findClientById(id: string): Promise<ClientProfileRow | null> {
+  return prisma.client.findUnique({ where: { id }, select: CLIENT_PROFILE_SELECT });
+}
+
+/**
+ * Find the CRM client that owns a number, matching either the owner mobile or
+ * the business line. Used to fill the chat's contact panel for a merchant who
+ * has never been imported into `MessagingContact`.
+ *
+ * Client numbers are stored as typed, not normalized, so compare on the last
+ * ten digits rather than on an exact string match.
+ */
+export async function findClientByPhone(phoneNumber: string): Promise<ClientProfileRow | null> {
+  const digits = String(phoneNumber || '').replace(/\D/g, '');
+  if (digits.length < 10) return null;
+  const national = digits.slice(-10);
+
+  const candidates = await prisma.client.findMany({
+    where: {
+      OR: [{ ownerMobileNumber: { contains: national } }, { businessNumber: { contains: national } }],
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 25,
+    select: CLIENT_PROFILE_SELECT,
+  });
+
+  // `contains` can match a longer string, so confirm on the normalized form.
+  return (
+    candidates.find((row) => {
+      const owner = normalizePhoneNumber(row.ownerMobileNumber);
+      const business = normalizePhoneNumber(row.businessNumber);
+      return owner === phoneNumber || business === phoneNumber;
+    }) ?? null
+  );
+}
+
 /**
  * Turn selected client ids into broadcast recipients.
  *
@@ -203,30 +307,7 @@ export async function resolveClientsAsRecipients(
     seen.add(mapped.phoneNumber);
 
     // Keep a messaging contact in step with the CRM record.
-    await prisma.messagingContact.upsert({
-      where: {
-        ownerUserId_phoneNumber: {
-          ownerUserId: ownerUserId ?? null,
-          phoneNumber: mapped.phoneNumber,
-        } as never,
-      },
-      create: {
-        phoneNumber: mapped.phoneNumber,
-        firstName: client.ownerFirstName,
-        lastName: client.ownerLastName,
-        emailAddress: client.businessEmail,
-        company: client.businessName,
-        street: client.businessAddress1,
-        city: client.businessCity,
-        state: client.businessState,
-        zip: client.businessZipCode,
-        tags: ['crm-client'],
-        source: 'crm-client',
-        clientId: client.id,
-        ownerUserId: ownerUserId ?? null,
-      },
-      update: { clientId: client.id, company: client.businessName },
-    });
+    await upsertContactFromClient(client, mapped.phoneNumber, ownerUserId ?? null);
 
     recipients.push({
       phoneNumber: mapped.phoneNumber,
