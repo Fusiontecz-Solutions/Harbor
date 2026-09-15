@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Virtuoso } from 'react-virtuoso';
 import { toast } from 'react-toastify';
 import {
+    AlertCircle,
     Ban,
     Check,
     CheckCheck,
@@ -163,10 +164,17 @@ function dayLabel(value: string): string {
     return date.toLocaleDateString([], { month: 'long', day: 'numeric', year: 'numeric' });
 }
 
+/**
+ * Delivery indicator. A failed message must never render as a tick — an agent
+ * reading a tick believes the merchant was contacted, so failure gets its own
+ * alert glyph rather than a shield (which reads as "blocked") or a check.
+ */
 function StatusTick({ status }: { status: Message['status'] }) {
     if (status === 'DELIVERED') return <CheckCheck className="h-3.5 w-3.5 text-sky-400" />;
+    if (status === 'FAILED' || status === 'UNDELIVERABLE') {
+        return <AlertCircle className="h-3.5 w-3.5 text-red-400" aria-label="Not delivered" />;
+    }
     if (status === 'SENT') return <Check className="h-3.5 w-3.5 opacity-70" />;
-    if (status === 'FAILED' || status === 'UNDELIVERABLE') return <ShieldOff className="h-3.5 w-3.5 text-red-400" />;
     return <Loader2 className="h-3.5 w-3.5 animate-spin opacity-60" />;
 }
 
@@ -887,6 +895,7 @@ function ConversationRow({
 
 function MessageBubble({ message }: { message: Message }) {
     const isOutbound = message.direction === 'OUTBOUND';
+    const isFailed = message.status === 'FAILED' || message.status === 'UNDELIVERABLE';
     const time = new Date(message.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
     return (
@@ -898,6 +907,7 @@ function MessageBubble({ message }: { message: Message }) {
                         ? 'rounded-br-sm bg-primary text-primary-foreground'
                         : 'rounded-bl-sm bg-background',
                     message.isStopKeyword && 'ring-1 ring-red-400',
+                    isFailed && 'ring-1 ring-red-400/70',
                 )}
             >
                 {message.broadcastId && (
@@ -925,8 +935,11 @@ function MessageBubble({ message }: { message: Message }) {
                     {isOutbound && <StatusTick status={message.status} />}
                 </span>
 
-                {message.errorMessage && (
-                    <p className="mt-1 text-[10px] text-red-400">{message.errorMessage}</p>
+                {isFailed && (
+                    <p className="mt-1 flex items-start gap-1 text-[10px] font-medium text-red-400">
+                        <AlertCircle className="mt-px h-3 w-3 shrink-0" />
+                        <span>{message.errorMessage || 'Not delivered'}</span>
+                    </p>
                 )}
             </div>
         </div>
