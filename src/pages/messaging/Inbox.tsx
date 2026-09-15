@@ -25,6 +25,7 @@ import {
     Search,
     Send,
     ShieldOff,
+    Trash2,
     Users,
     Wifi,
     WifiOff,
@@ -48,16 +49,16 @@ import { ClientPicker } from '@/components/messaging/ClientPicker';
 import { MessagingAvatar } from '@/components/messaging/MessagingAvatar';
 import {
     blockContact,
-    fetchContacts,
+    deleteConversation as deleteConversationRequest,
+    fetchContactProfile,
     fetchMessagingConfig,
-    openConversation as openConversationRequest,
     sendMessage,
     unblockContact,
     type ClientRecipient,
+    type ContactProfile,
     type Conversation,
     type Message,
     type MessagingConfig,
-    type MessagingContact,
 } from '@/services/messaging/messagingApi';
 
 const FILTERS = [
@@ -66,6 +67,55 @@ const FILTERS = [
     { id: 'broadcast', label: 'Broadcast' },
     { id: 'opted-out', label: 'Opted out' },
 ] as const;
+
+/**
+ * Sentinel id for a chat that exists only in this component's state.
+ *
+ * Starting a new chat used to POST /conversations immediately, which left an
+ * empty "No messages yet" thread in the inbox forever if the agent changed
+ * their mind. A new chat is now purely local until the first message actually
+ * sends — the backend creates the row as a side effect of that send.
+ */
+const DRAFT_CONVERSATION_ID = '__draft__';
+
+/** Stable empty array, so a draft chat does not re-render on every pass. */
+const EMPTY_MESSAGES: Message[] = [];
+
+/** Client-side E.164 normalization, so a draft can be validated without a round-trip. */
+function normalizeNumberInput(raw: string): string | null {
+    const input = raw.trim();
+    if (!input) return null;
+
+    const hadPlus = input.startsWith('+');
+    const digits = input.replace(/\D/g, '');
+    if (!digits) return null;
+
+    if (hadPlus) return digits.length >= 8 && digits.length <= 15 ? `+${digits}` : null;
+    if (digits.length === 10) return `+1${digits}`;
+    if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
+    return digits.length >= 8 && digits.length <= 15 ? `+${digits}` : null;
+}
+
+/** A Conversation-shaped placeholder so the chat pane can render before the thread exists. */
+function makeDraftConversation(
+    contactNumber: string,
+    businessNumber: string,
+    contactName: string | null,
+): Conversation {
+    return {
+        id: DRAFT_CONVERSATION_ID,
+        businessNumber,
+        contactNumber,
+        contactName,
+        lastMessageText: null,
+        lastMessageAt: null,
+        lastMessageDirection: null,
+        unreadCount: 0,
+        hasBroadcastMessage: false,
+        isOptedOut: false,
+        isBlocked: false,
+    };
+}
 
 function useDebounced<T>(value: T, delayMs = 300): T {
     const [debounced, setDebounced] = useState(value);
@@ -136,7 +186,13 @@ export default function Inbox() {
     const [newNumber, setNewNumber] = useState('');
     const [isClientPickerOpen, setIsClientPickerOpen] = useState(false);
     const [showDetails, setShowDetails] = useState(true);
-    const [contactDetail, setContactDetail] = useState<MessagingContact | null>(null);
+    const [contactDetail, setContactDetail] = useState<ContactProfile | null>(null);
+    /** A chat the agent has opened but not yet sent on — never persisted. */
+    const [draftConversation, setDraftConversation] = useState<Conversation | null>(null);
+    /** Set when the draft came from the client picker, so the send can link the CRM record. */
+    const [draftClientId, setDraftClientId] = useState<string | null>(null);
+    const [pendingDelete, setPendingDelete] = useState<Conversation | null>(null);
+    const [isDeleting, setIsDeleting] = useState(false);
 
     const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -148,13 +204,54 @@ export default function Inbox() {
         loadMore,
         reloadConversations,
         activeConversationId,
-        activeConversation,
+        activeConversation: selectedConversation,
         openConversation,
-        messages,
+        messages: loadedMessages,
         isLoadingMessages,
         refreshAfterSend,
         isRealtime,
     } = useInbox({ userScope, search, filter });
+
+    /* A draft takes over the chat pane; it has no id, so no history to load. */
+    const activeConversation = draftConversation ?? selectedConversation;
+    const isDraft = Boolean(draftConversation);
+    const messages = isDraft ? EMPTY_MESSAGES : loadedMessages;
+
+    /** Open a real thread, discarding any unsent draft. */
+    const selectConversation = useCallback(
+        (conversationId: string | null) => {
+            setDraftConversation(null);
+            setDraftClientId(null);
+            openConversation(conversationId);
+        },
+        [openConversation],
+    );
+
+    /** Start a local-only chat. Nothing reaches the server until the first send. */
+    const startDraft = useCallback(
+        (rawNumber: string, contactName: string | null, clientId: string | null = null) => {
+            const contactNumber = normalizeNumberInput(rawNumber);
+            if (!contactNumber) {
+                toast.error('Enter a valid phone number');
+                return false;
+            }
+
+            const businessNumber = config?.defaultSender ?? '';
+            // Reuse the existing thread rather than opening a duplicate draft.
+            const existing = conversations.find((conv) => conv.contactNumber === contactNumber);
+            if (existing) {
+                selectConversation(existing.id);
+                return true;
+            }
+
+            openConversation(null);
+            setDraftConversation(makeDraftConversation(contactNumber, businessNumber, contactName));
+            setDraftClientId(clientId);
+            setDraft('');
+            return true;
+        },
+        [config?.defaultSender, conversations, openConversation, selectConversation],
+    );
 
     useEffect(() => {
         fetchMessagingConfig().then(setConfig).catch(() => setConfig(null));
@@ -172,9 +269,9 @@ export default function Inbox() {
         }
 
         let cancelled = false;
-        fetchContacts({ search: activeConversation.contactNumber, page: 1, pageSize: 1 })
-            .then((response) => {
-                if (!cancelled) setContactDetail(response.data[0] ?? null);
+        fetchContactProfile(activeConversation.contactNumber)
+            .then((profile) => {
+                if (!cancelled) setContactDetail(profile);
             })
             .catch(() => {
                 if (!cancelled) setContactDetail(null);
@@ -183,7 +280,10 @@ export default function Inbox() {
         return () => {
             cancelled = true;
         };
-    }, [activeConversation]);
+        // Keyed on the number, not the object: the conversation row is replaced
+        // on every list refetch, and re-fetching the card each time flickers it.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeConversation?.contactNumber]);
 
     const handleSend = useCallback(async () => {
         const body = draft.trim();
@@ -191,48 +291,81 @@ export default function Inbox() {
 
         setIsSending(true);
         try {
-            await sendMessage({
+            const result = await sendMessage({
                 toNumber: activeConversation.contactNumber,
-                fromNumber: activeConversation.businessNumber,
+                fromNumber: activeConversation.businessNumber || undefined,
                 body,
+                ...(isDraft && draftClientId ? { clientId: draftClientId } : {}),
             });
             setDraft('');
-            refreshAfterSend();
+
+            if (isDraft) {
+                // The send is what created the thread — swap the placeholder for
+                // the real one so ticks, history and delete all work from here.
+                setDraftConversation(null);
+                setDraftClientId(null);
+                await reloadConversations();
+                if (result?.conversationId) openConversation(result.conversationId);
+            } else {
+                refreshAfterSend();
+            }
         } catch (error: any) {
             toast.error(error?.response?.data?.message || 'Failed to send message');
         } finally {
             setIsSending(false);
         }
-    }, [activeConversation, draft, isSending, refreshAfterSend]);
+    }, [
+        activeConversation,
+        draft,
+        draftClientId,
+        isDraft,
+        isSending,
+        openConversation,
+        refreshAfterSend,
+        reloadConversations,
+    ]);
 
-    const handleStartConversation = useCallback(async () => {
-        const phoneNumber = newNumber.trim();
-        if (!phoneNumber) return;
-
-        try {
-            const conversation = await openConversationRequest(phoneNumber);
-            setNewNumber('');
-            await reloadConversations();
-            openConversation(conversation.id);
-        } catch (error: any) {
-            toast.error(error?.response?.data?.message || 'Could not open that conversation');
-        }
-    }, [newNumber, openConversation, reloadConversations]);
+    const handleStartConversation = useCallback(() => {
+        if (startDraft(newNumber, null)) setNewNumber('');
+    }, [newNumber, startDraft]);
 
     const handlePickClient = useCallback(
-        async (client: ClientRecipient) => {
+        (client: ClientRecipient) => {
             if (!client.phoneNumber) return;
-            try {
-                const conversation = await openConversationRequest(client.phoneNumber);
-                setIsClientPickerOpen(false);
-                await reloadConversations();
-                openConversation(conversation.id);
-            } catch (error: any) {
-                toast.error(error?.response?.data?.message || 'Could not open that conversation');
-            }
+            const label = client.ownerName || client.businessName || null;
+            if (startDraft(client.phoneNumber, label, client.clientId)) setIsClientPickerOpen(false);
         },
-        [openConversation, reloadConversations],
+        [startDraft],
     );
+
+    const handleConfirmDelete = useCallback(async () => {
+        if (!pendingDelete) return;
+
+        setIsDeleting(true);
+        try {
+            await deleteConversationRequest(pendingDelete.id);
+            if (activeConversationId === pendingDelete.id) openConversation(null);
+            setPendingDelete(null);
+            await reloadConversations();
+            toast.success('Conversation deleted');
+        } catch (error: any) {
+            toast.error(error?.response?.data?.message || 'Failed to delete conversation');
+        } finally {
+            setIsDeleting(false);
+        }
+    }, [activeConversationId, openConversation, pendingDelete, reloadConversations]);
+
+    /** Discarding a draft is local-only; a saved thread needs confirmation. */
+    const handleRequestDelete = useCallback(() => {
+        if (!activeConversation) return;
+        if (isDraft) {
+            setDraftConversation(null);
+            setDraftClientId(null);
+            setDraft('');
+            return;
+        }
+        setPendingDelete(activeConversation);
+    }, [activeConversation, isDraft]);
 
     const handleToggleBlock = useCallback(async () => {
         if (!activeConversation) return;
@@ -258,6 +391,24 @@ export default function Inbox() {
         () => conversations.reduce((sum, conv) => sum + conv.unreadCount, 0),
         [conversations],
     );
+
+    /**
+     * Best available name: the thread's own, else the resolved contact/CRM card.
+     * A conversation only carries a name once a MessagingContact is linked, so
+     * without this fallback a chat with a known client shows a bare number.
+     */
+    const contactFullName = useMemo(() => {
+        const fromProfile = [contactDetail?.firstName, contactDetail?.lastName]
+            .filter(Boolean)
+            .join(' ')
+            .trim();
+        return (
+            activeConversation?.contactName ||
+            fromProfile ||
+            contactDetail?.company ||
+            null
+        );
+    }, [activeConversation?.contactName, contactDetail]);
 
     /** Group messages by day so the thread gets date separators. */
     const grouped = useMemo(() => {
@@ -364,21 +515,39 @@ export default function Inbox() {
                                 </div>
                             ))}
                         </div>
-                    ) : conversations.length === 0 ? (
+                    ) : conversations.length === 0 && !draftConversation ? (
                         <p className="p-4 text-sm text-muted-foreground">No conversations yet.</p>
                     ) : (
-                        <Virtuoso
-                            data={conversations}
-                            endReached={() => hasMore && loadMore()}
-                            itemContent={(_index: number, conversation: Conversation) => (
+                        <div className="flex h-full flex-col">
+                            {/* The draft sits above the list — it has no lastMessageAt to sort by. */}
+                            {draftConversation && (
                                 <ConversationRow
-                                    conversation={conversation}
-                                    isActive={conversation.id === activeConversationId}
-                                    onSelect={() => openConversation(conversation.id)}
+                                    conversation={draftConversation}
+                                    isActive
+                                    isDraft
+                                    onSelect={() => undefined}
+                                    onDelete={() => {
+                                        setDraftConversation(null);
+                                        setDraftClientId(null);
+                                    }}
                                 />
                             )}
-                            className="h-full"
-                        />
+                            <div className="min-h-0 flex-1">
+                                <Virtuoso
+                                    data={conversations}
+                                    endReached={() => hasMore && loadMore()}
+                                    itemContent={(_index: number, conversation: Conversation) => (
+                                        <ConversationRow
+                                            conversation={conversation}
+                                            isActive={!draftConversation && conversation.id === activeConversationId}
+                                            onSelect={() => selectConversation(conversation.id)}
+                                            onDelete={() => setPendingDelete(conversation)}
+                                        />
+                                    )}
+                                    className="h-full"
+                                />
+                            </div>
+                        </div>
                     )}
                 </div>
             </aside>
@@ -394,10 +563,10 @@ export default function Inbox() {
                     <>
                         <header className="flex items-center justify-between gap-3 border-b bg-background px-4 py-2.5">
                             <div className="flex min-w-0 items-center gap-3">
-                                <MessagingAvatar name={activeConversation.contactName} />
+                                <MessagingAvatar name={contactFullName} />
                                 <div className="min-w-0">
                                     <p className="truncate text-sm font-medium">
-                                        {activeConversation.contactName || formatPhone(activeConversation.contactNumber)}
+                                        {contactFullName || formatPhone(activeConversation.contactNumber)}
                                     </p>
                                     <p className="truncate text-xs text-muted-foreground">
                                         {formatPhone(activeConversation.contactNumber)} · via{' '}
@@ -426,6 +595,15 @@ export default function Inbox() {
                                     title={activeConversation.isBlocked ? 'Unblock contact' : 'Block contact'}
                                 >
                                     <Ban className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className="h-8 w-8 text-muted-foreground hover:text-red-500"
+                                    onClick={handleRequestDelete}
+                                    title={isDraft ? 'Discard this chat' : 'Delete conversation'}
+                                >
+                                    <Trash2 className="h-4 w-4" />
                                 </Button>
                                 <Button
                                     size="icon"
@@ -525,9 +703,9 @@ export default function Inbox() {
                     </div>
 
                     <div className="flex flex-col items-center gap-2 border-b px-3 py-4">
-                        <MessagingAvatar name={activeConversation.contactName} size="lg" />
+                        <MessagingAvatar name={contactFullName} size="lg" />
                         <p className="text-sm font-medium">
-                            {activeConversation.contactName || formatPhone(activeConversation.contactNumber)}
+                            {contactFullName || formatPhone(activeConversation.contactNumber)}
                         </p>
                         <p className="text-xs text-muted-foreground">{formatPhone(activeConversation.contactNumber)}</p>
                         <div className="flex flex-wrap justify-center gap-1">
@@ -545,12 +723,26 @@ export default function Inbox() {
                             value={[contactDetail?.city, contactDetail?.state].filter(Boolean).join(', ')}
                         />
                         <DetailField label="Tags" value={contactDetail?.tags?.join(', ')} />
+                        <DetailField
+                            label="Client"
+                            value={
+                                contactDetail?.client
+                                    ? `${contactDetail.client.businessName} (#${contactDetail.client.clientNumber})`
+                                    : null
+                            }
+                        />
                         <DetailField label="Sender" value={formatPhone(activeConversation.businessNumber)} />
                         <DetailField label="Messages" value={String(messages.length)} />
 
+                        {contactDetail?.source === 'crm-client' && (
+                            <p className="pt-2 text-xs text-muted-foreground">
+                                Showing CRM client details. A contact record is saved to Contacts &amp; DNC when
+                                you send the first message.
+                            </p>
+                        )}
                         {!contactDetail && (
                             <p className="pt-2 text-xs text-muted-foreground">
-                                This number has no saved contact record yet.
+                                This number matches no saved contact or CRM client.
                             </p>
                         )}
                     </div>
@@ -570,6 +762,34 @@ export default function Inbox() {
                     <ClientPicker selectedIds={[]} onChange={() => undefined} mode="single" onPick={handlePickClient} />
                 </DialogContent>
             </Dialog>
+
+            <Dialog open={Boolean(pendingDelete)} onOpenChange={(open: boolean) => !open && setPendingDelete(null)}>
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>Delete this conversation?</DialogTitle>
+                        <DialogDescription>
+                            {pendingDelete
+                                ? `The chat with ${pendingDelete.contactName || formatPhone(pendingDelete.contactNumber)} and its full message history will be permanently removed. This cannot be undone.`
+                                : ''}
+                        </DialogDescription>
+                    </DialogHeader>
+
+                    <p className="text-xs text-muted-foreground">
+                        The saved contact stays in Contacts &amp; DNC, and any block or opt-out on this number
+                        remains in force.
+                    </p>
+
+                    <div className="flex justify-end gap-2 pt-2">
+                        <Button variant="outline" onClick={() => setPendingDelete(null)} disabled={isDeleting}>
+                            Cancel
+                        </Button>
+                        <Button variant="destructive" onClick={handleConfirmDelete} disabled={isDeleting}>
+                            {isDeleting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                            Delete
+                        </Button>
+                    </div>
+                </DialogContent>
+            </Dialog>
         </div>
     );
 }
@@ -586,23 +806,30 @@ function DetailField({ label, value }: { label: string; value?: string | null })
 function ConversationRow({
     conversation,
     isActive,
+    isDraft = false,
     onSelect,
+    onDelete,
 }: {
     conversation: Conversation;
     isActive: boolean;
+    isDraft?: boolean;
     onSelect: () => void;
+    onDelete: () => void;
 }) {
     const isUnread = conversation.unreadCount > 0;
 
     return (
-        <button
-            type="button"
-            onClick={onSelect}
-            className={cn(
-                'flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/60',
-                isActive && 'bg-muted',
-            )}
-        >
+        // The delete control cannot live inside the row <button> — nested
+        // buttons are invalid HTML — so it is a sibling overlaid on the right.
+        <div className="group/row relative">
+            <button
+                type="button"
+                onClick={onSelect}
+                className={cn(
+                    'flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-muted/60',
+                    isActive && 'bg-muted',
+                )}
+            >
             <MessagingAvatar name={conversation.contactName || conversation.contactNumber} />
 
             <div className="min-w-0 flex-1">
@@ -625,10 +852,10 @@ function ConversationRow({
                         {conversation.lastMessageDirection === 'OUTBOUND' && (
                             <span className="text-muted-foreground">You: </span>
                         )}
-                        {conversation.lastMessageText || 'No messages yet'}
+                        {isDraft ? 'New chat — send a message to start' : conversation.lastMessageText || 'No messages yet'}
                     </span>
 
-                    <span className="flex shrink-0 items-center gap-1">
+                    <span className="flex shrink-0 items-center gap-1 pr-6">
                         {conversation.hasBroadcastMessage && (
                             <Megaphone className="h-3 w-3 text-muted-foreground" />
                         )}
@@ -644,7 +871,17 @@ function ConversationRow({
                     </span>
                 </div>
             </div>
-        </button>
+            </button>
+
+            <button
+                type="button"
+                onClick={onDelete}
+                title={isDraft ? 'Discard this chat' : 'Delete conversation'}
+                className="absolute bottom-2 right-2 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-background hover:text-red-500 focus-visible:opacity-100 group-hover/row:opacity-100"
+            >
+                <Trash2 className="h-3.5 w-3.5" />
+            </button>
+        </div>
     );
 }
 

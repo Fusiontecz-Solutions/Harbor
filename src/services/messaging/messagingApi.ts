@@ -98,6 +98,28 @@ export interface MessagingContact {
     createdAt: string;
 }
 
+/**
+ * The contact card beside a chat. `id` is null when the card was synthesized
+ * from a CRM client that has no saved MessagingContact row yet.
+ */
+export interface ContactProfile extends Omit<MessagingContact, 'id' | 'createdAt'> {
+    id: string | null;
+    createdAt: string | null;
+    source: 'contact' | 'crm-client';
+    client: {
+        id: string;
+        clientNumber: number;
+        businessName: string;
+        status: string;
+    } | null;
+}
+
+/** Contact card for a number, falling back to the CRM client that owns it. */
+export async function fetchContactProfile(phoneNumber: string): Promise<ContactProfile | null> {
+    const response = await axiosGet(`${BASE}/contacts/profile`, { params: { phoneNumber } });
+    return response.data.data ?? null;
+}
+
 export interface ImportSummary {
     totalRows: number;
     imported: number;
@@ -214,6 +236,8 @@ export async function sendMessage(input: {
     body: string;
     fromNumber?: string;
     mediaUrls?: string[];
+    /** Set when the chat was started from the CRM client picker. */
+    clientId?: string;
 }) {
     const response = await axiosPost(`${BASE}/send`, input);
     return response.data.data;
@@ -222,6 +246,15 @@ export async function sendMessage(input: {
 export async function markConversationRead(conversationId: string) {
     const response = await axiosPatch(`${BASE}/conversations/${conversationId}/read`);
     return response.data.data;
+}
+
+/**
+ * Permanently delete a thread and its message history. The contact record and
+ * any block/opt-out state are kept server-side on purpose.
+ */
+export async function deleteConversation(conversationId: string) {
+    const response = await axiosDelete(`${BASE}/conversations/${conversationId}`);
+    return response.data.data as { id: string };
 }
 
 export async function setConversationArchived(conversationId: string, isArchived: boolean) {
