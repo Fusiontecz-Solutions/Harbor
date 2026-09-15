@@ -3,14 +3,13 @@ import {
   escapeHtml,
   resolveApplicationRejectionEmailFields,
 } from "./applicationRejectionEmailShared";
+import { APP_LOGO_SRC } from "@/constants/appLogo";
 
-/** Hosted logo for outbound email (Gmail/Outlook-safe absolute URL). */
-const APPLICATION_DECLINE_EMAIL_LOGO_SRC =
-  "https://res.cloudinary.com/dehrku8og/image/upload/v1786111779/ChatGPT_Image_Aug_7_2026_07_39_08_PM_zri2ha.png";
+/** App / preview logo (new Harbor View Capital lighthouse mark). */
+const APPLICATION_DECLINE_EMAIL_LOGO_SRC = APP_LOGO_SRC;
 
 /** Bottom-right watermark for the email content body. */
-const APPLICATION_DECLINE_EMAIL_WATERMARK_SRC =
-  "https://res.cloudinary.com/dehrku8og/image/upload/v1786111779/ChatGPT_Image_Aug_7_2026_07_39_08_PM_zri2ha.png";
+const APPLICATION_DECLINE_EMAIL_WATERMARK_SRC = APP_LOGO_SRC;
 
 const EMAIL_WIDTH = 600;
 const CONTENT_WIDTH = 510;

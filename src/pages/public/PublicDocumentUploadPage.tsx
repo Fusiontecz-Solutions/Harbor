@@ -38,7 +38,7 @@ const PublicDocumentUploadPage = () => {
   const brandLogo = (
     <img
       src={resolveAppLogoSrc(resolvedTheme === "dark")}
-      alt="Company logo"
+      alt="Harbor View Capital"
       className="mx-auto h-20 w-auto max-w-full object-contain sm:h-24"
     />
   );

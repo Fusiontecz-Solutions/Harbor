@@ -1,3 +1,5 @@
+import { APP_LOGO_SRC } from "@/constants/appLogo";
+
 /** Harbor View Capital brand — matches document-request email templates. */
 export const APP_COMPANY_NAME = "Harbor View Capital";
 export const APP_COMPANY_CRM_NAME = "Harbor View Capital";
@@ -21,13 +23,11 @@ export const APPLICATION_APPROVAL_CLIENT_NAME_PLACEHOLDER =
 export const APPLICATION_APPROVAL_COMPANY_NAME_PLACEHOLDER =
   "__APPROVAL_COMPANY_NAME__";
 
-/** Hosted logo for outbound email (Gmail/Outlook-safe absolute URL). */
-export const APPLICATION_APPROVAL_EMAIL_LOGO_SRC =
-  "https://res.cloudinary.com/dehrku8og/image/upload/v1786111779/ChatGPT_Image_Aug_7_2026_07_39_08_PM_zri2ha.png";
+/** App / preview logo (new Harbor View Capital lighthouse mark). */
+export const APPLICATION_APPROVAL_EMAIL_LOGO_SRC = APP_LOGO_SRC;
 
 /** Center faded background watermark layout image. */
-export const APPLICATION_APPROVAL_EMAIL_WATERMARK_SRC =
-  "https://res.cloudinary.com/dehrku8og/image/upload/v1786111779/ChatGPT_Image_Aug_7_2026_07_39_08_PM_zri2ha.png";
+export const APPLICATION_APPROVAL_EMAIL_WATERMARK_SRC = APP_LOGO_SRC;
 
 export const CLIENT_PROVIDED_STIPS = [
   "Void Check",

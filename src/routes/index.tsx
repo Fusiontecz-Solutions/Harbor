@@ -15,6 +15,13 @@ import UserSetting from '../pages/Userssettings/UserSetting';
 import PublicApprovalPage from '../pages/public/PublicApprovalPage';
 import PublicDocumentRequestPage from '../pages/public/PublicDocumentRequestPage';
 import PublicApplicationStatusPage from '../pages/public/PublicApplicationStatusPage';
+import OperationsDashboard from '../pages/dashboard/OperationsDashboard';
+import NotificationDashboard from '../pages/NotificationDashboard/NotificationDashboard';
+import LetterGeneratorDealById from '../pages/letterGenerator/LetterGeneratorDealById';
+import Inbox from '../pages/messaging/Inbox';
+import Broadcasts from '../pages/messaging/Broadcasts';
+import BroadcastDetail from '../pages/messaging/BroadcastDetail';
+import MessagingContacts from '../pages/messaging/MessagingContacts';
 import { applicationsPageLoader } from './applicationsLoader';
 
 /** Remount when `?query` changes so list state matches URL + route loader. */
@@ -103,8 +110,14 @@ const Routes: RouteObject[] = [
         path: '/',
         element: <RootLayout />,
         children: [
-            { index: true, element: <Navigate to="/applications" replace /> },
+            { index: true, element: <OperationsDashboard /> },
             { path: 'clients', element: <Clients /> },
+            // Communication platform: SMS inbox, bulk broadcasts, lead import,
+            // block list and DNC.
+            { path: 'inbox', element: <Inbox /> },
+            { path: 'broadcasts', element: <Broadcasts /> },
+            { path: 'broadcasts/:broadcastId', element: <BroadcastDetail /> },
+            { path: 'messaging-contacts', element: <MessagingContacts /> },
             { path: 'create-clients', element: <CreateClient /> },
             { path: 'create-clients/:clientId', element: <CreateClient /> },
             {
@@ -148,6 +161,13 @@ const Routes: RouteObject[] = [
             { path: 'edit-position/:positionId', element: <CreatePosition /> },
             { path: 'view-position/:positionId', element: <CreatePosition /> },
             { path: 'user-setting', element: <UserSetting /> },
+            { path: 'notifications', element: <NotificationDashboard /> },
+            {
+                path: 'letter-generator',
+                element: <ApplicationsRouteEntry />,
+                loader: applicationsPageLoader,
+            },
+            { path: 'letter-generator/:letterGeneratorDealId', element: <LetterGeneratorDealById /> },
             { path: 'settings', element: <SettingsAliasRedirect /> },
             { path: 'settings/*', element: <SettingsAliasRedirect /> },
             // Catch-all: unused modules redirect into the contract workflow

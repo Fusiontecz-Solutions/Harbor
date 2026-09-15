@@ -20,11 +20,12 @@ const FIELD_IDS = {
     exceededPayment: ["exceeded_payment"],
     weeklyPayments: ["weekly_payments"],
     paymentExceededPercent: ["payment_exceeded_percent"],
+    appendixUnderwritingFees: ["appendix_underwriting_fees", "disclosure_broker_fee"],
     signatureDate2: ["signature_date2"],
 } as const;
 
 const mapIds = (ids: readonly string[], label: string, value: string): ContractPrefillField[] => {
-    const trimmed = String(value || "").trim();
+    const trimmed = String(value || "").trim().toUpperCase();
     if (!trimmed) return [];
     return ids.map((id) => ({ id, label, value: trimmed }));
 };
@@ -50,6 +51,7 @@ export interface DailyVirginiaContractPrefillFields {
     exceededPayment?: string;
     weeklyPayments?: string;
     paymentExceededPercent?: string;
+    appendixUnderwritingFees?: string;
     signatureDate2?: string;
 }
 
@@ -73,6 +75,7 @@ export function buildDailyVirginiaContractPrefillFields({
     exceededPayment = "",
     weeklyPayments = "",
     paymentExceededPercent = "",
+    appendixUnderwritingFees = "",
     signatureDate2 = "",
 }: DailyVirginiaContractPrefillFields = {}): ContractPrefillField[] {
     return [
@@ -103,6 +106,11 @@ export function buildDailyVirginiaContractPrefillFields({
         ...mapIds(FIELD_IDS.exceededPayment, "Exceeded Payment", exceededPayment),
         ...mapIds(FIELD_IDS.weeklyPayments, "Weekly Payments", weeklyPayments),
         ...mapIds(FIELD_IDS.paymentExceededPercent, "Payment Exceeded Percent", paymentExceededPercent),
+        ...mapIds(
+            FIELD_IDS.appendixUnderwritingFees,
+            "Broker Compensation Amount",
+            appendixUnderwritingFees,
+        ),
         ...mapIds(FIELD_IDS.signatureDate2, "Signature Date 2", signatureDate2),
     ];
 }

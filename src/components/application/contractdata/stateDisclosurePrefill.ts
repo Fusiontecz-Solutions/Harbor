@@ -6,7 +6,11 @@ import {
     resolveContractBusinessLegalNameForPrefill,
 } from "./Contract";
 import { buildDailyCaliforniaContractPrefillFields } from "./daily_california";
-import { buildCaliforniaDisclosurePage3Amounts, resolveCaliforniaEstimatedTermDays } from "./california_disclosure";
+import {
+    buildCaliforniaDisclosurePage3Amounts,
+    buildCaliforniaRefinancePage3Amounts,
+    resolveCaliforniaEstimatedTermDays,
+} from "./california_disclosure";
 import {
     buildNewYorkDisclosurePage3Amounts,
     resolveNewYorkPage1LineAmount,
@@ -14,7 +18,17 @@ import {
 import {
     buildDisclosureCalculatorInputsFromSources,
     calculateDisclosureMetrics,
+    formatDisclosureUsd,
+    applyDisclosurePlatformFee,
+    formatDisclosurePaymentFrequencyLabel,
 } from "./disclosureAprCalculator";
+import { DISCLOSURE_PLATFORM_FEE_USD, PLATFORM_DISCLOSURE_FUNDER_NAME } from "./platformDocumentConfig";
+import { isKnownUsStateToken, isAddressPlaceholderToken, isUsableDisclosureStreetLine } from "@/utils/usStateMatch";
+import {
+    calculateRefinanceDealMetrics,
+    isRefinanceDeal,
+    resolveRefiLabelName,
+} from "./refinanceDealCalculations";
 import { buildDailyConnecticutContractPrefillFields } from "./daily_connecticut";
 import { buildDailyFloridaContractPrefillFields } from "./Daily_florida";
 import { buildDailyLouisianaContractPrefillFields } from "./Daily_louisiana";
@@ -24,7 +38,6 @@ import { buildDailyKansasContractPrefillFields } from "./Daily_kansas";
 import { buildDailyVirginiaContractPrefillFields } from "./daily_virginia";
 import { buildDailyUtahContractPrefillFields } from "./daily_utah";
 import { buildDisclosureCalculatorEditorFieldDefinitions } from "./disclosureEditorFields";
-import { PLATFORM_DISCLOSURE_FUNDER_NAME } from "./platformDocumentConfig";
 
 /**
  * Unified, concept-level inputs derived from CRM contract / offer / application data.
@@ -40,6 +53,11 @@ export interface StateDisclosureContext {
     amountBusinessFund?: string;
     /** Amount actually disbursed after fees (Contract.purchaseAmount - underwriting fees). */
     fundingDisbursed?: string;
+    /**
+     * CA REFI right-side “provided to you directly” after removing previous refi balance.
+     * No-Refi: same as fundingProvided / fundingDisbursed as applicable.
+     */
+    fundingProvidedDirect?: string;
     /** Fees deducted at disbursement (Contract.appendixUnderwritingFees). */
     feesDeducted?: string;
     /** Total amount client repays (Contract.purchasePrice). */
@@ -62,6 +80,8 @@ export interface StateDisclosureContext {
     estimatedTerm?: string;
     /** Estimated term in calendar/business days (California disclosure page 2). */
     estimatedTermDays?: string;
+    /** Connecticut estimated term in business days (weekly = weeks × 5). */
+    estimatedTermBusinessDays?: string;
     /** Payment frequency (Daily / Weekly / …). */
     frequency?: string;
     /** Alias for payment frequency on some disclosure editor mappings. */
@@ -72,6 +92,8 @@ export interface StateDisclosureContext {
     prepayment?: string;
     /** Merchant business / legal name (never owner person name). */
     recipientName?: string;
+    /** Owner / merchant person name (addendum Print Name). */
+    merchantName?: string;
     /** Funder / provider legal name on the disclosure. */
     funderName?: string;
     /** Selected funder street/city/state/zip (Connecticut disclosures). */
@@ -97,21 +119,80 @@ export interface StateDisclosureContext {
     /** Optional page 3 line amounts (default 0.00 when empty). */
     page3Line1?: string;
     page3Line2?: string;
+    /** True when offer has a positive refinance / previous-deal balance. */
+    isRefinance?: boolean;
+    /** Net contracted funding after origination (before subtracting REFI balance). */
+    netContractedFunding?: string;
+    /** Previous deal / REFI payoff balance. */
+    previousRefiBalance?: string;
+    /** Actual merchant disbursement after fees and REFI balance. */
+    actualDisbursement?: string;
+    /** Previous deal date (REFI “agreement dated”). */
+    previousDealDate?: string;
+    /** CT renewal: outstanding sales-based financing = REFI balance; leave other renewal fields blank. */
+    outstandingSalesBasedFinancing?: string;
 }
 
 type StateDisclosureBuilder = (ctx: StateDisclosureContext) => ContractPrefillField[];
 
 function buildCaliforniaDisclosurePrefill(ctx: StateDisclosureContext): ContractPrefillField[] {
-    /** Page-3 top line is offer amount (same as funding_provided / disclosure_recipient_funds). */
-    const page3TopLine = ctx.fundingProvided;
-    const page3 = buildCaliforniaDisclosurePage3Amounts({
-        recipientFunds: page3TopLine,
-        page3Line1: ctx.page3Line1,
-        page3Line2: ctx.page3Line2,
-        brokerFee: ctx.brokerFeePaidToBroker,
-    });
+    const isRefi = Boolean(ctx.isRefinance);
+    /**
+     * PDF CA:
+     * - NO REFI funding L/R = Net Funding (Contract − Fee)
+     * - REFI left = Net Contracted Funding; right = Actual Disbursement
+     * - Page-3 top (Net Amount): NO REFI = net funding; REFI = actual disbursement
+     */
+    const netFunding =
+        ctx.netContractedFunding || ctx.fundingDisbursed || ctx.fundingProvided;
+    const page3TopLine = isRefi
+        ? ctx.actualDisbursement || ctx.fundingDisbursed || netFunding
+        : netFunding;
+    const originationFee =
+        coerceFiniteNumber(ctx.feesDeducted) ??
+        coerceFiniteNumber(ctx.brokerFeePaidToBroker) ??
+        0;
+    const page3 = isRefi
+        ? buildCaliforniaRefinancePage3Amounts({
+              actualDisbursement: coerceFiniteNumber(ctx.actualDisbursement) ?? 0,
+              originationFee,
+              previousRefiBalance: coerceFiniteNumber(ctx.previousRefiBalance) ?? 0,
+          })
+        : (() => {
+              const line1 =
+                  ctx.page3Line1?.trim() ||
+                  (originationFee > 0 ? formatDisclosureUsd(originationFee) : "0.00");
+              const line2 = ctx.page3Line2?.trim() || "0.00";
+              const broker =
+                  ctx.brokerFeePaidToBroker?.trim() ||
+                  (originationFee > 0 ? formatDisclosureUsd(originationFee) : "0.00");
+              const amounts = buildCaliforniaDisclosurePage3Amounts({
+                  recipientFunds: page3TopLine,
+                  page3Line1: line1,
+                  page3Line2: line2,
+                  brokerFee: broker,
+              });
+              return {
+                  ...amounts,
+                  recipientFunds: page3TopLine ?? "",
+                  page3Line1: line1,
+                  page3Line2: line2,
+                  brokerFee: broker,
+              };
+          })();
+
+    /** CA REFI: left = net contracted funding; right = actual disbursement. NO REFI: both = net funding. */
+    const fundingLeft = isRefi
+        ? ctx.netContractedFunding || ctx.fundingDisbursed || netFunding
+        : netFunding;
+    const fundingRight = isRefi
+        ? ctx.actualDisbursement || ctx.fundingDisbursed || netFunding
+        : netFunding;
+
     return buildDailyCaliforniaContractPrefillFields({
-        fundingProvided: ctx.fundingProvided,
+        fundingProvided: fundingLeft,
+        fundingProvidedDirect: fundingRight,
+        previousAgreementDate: isRefi ? ctx.previousDealDate : "",
         estimatedAnnualPercentageRate: ctx.estimatedAnnualPercentageRate,
         estimatedPayment: ctx.estimatedPayment,
         estimatedMonthlyCost: ctx.estimatedMonthlyCost,
@@ -124,13 +205,14 @@ function buildCaliforniaDisclosurePrefill(ctx: StateDisclosureContext): Contract
         avarageMonthlyIncome: ctx.averageMonthlyIncome,
         payementExceededPercent: ctx.paymentExceededPercent,
         monthlyIncome: ctx.averageMonthlyIncome,
+        incomeLookbackMonths: "4",
         financeCharge: ctx.financeCharge,
         funderName: ctx.funderName?.toUpperCase() ?? PLATFORM_DISCLOSURE_FUNDER_NAME.toUpperCase(),
         recipientName: ctx.recipientName?.toUpperCase(),
-        recipientFunds: page3TopLine,
-        brokerFee: ctx.brokerFeePaidToBroker,
-        page3Line1: ctx.page3Line1,
-        page3Line2: ctx.page3Line2,
+        recipientFunds: page3.recipientFunds || page3TopLine,
+        brokerFee: page3.brokerFee || ctx.brokerFeePaidToBroker,
+        page3Line1: page3.page3Line1 || ctx.page3Line1,
+        page3Line2: page3.page3Line2 || ctx.page3Line2,
         page3Subtotal: page3.page3Subtotal,
         page3Net: page3.page3Net,
         signatureDate: ctx.signatureDate,
@@ -138,22 +220,51 @@ function buildCaliforniaDisclosurePrefill(ctx: StateDisclosureContext): Contract
 }
 
 function buildNewYorkDisclosurePrefill(ctx: StateDisclosureContext): ContractPrefillField[] {
-    const page3TopLine = ctx.fundingProvided;
-    const page3 = buildCaliforniaDisclosurePage3Amounts({
-        recipientFunds: page3TopLine,
-        page3Line1: ctx.page3Line1,
-        page3Line2: ctx.page3Line2,
-        brokerFee: ctx.brokerFeePaidToBroker,
-    });
-    const nyLines = buildNewYorkDisclosurePage3Amounts({
-        recipientFunds: page3TopLine,
-        brokerFee: ctx.brokerFeePaidToBroker,
-        page3Line1: ctx.page3Line1,
-        page3Line2: ctx.page3Line2,
-    });
+    const isRefi = Boolean(ctx.isRefinance);
+    /**
+     * PDF NY Funding Provided (both sides): Net Amount = Contract − Fee.
+     * Do NOT subtract REFI balance from the funding boxes.
+     * Page-3 REFI itemization uses actual disbursement as line 1.
+     */
+    const fundingNet =
+        ctx.netContractedFunding || ctx.fundingDisbursed || ctx.fundingProvided;
+    const page3TopLine = isRefi
+        ? ctx.actualDisbursement || ctx.fundingDisbursed || fundingNet
+        : fundingNet;
+    const page3 = isRefi
+        ? buildCaliforniaRefinancePage3Amounts({
+              actualDisbursement: coerceFiniteNumber(ctx.actualDisbursement) ?? 0,
+              originationFee: coerceFiniteNumber(ctx.feesDeducted) ?? 0,
+              previousRefiBalance: coerceFiniteNumber(ctx.previousRefiBalance) ?? 0,
+          })
+        : {
+              ...buildCaliforniaDisclosurePage3Amounts({
+                  recipientFunds: page3TopLine,
+                  page3Line1: ctx.page3Line1,
+                  page3Line2: ctx.page3Line2,
+                  brokerFee: ctx.brokerFeePaidToBroker,
+              }),
+              recipientFunds: page3TopLine ?? "",
+              page3Line1: ctx.page3Line1 ?? "",
+              page3Line2: ctx.page3Line2 ?? "",
+              brokerFee: ctx.brokerFeePaidToBroker ?? "",
+          };
+    const nyLines = isRefi
+        ? {
+              page3Line1: page3.page3Line1,
+              page3Line2: page3.page3Line2,
+          }
+        : buildNewYorkDisclosurePage3Amounts({
+              recipientFunds: page3TopLine,
+              brokerFee: ctx.brokerFeePaidToBroker,
+              page3Line1: ctx.page3Line1,
+              page3Line2: ctx.page3Line2,
+          });
     return [
         ...buildDailyCaliforniaContractPrefillFields({
-            fundingProvided: ctx.fundingProvided,
+            fundingProvided: fundingNet,
+            fundingProvidedDirect: fundingNet,
+            previousAgreementDate: isRefi ? ctx.previousDealDate : "",
             estimatedAnnualPercentageRate: ctx.estimatedAnnualPercentageRate,
             estimatedPayment: ctx.estimatedPayment,
             estimatedMonthlyCost: ctx.estimatedMonthlyCost,
@@ -165,8 +276,8 @@ function buildNewYorkDisclosurePrefill(ctx: StateDisclosureContext): ContractPre
             financeCharge: ctx.financeCharge,
             funderName: ctx.funderName?.toUpperCase() ?? PLATFORM_DISCLOSURE_FUNDER_NAME.toUpperCase(),
             recipientName: ctx.recipientName?.toUpperCase(),
-            recipientFunds: page3TopLine,
-            brokerFee: ctx.brokerFeePaidToBroker,
+            recipientFunds: page3.recipientFunds || page3TopLine,
+            brokerFee: page3.brokerFee || ctx.brokerFeePaidToBroker,
             page3Line1: nyLines.page3Line1,
             page3Line2: nyLines.page3Line2,
             page3Subtotal: page3.page3Subtotal,
@@ -181,15 +292,56 @@ function buildNewYorkDisclosurePrefill(ctx: StateDisclosureContext): ContractPre
     ];
 }
 
+function buildConnecticutDisclosurePrefill(ctx: StateDisclosureContext): ContractPrefillField[] {
+    const isRefi = Boolean(ctx.isRefinance);
+    /** Guide: REFI disbursement = net after fees minus previous REFI balance. */
+    const disbursementAmount = isRefi
+        ? ctx.actualDisbursement || ctx.fundingDisbursed
+        : ctx.fundingDisbursed;
+    return buildDailyConnecticutContractPrefillFields({
+        totalCommericalFinancing: disbursementAmount,
+        deductedAtDisbursement: ctx.feesDeducted,
+        totalAmountCommercialFinancing: ctx.fundingProvided,
+        financeCharge: ctx.financeCharge,
+        totalRepaymentAmount: ctx.totalRepayment,
+        estimatedTimePeriodicPaymement:
+            ctx.estimatedTermBusinessDays ?? ctx.estimatedTermDays ?? ctx.estimatedTerm,
+        disclosureBrokerFee: ctx.brokerFeePaidToBroker,
+        disclosureDate: ctx.signatureDate,
+        recipientName: ctx.recipientName,
+        recipientAddress: ctx.recipientAddress,
+        funderName: ctx.funderName,
+        funderAddress: ctx.funderAddress,
+        funderPhone: ctx.funderPhone,
+        funderEmail: ctx.funderEmail,
+        dealIdPrefix: ctx.dealIdPrefix,
+        amountTriggerPrepayment: ctx.prepaymentDiscountAmount,
+        dateWhichAmountReceived: ctx.prepaymentReceivedByDate,
+        recipientName2: ctx.recipientName,
+        disclosureDate2: ctx.signatureDate,
+        recipientAddress2: ctx.recipientAddress,
+        theestimatedpayment: ctx.estimatedPayment,
+        paymentExceedPercent: ctx.paymentExceededPercent,
+        signature1Date: ctx.signatureDate,
+        signature2Date: ctx.signatureDate,
+        outstandingSalesBasedFinancing: isRefi ? ctx.previousRefiBalance : "",
+        totalAmountNewFinancing: "",
+        unpaidFinanceCharges: "",
+    });
+}
+
 const buildDailyUtah = (ctx: StateDisclosureContext) =>
     buildDailyUtahContractPrefillFields({
-        purchaseAmount: ctx.fundingProvided,
-        netToMerchant: ctx.fundingDisbursed,
+        /** Guide: Total Amount of Funds = Total Net (all fund amount slots). */
+        purchaseAmount: ctx.fundingDisbursed || ctx.netContractedFunding || ctx.fundingProvided,
+        netToMerchant:
+            ctx.fundingDisbursed || ctx.netContractedFunding || ctx.fundingProvided,
         purchasePrice: ctx.totalRepayment,
         financeCharge: ctx.financeCharge || ctx.totalDollarCost,
         remittance: ctx.estimatedPayment,
         monthlyIncome: ctx.averageMonthlyIncome,
-        appendixUnderwritingFees: ctx.brokerFeePaidToBroker ?? "0.00",
+        /** Guide: “Amount that the Provider Pays…” — leave blank. */
+        appendixUnderwritingFees: "",
         paymentTermsPercent: ctx.paymentExceededPercent,
     });
 
@@ -200,68 +352,17 @@ const buildDailyUtah = (ctx: StateDisclosureContext) =>
 const REGISTRY: Record<string, StateDisclosureBuilder> = {
     daily_california: buildCaliforniaDisclosurePrefill,
 
-    daily_connecticut: (ctx) =>
-        buildDailyConnecticutContractPrefillFields({
-            totalCommericalFinancing: ctx.fundingDisbursed,
-            deductedAtDisbursement: ctx.feesDeducted,
-            totalAmountCommercialFinancing: ctx.fundingProvided,
-            financeCharge: ctx.financeCharge,
-            totalRepaymentAmount: ctx.totalRepayment,
-            estimatedTimePeriodicPaymement: ctx.estimatedTermDays ?? ctx.estimatedTerm,
-            disclosureBrokerFee: ctx.brokerFeePaidToBroker,
-            disclosureDate: ctx.signatureDate,
-            recipientName: ctx.recipientName,
-            recipientAddress: ctx.recipientAddress,
-            funderName: ctx.funderName,
-            funderAddress: ctx.funderAddress,
-            funderPhone: ctx.funderPhone,
-            funderEmail: ctx.funderEmail,
-            dealIdPrefix: ctx.dealIdPrefix,
-            amountTriggerPrepayment: ctx.prepaymentDiscountAmount,
-            dateWhichAmountReceived: ctx.prepaymentReceivedByDate,
-            recipientName2: ctx.recipientName,
-            disclosureDate2: ctx.signatureDate,
-            recipientAddress2: ctx.recipientAddress,
-            theestimatedpayment: ctx.estimatedPayment,
-            paymentExceedPercent: ctx.paymentExceededPercent,
-            signature1Date: ctx.signatureDate,
-            signature2Date: ctx.signatureDate,
-        }),
+    daily_connecticut: buildConnecticutDisclosurePrefill,
 
-    weekly_connecticut: (ctx) =>
-        buildDailyConnecticutContractPrefillFields({
-            totalCommericalFinancing: ctx.fundingDisbursed,
-            deductedAtDisbursement: ctx.feesDeducted,
-            totalAmountCommercialFinancing: ctx.fundingProvided,
-            financeCharge: ctx.financeCharge,
-            totalRepaymentAmount: ctx.totalRepayment,
-            estimatedTimePeriodicPaymement: ctx.estimatedTermDays ?? ctx.estimatedTerm,
-            disclosureBrokerFee: ctx.brokerFeePaidToBroker,
-            disclosureDate: ctx.signatureDate,
-            recipientName: ctx.recipientName,
-            recipientAddress: ctx.recipientAddress,
-            funderName: ctx.funderName,
-            funderAddress: ctx.funderAddress,
-            funderPhone: ctx.funderPhone,
-            funderEmail: ctx.funderEmail,
-            dealIdPrefix: ctx.dealIdPrefix,
-            amountTriggerPrepayment: ctx.prepaymentDiscountAmount,
-            dateWhichAmountReceived: ctx.prepaymentReceivedByDate,
-            recipientName2: ctx.recipientName,
-            disclosureDate2: ctx.signatureDate,
-            recipientAddress2: ctx.recipientAddress,
-            theestimatedpayment: ctx.estimatedPayment,
-            paymentExceedPercent: ctx.paymentExceededPercent,
-            signature1Date: ctx.signatureDate,
-            signature2Date: ctx.signatureDate,
-        }),
+    weekly_connecticut: buildConnecticutDisclosurePrefill,
 
     daily_florida: (ctx) =>
         buildDailyFloridaContractPrefillFields({
             clientName: ctx.recipientName,
             funderName: ctx.funderName,
-            totalAmountBusinessFund: ctx.fundingDisbursed,
-            totalAmountOfFundDisbursed: ctx.fundingProvided,
+            /** PDF: Funds Provided = contracted amount; Funds Disbursed = net after fees. */
+            totalAmountBusinessFund: ctx.fundingProvided,
+            totalAmountOfFundDisbursed: ctx.fundingDisbursed,
             totalAmountTobePaidToProvider: ctx.totalRepayment,
             totalDollarCost: ctx.totalDollarCost,
             estimatedPaymentAmount: ctx.estimatedPayment,
@@ -278,8 +379,8 @@ const REGISTRY: Record<string, StateDisclosureBuilder> = {
         buildDailyFloridaContractPrefillFields({
             clientName: ctx.recipientName,
             funderName: ctx.funderName,
-            totalAmountBusinessFund: ctx.fundingDisbursed,
-            totalAmountOfFundDisbursed: ctx.fundingProvided,
+            totalAmountBusinessFund: ctx.fundingProvided,
+            totalAmountOfFundDisbursed: ctx.fundingDisbursed,
             totalAmountTobePaidToProvider: ctx.totalRepayment,
             totalDollarCost: ctx.totalDollarCost,
             estimatedPaymentAmount: ctx.estimatedPayment,
@@ -297,8 +398,8 @@ const REGISTRY: Record<string, StateDisclosureBuilder> = {
         buildDailyFloridaContractPrefillFields({
             clientName: ctx.recipientName,
             funderName: ctx.funderName,
-            totalAmountBusinessFund: ctx.fundingDisbursed,
-            totalAmountOfFundDisbursed: ctx.fundingProvided,
+            totalAmountBusinessFund: ctx.fundingProvided,
+            totalAmountOfFundDisbursed: ctx.fundingDisbursed,
             totalAmountTobePaidToProvider: ctx.totalRepayment,
             totalDollarCost: ctx.totalDollarCost,
             estimatedPaymentAmount: ctx.estimatedPayment,
@@ -315,8 +416,8 @@ const REGISTRY: Record<string, StateDisclosureBuilder> = {
         buildDailyFloridaContractPrefillFields({
             clientName: ctx.recipientName,
             funderName: ctx.funderName,
-            totalAmountBusinessFund: ctx.fundingDisbursed,
-            totalAmountOfFundDisbursed: ctx.fundingProvided,
+            totalAmountBusinessFund: ctx.fundingProvided,
+            totalAmountOfFundDisbursed: ctx.fundingDisbursed,
             totalAmountTobePaidToProvider: ctx.totalRepayment,
             totalDollarCost: ctx.totalDollarCost,
             estimatedPaymentAmount: ctx.estimatedPayment,
@@ -333,8 +434,8 @@ const REGISTRY: Record<string, StateDisclosureBuilder> = {
         buildDailyLouisianaContractPrefillFields({
             clientName: ctx.recipientName,
             funderName: ctx.funderName,
-            totalAmountBusinessFund: ctx.fundingDisbursed,
-            totalAmountOfFundDisbursed: ctx.fundingProvided,
+            totalAmountBusinessFund: ctx.fundingProvided,
+            totalAmountOfFundDisbursed: ctx.fundingDisbursed,
             totalAmountTobePaidToProvider: ctx.totalRepayment,
             totalDollarCost: ctx.totalDollarCost,
             estimatedPaymentAmount: ctx.estimatedPayment,
@@ -351,8 +452,8 @@ const REGISTRY: Record<string, StateDisclosureBuilder> = {
         buildDailyLouisianaContractPrefillFields({
             clientName: ctx.recipientName,
             funderName: ctx.funderName,
-            totalAmountBusinessFund: ctx.fundingDisbursed,
-            totalAmountOfFundDisbursed: ctx.fundingProvided,
+            totalAmountBusinessFund: ctx.fundingProvided,
+            totalAmountOfFundDisbursed: ctx.fundingDisbursed,
             totalAmountTobePaidToProvider: ctx.totalRepayment,
             totalDollarCost: ctx.totalDollarCost,
             estimatedPaymentAmount: ctx.estimatedPayment,
@@ -399,8 +500,8 @@ const REGISTRY: Record<string, StateDisclosureBuilder> = {
 
     daily_georgia: (ctx) =>
         buildDailyGeorgiaContractPrefillFields({
-            totalAmountBusinessFund: ctx.fundingDisbursed,
-            totalAmountOfFundDisbursed: ctx.fundingProvided,
+            totalAmountBusinessFund: ctx.fundingProvided,
+            totalAmountOfFundDisbursed: ctx.fundingDisbursed,
             totalAmountToBePaid: ctx.totalRepayment,
             totalDollarCost: ctx.totalDollarCost,
             estimatedPaymentAmount: ctx.estimatedPayment,
@@ -415,8 +516,8 @@ const REGISTRY: Record<string, StateDisclosureBuilder> = {
 
     weekly_georgia: (ctx) =>
         buildDailyGeorgiaContractPrefillFields({
-            totalAmountBusinessFund: ctx.fundingDisbursed,
-            totalAmountOfFundDisbursed: ctx.fundingProvided,
+            totalAmountBusinessFund: ctx.fundingProvided,
+            totalAmountOfFundDisbursed: ctx.fundingDisbursed,
             totalAmountToBePaid: ctx.totalRepayment,
             totalDollarCost: ctx.totalDollarCost,
             estimatedPaymentAmount: ctx.estimatedPayment,
@@ -433,8 +534,8 @@ const REGISTRY: Record<string, StateDisclosureBuilder> = {
         buildDailyKansasContractPrefillFields({
             clientName: ctx.recipientName,
             funderName: ctx.funderName,
-            totalAmountOfFundProvided: ctx.fundingDisbursed,
-            totalAmountFundDisbursed: ctx.fundingProvided,
+            totalAmountOfFundProvided: ctx.fundingProvided,
+            totalAmountFundDisbursed: ctx.fundingDisbursed,
             totalOfPayments: ctx.totalRepayment,
             totalDollarCostOfFrinancing: ctx.totalDollarCost,
             estimatedPayment: ctx.estimatedPayment,
@@ -449,8 +550,8 @@ const REGISTRY: Record<string, StateDisclosureBuilder> = {
         buildDailyKansasContractPrefillFields({
             clientName: ctx.recipientName,
             funderName: ctx.funderName,
-            totalAmountOfFundProvided: ctx.fundingDisbursed,
-            totalAmountFundDisbursed: ctx.fundingProvided,
+            totalAmountOfFundProvided: ctx.fundingProvided,
+            totalAmountFundDisbursed: ctx.fundingDisbursed,
             totalOfPayments: ctx.totalRepayment,
             totalDollarCostOfFrinancing: ctx.totalDollarCost,
             estimatedPayment: ctx.estimatedPayment,
@@ -478,14 +579,16 @@ const REGISTRY: Record<string, StateDisclosureBuilder> = {
             recipientAddress: ctx.recipientAddress,
             prepaymentDiscount: ctx.prepaymentDiscountAmount,
             dateOfAmountReceived: ctx.prepaymentReceivedByDate,
-            signatureDate: ctx.signatureDate,
             recipientName2: ctx.recipientName,
             disclosureDate2: ctx.signatureDate,
             recipientAddress1: ctx.recipientAddress,
             exceededPayment: ctx.paymentExceededPercent,
+            fordailypayments: ctx.estimatedPayment,
             weeklyPayments: ctx.estimatedPayment,
             paymentExceededPercent: ctx.paymentExceededPercent,
-            signatureDate2: ctx.signatureDate,
+            // Last-page Signature / Date lines stay empty.
+            signatureDate: "",
+            signatureDate2: "",
         }),
 
     weekly_virginia: (ctx) =>
@@ -499,16 +602,18 @@ const REGISTRY: Record<string, StateDisclosureBuilder> = {
             disclosureDate: ctx.signatureDate,
             disclosureName: ctx.recipientName,
             recipientAddress: ctx.recipientAddress,
-            prepaymentDiscount: ctx.prepaymentDiscountAmount,
             dateOfAmountReceived: ctx.prepaymentReceivedByDate,
-            signatureDate: ctx.signatureDate,
             recipientName2: ctx.recipientName,
             disclosureDate2: ctx.signatureDate,
             recipientAddress1: ctx.recipientAddress,
             exceededPayment: ctx.paymentExceededPercent,
+            fordailypayments: ctx.estimatedPayment,
             weeklyPayments: ctx.estimatedPayment,
             paymentExceededPercent: ctx.paymentExceededPercent,
-            signatureDate2: ctx.signatureDate,
+            appendixUnderwritingFees: ctx.brokerFeePaidToBroker,
+            // Last-page Signature / Date lines stay empty.
+            signatureDate: "",
+            signatureDate2: "",
         }),
 
     daily_utah: buildDailyUtah,
@@ -563,6 +668,27 @@ function formatPercent(value: unknown, suffix = "%"): string {
     }).format(truncated)}${suffix}`;
 }
 
+function firstRecord(value: unknown): Record<string, unknown> | null {
+    if (Array.isArray(value) && value[0] != null && typeof value[0] === "object") {
+        return value[0] as Record<string, unknown>;
+    }
+    if (value != null && typeof value === "object" && !Array.isArray(value)) {
+        return value as Record<string, unknown>;
+    }
+    return null;
+}
+
+/** Specified % of gross / income purchased. Ignore 0 — TermsOffer sync often stores 0. */
+function firstPositivePercent(...values: unknown[]): number | undefined {
+    for (const value of values) {
+        const raw =
+            typeof value === "string" ? value.trim().replace(/%/g, "") : value;
+        const n = coerceFiniteNumber(raw);
+        if (n !== undefined && n > 0) return n;
+    }
+    return undefined;
+}
+
 function formatUsDate(value: unknown): string {
     if (value == null) return "";
     if (value instanceof Date) {
@@ -595,6 +721,35 @@ function str(v: unknown): string {
     return String(v ?? "").trim();
 }
 
+function joinAddressParts(
+    street?: string,
+    city?: string,
+    state?: string,
+    zip?: string,
+): string {
+    const cityOut =
+        str(city) && !isAddressPlaceholderToken(city) ? str(city) : "";
+    const stateOut = isKnownUsStateToken(state) ? str(state) : "";
+    const zipOut = /^\d{5}(-\d{4})?$/.test(str(zip)) ? str(zip) : "";
+    return [str(street), cityOut, stateOut, zipOut].filter(Boolean).join(", ");
+}
+
+/** Street line for disclosure recipient address — never country / disclosure state / ZIP alone. */
+function composeDisclosureRecipientAddress(parts: {
+    street?: string;
+    city?: string;
+    state?: string;
+    zip?: string;
+}[]): string {
+    for (const part of parts) {
+        const street = str(part.street);
+        if (!isUsableDisclosureStreetLine(street)) continue;
+        const line = joinAddressParts(street, part.city, part.state, part.zip);
+        if (line && isUsableDisclosureStreetLine(line)) return line;
+    }
+    return "";
+}
+
 /* --------------------------- context extraction --------------------------- */
 
 /**
@@ -606,6 +761,8 @@ export function buildStateDisclosurePrefillContextFromContract(args: {
     application?: Record<string, unknown> | null;
     /** Optional override for the signature/disclosure date (e.g., today). */
     agreementDate?: string;
+    /** Bank-analysis rows used for average monthly income / lookback months. */
+    bankAnalyses?: unknown;
 }): StateDisclosureContext {
     const contract = (args.contract ?? {}) as Record<string, unknown>;
     const offer = (contract.offer ?? null) as Record<string, unknown> | null;
@@ -619,11 +776,16 @@ export function buildStateDisclosurePrefillContextFromContract(args: {
     const purchasePercent = coerceFiniteNumber(
         contract.purchasePercent ?? offer?.rate ?? offer?.factorRate,
     );
-    const underwritingFees =
+    const underwritingFeesApplicable =
         resolveAppendixUnderwritingFeesDollars(
             contract.appendixUnderwritingFees ?? offer?.fees,
             purchaseAmount,
         ) ?? coerceFiniteNumber(contract.appendixUnderwritingFees);
+    /** Display / net stack includes the $50 platform fee (calculators also apply it). */
+    const underwritingFees =
+        underwritingFeesApplicable !== undefined
+            ? applyDisclosurePlatformFee(underwritingFeesApplicable)
+            : DISCLOSURE_PLATFORM_FEE_USD;
 
     /** Per-period payment lives on the TermsOffer / OfferDecision row. */
     const periodicPayment = coerceFiniteNumber(
@@ -640,7 +802,20 @@ export function buildStateDisclosurePrefillContextFromContract(args: {
             (contract as Record<string, unknown>).contractLenght ??
             (contract as Record<string, unknown>).termLength,
     );
-    const percentOfGross = coerceFiniteNumber(offer?.percentOfGross);
+    const application = (args.application ?? {}) as Record<string, unknown>;
+    const termsOffer =
+        firstRecord(application.termsOffers) ?? firstRecord(contract.termsOffers);
+    const positionRow =
+        firstRecord(application.positions) ?? firstRecord(contract.positions);
+    const percentOfGross = firstPositivePercent(
+        termsOffer?.percentOfGross,
+        offer?.ourRemit,
+        offer?.mcaRemit,
+        offer?.specifiedPercent,
+        offer?.percentOfGross,
+        positionRow?.percentOfGross,
+        positionRow?.mcaRemit,
+    );
     const frequency = String(
         offer?.frequency ?? (contract as Record<string, unknown>).remittance ?? "",
     ).trim();
@@ -648,13 +823,57 @@ export function buildStateDisclosurePrefillContextFromContract(args: {
     const fundingProvided = formatUsd(purchaseAmount);
     const totalRepayment = formatUsd(purchasePrice);
 
+    const prefillOverrides =
+        (contract.contractPrefillOverrides as Record<string, unknown> | null) ?? null;
+    const refinanceAmountRaw =
+        coerceFiniteNumber(offer?.refinanceAmount) ??
+        coerceFiniteNumber(contract.refinanceAmount) ??
+        coerceFiniteNumber(prefillOverrides?.refinanceAmount) ??
+        0;
+    const isRefi = isRefinanceDeal(refinanceAmountRaw);
+    const previousDealDate = formatUsDate(
+        offer?.previousDealDate ??
+            contract.previousDealDate ??
+            prefillOverrides?.previousDealDate ??
+            prefillOverrides?.previous_agreement_date ??
+            "",
+    );
+
     let fundingDisbursed = "";
+    let netContractedFunding = "";
+    let actualDisbursement = "";
+    let previousRefiBalance = "";
     if (purchaseAmount !== undefined) {
-        const disbursed =
+        const netAfterFees =
             underwritingFees !== undefined
                 ? Math.max(0, purchaseAmount - underwritingFees)
                 : purchaseAmount;
-        fundingDisbursed = formatUsd(disbursed);
+        netContractedFunding = formatUsd(netAfterFees);
+        if (isRefi) {
+            previousRefiBalance = formatUsd(refinanceAmountRaw);
+            actualDisbursement = formatUsd(Math.max(0, netAfterFees - refinanceAmountRaw));
+            /**
+             * CT REFI: disbursement subtracts REFI balance.
+             * FL/GA/KS/LA/MO/UT/VA (and CA left box via netContracted): PDF keeps
+             * disbursed as net-after-fees only for shared templates — CT is the
+             * exception that shows actual merchant cash.
+             */
+            const stateKey = normalizeStateKey(
+                String(
+                    contract.state ??
+                        (contract as Record<string, unknown>).businessAddressState ??
+                        "",
+                ),
+            );
+            const disbursementSubtractsRefi =
+                stateKey === "connecticut" || stateKey === "ct";
+            fundingDisbursed = disbursementSubtractsRefi
+                ? actualDisbursement
+                : netContractedFunding;
+        } else {
+            fundingDisbursed = netContractedFunding;
+            actualDisbursement = netContractedFunding;
+        }
     }
 
     const totalDollarCostNum =
@@ -695,48 +914,77 @@ export function buildStateDisclosurePrefillContextFromContract(args: {
         str((contract as Record<string, unknown>).client_legal_name) ||
         str(appPrefill.legalName);
 
-    const businessAddressLine = [
-        str(contract.businessAddress),
-        str(contract.businessAddressCity),
-        str(contract.businessAddressState),
-        str(contract.businessAddressZip),
+    const appClient = (args.application?.client ?? {}) as Record<string, unknown>;
+    const appBiz = (appClient.business ?? {}) as Record<string, unknown>;
+    const appBizAddr =
+        appBiz.address && typeof appBiz.address === "object"
+            ? (appBiz.address as Record<string, unknown>)
+            : {};
+    const appStreet = [
+        str(appPrefill.businessAddress),
+        str(appClient.businessAddress1),
+        str(appBizAddr.address1),
+        str(appClient.businessAddress),
     ]
         .filter(Boolean)
-        .join(", ") ||
-        [
-            str(appPrefill.businessAddress),
-            str(appPrefill.businessAddressCity),
-            str(appPrefill.businessAddressState),
-            str(appPrefill.businessAddressZip),
-        ]
-            .filter(Boolean)
-            .join(", ");
+        .find((line) => isUsableDisclosureStreetLine(line));
+    const businessAddressLine = composeDisclosureRecipientAddress([
+        {
+            street: appStreet,
+            city:
+                str(appPrefill.businessAddressCity) ||
+                str(appClient.businessCity) ||
+                str(appBizAddr.city),
+            state:
+                str(appPrefill.businessAddressState) ||
+                str(appClient.businessState) ||
+                str(appBizAddr.state),
+            zip:
+                str(appPrefill.businessAddressZip) ||
+                str(appClient.businessZipCode) ||
+                str(appClient.businessZip) ||
+                str(appBizAddr.zipCode) ||
+                str(appBizAddr.zip),
+        },
+        {
+            street: str(contract.businessAddress),
+            city: str(contract.businessAddressCity),
+            state: str(contract.businessAddressState),
+            zip: str(contract.businessAddressZip),
+        },
+        { street: merchant.physicalAddress },
+    ]);
 
     const signatureDate =
         formatUsDate(args.agreementDate) ||
         formatUsDate(contract.agreementDate) ||
         formatUsDate(contract.contractDate);
 
-    /** Average monthly income is sourced from the application/business analysis, not the contract row. */
-    const application = (args.application ?? {}) as Record<string, unknown>;
+    /** Average monthly income is sourced from bank analysis, then application/business. */
+    const client = (application.client as Record<string, unknown> | null) ?? null;
+    const business = (client?.business as Record<string, unknown> | null) ?? null;
     const averageMonthlyIncome = formatUsd(
         application.averageMonthlyIncome ??
             application.averageMonthlyDeposit ??
-            (application as Record<string, unknown>).avgMonthlyDeposit ??
+            application.avgMonthlyDeposit ??
+            business?.monthlyRevenue ??
+            client?.monthlyRevenue ??
             "",
     );
 
     let estimatedTermDays = "";
+    let estimatedTermBusinessDays = "";
     let estimatedMonthlyCost = "";
     let averageMonthlyIncomeFromCalculator = "";
     let estimatedPaymentFromCalculator = "";
-    let paymentExceededPercentFromCalculator = "";
     let estimatedAnnualPercentageRateFromCalculator = "";
+    let percentFromCalculator: number | undefined;
     try {
         const calcInputs = buildDisclosureCalculatorInputsFromSources({
             contract: args.contract ?? null,
             application: args.application ?? null,
             offerDecision: offer,
+            bankAnalyses: args.bankAnalyses,
             state: String(
                 contract.state ??
                     (contract as Record<string, unknown>).businessAddressState ??
@@ -744,6 +992,12 @@ export function buildStateDisclosurePrefillContextFromContract(args: {
             ),
         });
         const metrics = calculateDisclosureMetrics(calcInputs);
+        if (
+            metrics.percentOfDailyIncomePurchased > 0 &&
+            metrics.percentOfDailyIncomePurchased <= 100
+        ) {
+            percentFromCalculator = metrics.percentOfDailyIncomePurchased;
+        }
         if (metrics.estimatedTermDays > 0) {
             estimatedTermDays = String(metrics.estimatedTermDays);
         }
@@ -758,15 +1012,84 @@ export function buildStateDisclosurePrefillContextFromContract(args: {
         if (metrics.estimatedPayment > 0) {
             estimatedPaymentFromCalculator = formatUsd(metrics.estimatedPayment);
         }
-        if (metrics.percentOfDailyIncomePurchased > 0) {
-            paymentExceededPercentFromCalculator = formatPercent(
-                metrics.percentOfDailyIncomePurchased,
-            );
-        }
         if (metrics.estimatedAnnualPercentageRate > 0) {
             estimatedAnnualPercentageRateFromCalculator = formatPercent(
                 metrics.estimatedAnnualPercentageRate,
             );
+        }
+
+        if (isRefi && purchaseAmount !== undefined) {
+            const refiMetrics = calculateRefinanceDealMetrics({
+                state: String(
+                    contract.state ??
+                        (contract as Record<string, unknown>).businessAddressState ??
+                        "",
+                ),
+                label:
+                    str(contract.funderName) ||
+                    str((contract as Record<string, unknown>).funder_name) ||
+                    PLATFORM_DISCLOSURE_FUNDER_NAME,
+                paymentFrequency: frequency || calcInputs.frequency,
+                contractAmount: purchaseAmount,
+                originationFee: underwritingFeesApplicable ?? 0,
+                factorRate: purchasePercent ?? calcInputs.factorRate,
+                paymentAmount: periodicPayment ?? metrics.estimatedPayment,
+                previousRefiBalance: refinanceAmountRaw,
+                previousDealDate,
+                averageMonthlyRevenue: metrics.estimatedMerchantAverageMonthlyRevenue,
+                numberOfPayments: numberOfPayments ?? calcInputs.numberOfPayments,
+                numberOfPaymentDays: calcInputs.numberOfPaymentDays,
+                specifiedPercent: percentOfGross ?? 0,
+            });
+            estimatedTermDays = String(refiMetrics.estimatedTermDays);
+            estimatedTermBusinessDays = String(refiMetrics.estimatedTermBusinessDays);
+            if (refiMetrics.estimatedMonthlyCost > 0) {
+                estimatedMonthlyCost = formatUsd(refiMetrics.estimatedMonthlyCost);
+            }
+            if (refiMetrics.apr > 0) {
+                estimatedAnnualPercentageRateFromCalculator = formatPercent(refiMetrics.apr);
+            }
+            if (refiMetrics.paymentAmount > 0 && !estimatedPayment) {
+                estimatedPaymentFromCalculator = formatUsd(refiMetrics.paymentAmount);
+            }
+        } else if (purchaseAmount !== undefined) {
+            /** NO-REFI: same PDF money / term / monthly-cost layer (refi balance = 0). */
+            const noRefiMetrics = calculateRefinanceDealMetrics({
+                state: String(
+                    contract.state ??
+                        (contract as Record<string, unknown>).businessAddressState ??
+                        "",
+                ),
+                label:
+                    str(contract.funderName) ||
+                    str((contract as Record<string, unknown>).funder_name) ||
+                    PLATFORM_DISCLOSURE_FUNDER_NAME,
+                paymentFrequency: frequency || calcInputs.frequency,
+                contractAmount: purchaseAmount,
+                originationFee: underwritingFeesApplicable ?? 0,
+                factorRate: purchasePercent ?? calcInputs.factorRate,
+                paymentAmount: periodicPayment ?? metrics.estimatedPayment,
+                previousRefiBalance: 0,
+                averageMonthlyRevenue: metrics.estimatedMerchantAverageMonthlyRevenue,
+                numberOfPayments: numberOfPayments ?? calcInputs.numberOfPayments,
+                numberOfPaymentDays: calcInputs.numberOfPaymentDays,
+                specifiedPercent: percentOfGross ?? 0,
+            });
+            estimatedTermDays = String(noRefiMetrics.estimatedTermDays);
+            estimatedTermBusinessDays = String(noRefiMetrics.estimatedTermBusinessDays);
+            if (noRefiMetrics.estimatedMonthlyCost > 0) {
+                estimatedMonthlyCost = formatUsd(noRefiMetrics.estimatedMonthlyCost);
+            }
+            if (noRefiMetrics.apr > 0) {
+                estimatedAnnualPercentageRateFromCalculator = formatPercent(noRefiMetrics.apr);
+            }
+        } else if (numberOfPayments && numberOfPayments > 0) {
+            const freqLower = frequency.toLowerCase();
+            if (freqLower.startsWith("week")) {
+                estimatedTermBusinessDays = String(Math.trunc(numberOfPayments) * 5);
+            } else if (estimatedTermDays) {
+                estimatedTermBusinessDays = estimatedTermDays;
+            }
         }
     } catch {
         estimatedTermDays = "";
@@ -775,15 +1098,31 @@ export function buildStateDisclosurePrefillContextFromContract(args: {
     const resolvedAverageMonthlyIncome =
         averageMonthlyIncomeFromCalculator || averageMonthlyIncome;
     const resolvedEstimatedPayment = estimatedPayment || estimatedPaymentFromCalculator;
-    const resolvedPaymentExceededPercent =
-        paymentExceededPercentFromCalculator ||
-        (percentOfGross !== undefined ? formatPercent(percentOfGross) : "");
+    const resolvedPaymentExceededPercent = formatPercent(
+        percentOfGross ?? percentFromCalculator,
+        "",
+    );
     const resolvedEstimatedApr =
         estimatedAnnualPercentageRateFromCalculator || estimatedAnnualPercentageRate;
 
+    const ownerPersonName =
+        str(contract.clientName) ||
+        str((appPrefill as Record<string, unknown>).clientName) ||
+        str(merchant.clientName) ||
+        str((application.client as Record<string, unknown> | null)?.name) ||
+        "";
+
     return {
+        /** Contracted amount (CT/FL “total amount of financing / funds provided”). */
         fundingProvided,
         fundingDisbursed,
+        /**
+         * CA/NY “provided to you directly” / right box.
+         * NO REFI: net after fees. REFI: actual disbursement (CA) — state builders may remap.
+         */
+        fundingProvidedDirect: isRefi
+            ? actualDisbursement || fundingDisbursed
+            : fundingDisbursed || netContractedFunding || fundingProvided,
         feesDeducted: formatUsd(underwritingFees),
         totalRepayment,
         totalDollarCost,
@@ -791,18 +1130,23 @@ export function buildStateDisclosurePrefillContextFromContract(args: {
         estimatedPayment: resolvedEstimatedPayment,
         estimatedAnnualPercentageRate: resolvedEstimatedApr,
         paymentExceededPercent: resolvedPaymentExceededPercent,
+        percentOfBusinessIncome: resolvedPaymentExceededPercent,
         averageMonthlyIncome: resolvedAverageMonthlyIncome,
         estimatedTerm: termLength !== undefined ? String(Math.trunc(termLength)) : "",
         estimatedTermDays,
-        frequency,
+        estimatedTermBusinessDays: estimatedTermBusinessDays || estimatedTermDays,
+        frequency: formatDisclosurePaymentFrequencyLabel(frequency) || frequency,
         estimatedNumberOfPayments:
             numberOfPayments !== undefined ? String(Math.trunc(numberOfPayments)) : "",
         prepayment: "",
         recipientName: customerName,
+        merchantName: ownerPersonName || customerName,
         funderName:
-            str(contract.funderName) ||
-            str((contract as Record<string, unknown>).funder_name) ||
-            PLATFORM_DISCLOSURE_FUNDER_NAME,
+            resolveRefiLabelName(
+                str(contract.funderName) ||
+                    str((contract as Record<string, unknown>).funder_name) ||
+                    PLATFORM_DISCLOSURE_FUNDER_NAME,
+            ),
         funderAddress: str((contract as Record<string, unknown>).funderAddress),
         funderPhone: str((contract as Record<string, unknown>).funderPhone),
         funderEmail: str((contract as Record<string, unknown>).funderEmail),
@@ -813,6 +1157,12 @@ export function buildStateDisclosurePrefillContextFromContract(args: {
         prepaymentDiscountAmount: "",
         brokerFeePaidToBroker: "0.00",
         estimatedMonthlyCost,
+        isRefinance: isRefi,
+        netContractedFunding: netContractedFunding || fundingDisbursed,
+        previousRefiBalance: isRefi ? previousRefiBalance : "",
+        actualDisbursement: isRefi ? actualDisbursement || fundingDisbursed : fundingDisbursed,
+        previousDealDate: isRefi ? previousDealDate : "",
+        outstandingSalesBasedFinancing: isRefi ? previousRefiBalance : "",
     };
 }
 

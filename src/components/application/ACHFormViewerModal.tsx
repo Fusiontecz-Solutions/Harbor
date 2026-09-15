@@ -1,7 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { useDispatch, useSelector } from "react-redux";
-import { Document, Page, pdfjs } from "react-pdf";
 import {
     Building2,
     CheckCircle2,
@@ -98,6 +97,7 @@ import {
 } from "./contractdata/achFormEditConfig";
 import {
     normalizeContractPrefillOverrides,
+    uppercaseContractDocumentPrefillFields,
     type BuildContractPrefillFieldsArgs,
     type ContractPrefillContractRecords,
 } from "./contractdata/Contract";
@@ -110,8 +110,7 @@ import {
     type DocuSignTemplateRolePayload,
 } from "./contractdata/templateRecipients";
 import { parseAchAuthorizationDocuSignFromPrefill } from "./contractdata/achAuthorizationDocuSign";
-
-pdfjs.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjs.version}/build/pdf.worker.min.mjs`;
+import DirectPdfViewer from "./DirectPdfViewer";
 
 const DOCUSIGN_PRIMARY_BTN_CLASS =
     "h-9 shrink-0 cursor-pointer border-0 bg-[image:var(--brand-gradient)] px-6 text-white shadow-sm hover:opacity-90 focus-visible:ring-[var(--brand)]/40";
@@ -447,67 +446,6 @@ function formatSigningStatusLabel(raw: unknown): string {
     return formatDocumentSendStatusLabel(k);
 }
 
-function DirectPdfViewer({
-    fileUrl,
-    errorMessage = "Could not render this PDF in the viewer.",
-}: {
-    fileUrl: string;
-    errorMessage?: string;
-}) {
-    const wrapRef = useRef<HTMLDivElement>(null);
-    const [numPages, setNumPages] = useState<number | null>(null);
-    const [pageWidth, setPageWidth] = useState(640);
-
-    useEffect(() => {
-        const el = wrapRef.current;
-        if (!el) return;
-        const measure = () => {
-            const w = el.clientWidth;
-            if (w > 0) setPageWidth(Math.max(280, w - 4));
-        };
-        measure();
-        const ro = new ResizeObserver(measure);
-        ro.observe(el);
-        return () => ro.disconnect();
-    }, []);
-
-    return (
-        <div
-            ref={wrapRef}
-            className="absolute inset-0 overflow-y-auto overflow-x-hidden bg-slate-100 dark:bg-slate-950"
-        >
-            <Document
-                file={fileUrl}
-                onLoadSuccess={({ numPages: n }) => setNumPages(n)}
-                loading={
-                    <div className="flex min-h-[200px] items-center justify-center">
-                        <Loader2 className="h-8 w-8 animate-spin text-slate-400" aria-hidden />
-                    </div>
-                }
-                error={
-                    <div className="flex min-h-[200px] items-center justify-center px-4 text-center text-xs text-slate-500">
-                        {errorMessage}
-                    </div>
-                }
-                className="flex w-full flex-col items-center gap-3 py-3"
-            >
-                {numPages
-                    ? Array.from({ length: numPages }, (_, i) => (
-                          <Page
-                              key={i + 1}
-                              pageNumber={i + 1}
-                              width={pageWidth}
-                              className="bg-white shadow-md"
-                              renderTextLayer
-                              renderAnnotationLayer
-                          />
-                      ))
-                    : null}
-            </Document>
-        </div>
-    );
-}
-
 export interface ACHFormViewerModalProps {
     isOpen: boolean;
     onClose: () => void;
@@ -701,7 +639,10 @@ export default function ACHFormViewerModal({
     );
 
     const selectedFunderDefaultCcEmail = useMemo(
-        () => String(selectedFunderProfile?.defaultCcEmail ?? "").trim() || null,
+        () =>
+            String(selectedFunderProfile?.docusignDefaultCcEmail ?? "").trim() ||
+            String(selectedFunderProfile?.defaultCcEmail ?? "").trim() ||
+            null,
         [selectedFunderProfile],
     );
 
@@ -711,7 +652,7 @@ export default function ACHFormViewerModal({
 
     const contractCcMergeOptions = useMemo(() => {
         const knownFunderDefaultCcEmails = collectKnownFunderDefaultCcEmails(
-            funders.map((f) => f.defaultCcEmail),
+            funders.flatMap((f) => [f.docusignDefaultCcEmail, f.defaultCcEmail]),
         );
         const apiResolved =
             tenantContractCcDefaults?.ccEmails?.length
@@ -1483,6 +1424,7 @@ export default function ACHFormViewerModal({
             fields = rows
                 .map((f) => ({ id: f.id, value: String(f.value ?? "").trim() }))
                 .filter((f) => f.id && f.value);
+            fields = uppercaseContractDocumentPrefillFields(fields);
         }
         if (!fields.length) return false;
 

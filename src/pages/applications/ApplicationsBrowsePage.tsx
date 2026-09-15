@@ -59,7 +59,7 @@ import { useApplicationsListQuery } from "@/hooks/useApplicationsListQuery";
 
 const QUEUE_OPTIONS = [
   { label: "Agent", value: "Agent" },
-  { label: "Scrubbing", value: "Scrubbing" },
+  { label: "Create Offer", value: "Scrubbing" },
   { label: "Underwriter", value: "Underwriter" },
   { label: "Contract Out", value: "Contract Out" },
   { label: "Contract Signed", value: "Contract_Signed" },
@@ -790,7 +790,7 @@ export default function ApplicationsBrowsePage() {
               : "opacity-100"
           }`}
         >
-          <div className="overflow-x-auto overflow-y-auto rounded-xl [scrollbar-gutter:stable] min-h-[min(32rem,65vh)] max-lg:min-h-[min(24rem,55vh)]">
+          <div className="overflow-x-auto overflow-y-auto rounded-xl [scrollbar-gutter:stable]">
             <DataTableContent
               table={table}
               loading={listBlockingLoad}

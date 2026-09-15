@@ -150,10 +150,23 @@ export interface CreateApplicationPayload {
     type: string;
     referringAgent?: string;
     salesRepresentative: string;
-    client: string;
+    client?: string;
     loanAmount?: number | string | null;
     note?: string;
     documents?: File[];
+    /** When true, backend creates the client and application in one request. */
+    createNewClient?: boolean;
+    newBusinessName?: string;
+    newOwnerFirstName?: string;
+    newOwnerLastName?: string;
+    newEin?: string;
+    newBusinessPhone?: string;
+    /** Prior deal UUID/applicationId when type is Refinance. */
+    previousApplicationId?: string | null;
+    /** Payoff / REFI balance seeded from the selected prior deal. */
+    refinanceAmount?: number | string | null;
+    /** Prior deal date (MM/DD/YYYY or ISO) for disclosures. */
+    previousDealDate?: string | null;
 }
 
 export interface UpdateApplicationPayload {

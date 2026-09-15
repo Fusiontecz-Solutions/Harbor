@@ -111,7 +111,10 @@ const ApplicationSummary = ({
     useEffect(() => {
         if (!apiApplicationKey) return;
         const onOfferDecisionUpdated = (event: Event) => {
-            const detail = (event as CustomEvent<{ applicationId?: string }>).detail;
+            const detail = (event as CustomEvent<{
+                applicationId?: string;
+                skipReload?: boolean;
+            }>).detail;
             if (
                 !offerDecisionUpdateMatchesApplication(
                     detail?.applicationId,
@@ -120,6 +123,7 @@ const ApplicationSummary = ({
             ) {
                 return;
             }
+            if (detail?.skipReload) return;
             void dispatch(getOfferDecisionByApplication(apiApplicationKey));
             void dispatch(getTermsOffers({ application: apiApplicationKey }));
         };

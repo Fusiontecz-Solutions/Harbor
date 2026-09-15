@@ -23,13 +23,13 @@ import { useTheme } from "@/context/ThemeContext"
 import { Card, CardContent } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import {
-  Briefcase,
   Building2,
   FileText,
   AlertCircle
 } from "lucide-react"
 import { getClientByClientId } from "@/redux/actions/clientActions"
 import { getApplicationByApplicationId } from "@/redux/actions/applicationActions"
+import { routeParamMatchesApplication } from "@/lib/applicationRouteMatch"
 
 type ApplicationDetailsSheetProps = {
   application: Application | null
@@ -104,21 +104,10 @@ function mapPositionsForCalculator(positions: Array<Record<string, unknown>>) {
 const TABS = [
   { id: "details", label: "Application Details", icon: <FileText className="w-4 h-4" /> },
   { id: "contract", label: "Contracts", icon: <FileText className="w-4 h-4" /> },
-  { id: "final", label: "Final", icon: <Briefcase className="w-4 h-4" /> },
-  { id: "funding", label: "Funding", icon: <Briefcase className="w-4 h-4" /> },
-  { id: "disbursement", label: "Disbursement", icon: <Briefcase className="w-4 h-4" /> },
   { id: "mailLog", label: "Mail Log", icon: <AlertCircle className="w-4 h-4" /> },
   { id: "activityLog", label: "Activity Log", icon: <Building2 className="w-4 h-4" /> },
   { id: "dedupe", label: "Dedupe", icon: <AlertCircle className="w-4 h-4" /> },
 ]
-
-function UnavailableCaseTab({ label }: { label: string }) {
-  return (
-    <div className="rounded-md border border-dashed border-border/70 bg-muted/20 p-6 text-sm text-muted-foreground">
-      {label} is unavailable in this build.
-    </div>
-  )
-}
 
 export default function ApplicationDetailsSheet({
   application,
@@ -135,6 +124,9 @@ export default function ApplicationDetailsSheet({
     (state: RootState) => state.clientDetail
   )
   const positionsState = useSelector((state: RootState) => state.positions)
+  const applicationDetail = useSelector(
+    (state: RootState) => state.applicationDetail.data,
+  )
   const loginUser = useSelector((state: RootState) => state.login?.data?.user)
   const canEditDecisionMaking = useMemo(
     () => canRoleEditDecisionMakingTab(resolveEffectiveRole(loginUser)),
@@ -178,8 +170,19 @@ export default function ApplicationDetailsSheet({
 
   useEffect(() => {
     if (!open || !dealApplicationId) return
-    dispatch(getApplicationByApplicationId(dealApplicationId))
-    dispatch(getPositions({ application: dealApplicationId }))
+    const alreadyLoaded =
+      String(positionsState.currentApplicationId ?? "") === dealApplicationId
+    if (!alreadyLoaded) {
+      void dispatch(getPositions({ application: dealApplicationId }))
+    }
+    const alreadyHasDetail =
+      !!applicationDetail &&
+      routeParamMatchesApplication(dealApplicationId, applicationDetail)
+    if (!alreadyHasDetail) {
+      void dispatch(getApplicationByApplicationId(dealApplicationId))
+    }
+    // Only re-run when the sheet opens for a different deal — not when positions finish loading.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- positions snapshot is read once per open
   }, [open, dealApplicationId, dispatch])
 
   const scopedPositions = useMemo(() => {
@@ -418,24 +421,13 @@ export default function ApplicationDetailsSheet({
                   <Separator />
 
                   <section className="space-y-6">
-                    <div
-                      className="hidden"
-                      aria-hidden="true"
-                      style={{ position: "absolute", left: -9999, top: 0 }}
-                    >
-                      <BankAnalysisTable
-                        showOnlyTotals
-                        onNetCreditAverageChange={(avg) => setBankNetCreditAvg(avg)}
-                        applicationId={appId}
-                        positions={bankAnalysisPositions as any}
-                      />
-                    </div>
                     <BankAnalysisTable
                       showOnlyTotals={!canEditDecisionMaking}
                       readOnly={!canEditDecisionMaking}
                       disableCreate={!canEditDecisionMaking}
                       applicationId={appId}
                       positions={bankAnalysisPositions as any}
+                      onNetCreditAverageChange={(avg) => setBankNetCreditAvg(avg)}
                     />
                   </section>
 
@@ -459,27 +451,6 @@ export default function ApplicationDetailsSheet({
               {activeTab === "contract" && (
                 <TabsContent value="contract" className="m-0">
                   <ContractTab readOnly={isOperationsRole} />
-                </TabsContent>
-              )}
-
-              {/* Final Tab */}
-              {activeTab === "final" && (
-                <TabsContent value="final" className="m-0">
-                  <UnavailableCaseTab label="Final" />
-                </TabsContent>
-              )}
-
-              {/* Funding Tab */}
-              {activeTab === "funding" && (
-                <TabsContent value="funding" className="m-0">
-                  <UnavailableCaseTab label="Funding Call" />
-                </TabsContent>
-              )}
-
-              {/* Disbursement Tab */}
-              {activeTab === "disbursement" && (
-                <TabsContent value="disbursement" className="m-0">
-                  <UnavailableCaseTab label="Disbursement" />
                 </TabsContent>
               )}
 

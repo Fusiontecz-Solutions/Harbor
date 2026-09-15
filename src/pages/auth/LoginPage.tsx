@@ -13,9 +13,13 @@ function safeAppReturnPath(raw: string | null): string | null {
     return null;
   }
 }
-import { Mail, Lock, Eye, EyeOff } from 'lucide-react';
+import { Mail, Lock, Eye, EyeOff, Loader2 } from 'lucide-react';
 import type { AppDispatch, RootState } from '../../redux/store';
 import { login } from '../../redux/actions/authActions';
+import {
+  fetchOperationsDashboardSummary,
+  fetchOperationsDashboardRecentCases,
+} from '../../redux/actions/operationsDashboardActions';
 import { useDispatch, useSelector } from 'react-redux';
 import { toast } from 'react-toastify';
 
@@ -54,11 +58,14 @@ export default function LoginPage() {
         localStorage.setItem('role', result.user.role);
         toast.success(result?.message);
 
+        void dispatch(fetchOperationsDashboardSummary());
+        void dispatch(fetchOperationsDashboardRecentCases());
+
         const afterLogin = safeAppReturnPath(searchParams.get('returnUrl'));
         if (afterLogin) {
           navigate(afterLogin, { replace: true });
         } else {
-          navigate('/applications', { replace: true });
+          navigate('/', { replace: true });
         }
       } else {
         toast.error(result?.message);
@@ -78,8 +85,8 @@ export default function LoginPage() {
             <div className="flex items-center gap-3">
               <img
                 src={resolveAppLogoSrc(isDark)}
-                alt="Company logo"
-                className="h-16 w-auto max-w-[280px] rounded-lg object-contain"
+                alt="Harbor View Capital"
+                className="h-24 w-auto max-w-[220px] object-contain"
               />
 
             </div>
@@ -165,8 +172,10 @@ export default function LoginPage() {
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full cursor-pointer justify-center py-3 px-4 rounded-full text-sm font-semibold text-white bg-gradient-to-r from-indigo-600 to-blue-300 hover:from-indigo-700 hover:to-blue-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed  transition-all"
+                aria-busy={loading}
+                className="w-full cursor-pointer inline-flex items-center justify-center gap-2 py-3 px-4 rounded-full text-sm font-semibold text-white bg-gradient-to-r from-indigo-600 to-blue-300 hover:from-indigo-700 hover:to-blue-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed  transition-all"
               >
+                {loading && <Loader2 className="size-4 animate-spin" aria-hidden />}
                 {loading ? 'Signing In...' : 'Sign In'}
               </button>
             </form>
