@@ -48,6 +48,17 @@ export function escapeHtml(s: string): string {
     .replace(/"/g, "&quot;");
 }
 
+/**
+ * Discourage Gmail / Apple Mail from turning street addresses into map links.
+ * Call after {@link escapeHtml}. Inserts zero-width spaces so detectors miss
+ * the street-number + street-name pattern; copy/paste still reads normally.
+ */
+export function discourageAddressAutolink(escapedText: string): string {
+  return escapedText
+    .replace(/(\d)/g, "$1&#8203;")
+    .replace(/ /g, "&#8203; ");
+}
+
 /** Encode a URL for use in an HTML href attribute (preserves the merge-field placeholder). */
 export function escapeHrefAttribute(url: string): string {
   if (url === APPLICATION_APPROVAL_URL_PLACEHOLDER) {

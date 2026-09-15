@@ -33,6 +33,27 @@ export type OwnerProfile = {
     lastName?: string | null;
 };
 
+/** Latest Payoff / Zero Balance letter delivery status (SendGrid webhook). */
+export type ApplicationLetterStatus = {
+    status:
+        | "queued"
+        | "sent"
+        | "failed"
+        | "delivered"
+        | "opened"
+        | "clicked"
+        | "deferred"
+        | "bounced"
+        | "dropped"
+        | "spam"
+        | "unsubscribed"
+        | string;
+    templateName: string;
+    letterType: "payoff" | "zero_balance";
+    recipient?: string | null;
+    sentAt?: string | null;
+};
+
 export interface Application {
     _id: string;
     /** External / import deal identifier (e.g. Excel). Distinct from autoincrement `applicationId`. */
@@ -128,6 +149,17 @@ export interface Application {
     isoQueryResolved?: boolean;
     /** Tab that sent the deal to Final Approval: "Decision Logic" or "Funding Call". */
     finalApprovalSource?: 'Decision Logic' | 'Funding Call' | null;
+    /**
+     * Present on Letters list (`GET /applications?includeLetterStatus=1`):
+     * primary (first) letter status — prefer {@link letterStatuses} when both
+     * Payoff and ZBL were sent.
+     */
+    letterStatus?: ApplicationLetterStatus | null;
+    /**
+     * Latest status per letter type (Payoff and/or Zero Balance), newest type
+     * ordering: Payoff then ZBL.
+     */
+    letterStatuses?: ApplicationLetterStatus[] | null;
     createdAt?: string;
     updatedAt?: string;
 }
@@ -259,6 +291,8 @@ export interface GetApplicationsParams {
     sortOrder?: 'asc' | 'desc';
     /** When true, backend returns list-optimized payload (smaller includes, faster response). */
     lite?: boolean;
+    /** When true, attach latest Payoff/ZBL letter delivery status per row. */
+    includeLetterStatus?: boolean;
     /** SCRUBBING / UNDERWRITER: narrow list to Queue / Claimed / My deals. */
     underwriterClaim?: 'unclaimed' | 'claimed' | 'mine';
     /** UNDERWRITER: sidebar pipeline drill-down scoped to the logged-in underwriter. */

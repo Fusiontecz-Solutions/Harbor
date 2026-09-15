@@ -1,5 +1,8 @@
 import type { TemplateValues, TemplateVariable } from "./types";
-import { escapeHtml } from "./applicationApprovalEmailShared";
+import {
+  discourageAddressAutolink,
+  escapeHtml,
+} from "./applicationApprovalEmailShared";
 
 /**
  * Clear Capital payoff letter merge fields — matches the dedicated blanks on
@@ -105,14 +108,18 @@ export function renderAlliancePayoffLetterHtml(values: TemplateValues): string {
 
   const wire = {
     bankName: escapeHtml(CLEAR_CAPITAL_WIRE.bankName),
-    bankAddressLine1: escapeHtml(CLEAR_CAPITAL_WIRE.bankAddressLine1),
-    bankAddressLine2: escapeHtml(CLEAR_CAPITAL_WIRE.bankAddressLine2),
-    beneficiaryName: escapeHtml(CLEAR_CAPITAL_WIRE.beneficiaryName),
-    beneficiaryAddressLine1: escapeHtml(
-      CLEAR_CAPITAL_WIRE.beneficiaryAddressLine1,
+    bankAddressLine1: discourageAddressAutolink(
+      escapeHtml(CLEAR_CAPITAL_WIRE.bankAddressLine1),
     ),
-    beneficiaryAddressLine2: escapeHtml(
-      CLEAR_CAPITAL_WIRE.beneficiaryAddressLine2,
+    bankAddressLine2: discourageAddressAutolink(
+      escapeHtml(CLEAR_CAPITAL_WIRE.bankAddressLine2),
+    ),
+    beneficiaryName: escapeHtml(CLEAR_CAPITAL_WIRE.beneficiaryName),
+    beneficiaryAddressLine1: discourageAddressAutolink(
+      escapeHtml(CLEAR_CAPITAL_WIRE.beneficiaryAddressLine1),
+    ),
+    beneficiaryAddressLine2: discourageAddressAutolink(
+      escapeHtml(CLEAR_CAPITAL_WIRE.beneficiaryAddressLine2),
     ),
     routingNumber: escapeHtml(CLEAR_CAPITAL_WIRE.routingNumber),
     accountNumber: escapeHtml(CLEAR_CAPITAL_WIRE.accountNumber),
@@ -125,12 +132,21 @@ export function renderAlliancePayoffLetterHtml(values: TemplateValues): string {
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta name="x-apple-disable-message-reformatting" />
+  <meta name="format-detection" content="telephone=no,address=no,email=no,date=no" />
   <title>Clear Capital Payoff Letter</title>
   <style type="text/css">
     body, table, td, p, a { -webkit-text-size-adjust: 100%; -ms-text-size-adjust: 100%; }
     table, td { border-collapse: collapse; mso-table-lspace: 0pt; mso-table-rspace: 0pt; }
     img { border: 0; outline: none; text-decoration: none; -ms-interpolation-mode: bicubic; display: block; }
-    a { text-decoration: none; }
+    a { color: inherit !important; text-decoration: none !important; }
+    a[x-apple-data-detectors] {
+      color: inherit !important;
+      text-decoration: none !important;
+      font-size: inherit !important;
+      font-family: inherit !important;
+      font-weight: inherit !important;
+      line-height: inherit !important;
+    }
     @media only screen and (max-width: 620px) {
       .email-container { width: 100% !important; max-width: 100% !important; }
       .content-pad { padding-left: 24px !important; padding-right: 24px !important; }
@@ -205,11 +221,11 @@ export function renderAlliancePayoffLetterHtml(values: TemplateValues): string {
                 <tr>
                   <td style="padding:0;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.55;color:#111827;">
                     <strong>Bank Name:</strong> ${wire.bankName}<br />
-                    <strong>Bank Address:</strong> ${wire.bankAddressLine1}<br />
-                    ${wire.bankAddressLine2}<br />
+                    <strong>Bank Address:</strong> <span x-apple-data-detectors="false" style="color:#111827;text-decoration:none;">${wire.bankAddressLine1}</span><br />
+                    <span x-apple-data-detectors="false" style="color:#111827;text-decoration:none;">${wire.bankAddressLine2}</span><br />
                     <strong>Beneficiary Name:</strong> ${wire.beneficiaryName}<br />
-                    <strong>Beneficiary Address:</strong> ${wire.beneficiaryAddressLine1}<br />
-                    ${wire.beneficiaryAddressLine2}<br />
+                    <strong>Beneficiary Address:</strong> <span x-apple-data-detectors="false" style="color:#111827;text-decoration:none;">${wire.beneficiaryAddressLine1}</span><br />
+                    <span x-apple-data-detectors="false" style="color:#111827;text-decoration:none;">${wire.beneficiaryAddressLine2}</span><br />
                     <strong>Routing Number:</strong> ${wire.routingNumber}<br />
                     <strong>Account Number:</strong> ${wire.accountNumber}
                   </td>
