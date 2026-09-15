@@ -26,7 +26,7 @@
  *   INFOBIP_TIMEOUT_MS      per-request budget (default 20000)
  */
 import axios, { AxiosError, type AxiosInstance } from 'axios';
-import { toInfobipDestination } from './phone';
+import { toInfobipDestination, toInfobipSender } from './phone';
 
 export type NormalizedStatus =
   | 'QUEUED'
@@ -197,7 +197,7 @@ function classifyHttpFailure(status: number, body: unknown): InfobipRequestError
  * the DLR handler can find the row without a secondary lookup table.
  */
 export async function sendSms(input: SendSmsInput): Promise<SendSmsResult> {
-  const from = input.from?.trim() || getDefaultSender();
+  const from = toInfobipSender(input.from?.trim() || getDefaultSender());
   if (!from) throw new InfobipNotConfiguredError(['INFOBIP_SENDER']);
 
   if (input.mediaUrls && input.mediaUrls.length > 0) {

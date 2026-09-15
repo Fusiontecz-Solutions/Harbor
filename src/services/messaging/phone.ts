@@ -68,6 +68,21 @@ export function toInfobipDestination(e164: string): string {
 }
 
 /**
+ * Sender as Infobip expects it in the `from` field.
+ *
+ * Internally we store senders in E.164 (`+19176150642`) so they match inbound
+ * `to` values and thread consistently. Infobip's own delivery reports show the
+ * sender as bare digits (`19176150642`), and a leading `+` is not accepted
+ * there — so strip it on the way out, while leaving alphanumeric sender IDs
+ * ('HARBOR') untouched.
+ */
+export function toInfobipSender(value: string): string {
+  const trimmed = String(value ?? '').trim()
+  if (!trimmed) return ''
+  return /^\+?[\d\s().-]+$/.test(trimmed) ? trimmed.replace(/\D/g, '') : trimmed
+}
+
+/**
  * Sender IDs may be alphanumeric ("HARBOR"), not just numbers. Normalize only
  * when the value looks like a phone number so branded senders survive intact.
  */
