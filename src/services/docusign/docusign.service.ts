@@ -5,6 +5,10 @@ import dotenv from 'dotenv';
 import prisma from '../../config/prismaClient';
 import { Prisma } from '@prisma/client';
 import { resolveDocumentOwnerNumericUserId } from '../../middleware/authMiddleware';
+import {
+  resolveExistingApplicationId,
+  resolveExistingApplicationIdFromContract,
+} from '../../utils/resolveExistingApplicationId';
 import sendMail, { isOutboundSmtpConfigured } from '../../config/nodemailer';
 import {
   DOCUSIGN_CLIENT_ID,
@@ -137,6 +141,7 @@ import {
   getStoredEnvelopePdfArchive,
   getStoredSignedPdfUrl,
   isDocumentFullySignedStatus,
+  isSentPhaseArchiveUrl,
   isSignedPhaseArchiveUrl,
 } from './utils/archive-signed-envelope-pdf';
 
@@ -577,6 +582,12 @@ export class DocusignService {
     } catch (error: any) {
       clearDocusignProfileJwtCache(String(dsProfile.id));
       const detail = error?.response?.data?.error_description || error?.message || String(error);
+      if (isDocusignJwtConfigured()) {
+        console.warn(
+          `[DocuSign] Funder profile "${row.name}" linked DocuSign JWT failed (${detail}); falling back to platform JWT.`,
+        );
+        return this.getJwtAuthContext();
+      }
       throw new ServiceConfigException(
         `DocuSign JWT failed for funder profile "${row.name}". ${detail}`,
       );
@@ -616,6 +627,14 @@ export class DocusignService {
     } catch (error: any) {
       clearDocusignProfileJwtCache(String(profile.id));
       const detail = error?.response?.data?.error_description || error?.message || String(error);
+      // Misconfigured funder DocuSign profiles (e.g. user_not_found) must not block
+      // contract send when the platform demo/prod JWT still works.
+      if (isDocusignJwtConfigured()) {
+        console.warn(
+          `[DocuSign] Funder "${name}" profile "${profile.name}" JWT failed (${detail}); falling back to platform JWT.`,
+        );
+        return this.getJwtAuthContext();
+      }
       throw new ServiceConfigException(
         `DocuSign JWT failed for funder "${name}" (profile "${profile.name}"). ${detail}`,
       );
@@ -1077,7 +1096,8 @@ export class DocusignService {
           }
         }
         if (!value) return null;
-        return { id, value };
+        // Contract / addendum / disclosure text on the PDF must be ALL CAPS.
+        return { id, value: value.toUpperCase() };
       })
       .filter((f): f is PrefillField => f != null);
   }
@@ -1535,8 +1555,6 @@ export class DocusignService {
       let businessName = String(
         contract?.legalName || contract?.doingBusinessAs || contract?.clientName || '',
       ).trim();
-      let offerAmount =
-        contract?.approvedAmount != null ? Number(contract.approvedAmount) : null;
 
       const app = await prisma.application.findUnique({
         where: { id: applicationId },
@@ -1546,7 +1564,7 @@ export class DocusignService {
             select: { businessName: true },
           },
           OfferDecision: {
-            select: { offer: true },
+            select: { offer: true, decision: true },
           },
           termsOffers: {
             orderBy: { createdAt: 'desc' },
@@ -1562,24 +1580,34 @@ export class DocusignService {
         ).trim();
       }
 
-      if (offerAmount == null || !Number.isFinite(offerAmount)) {
-        const fromOfferDecision =
-          app?.OfferDecision?.offer != null ? Number(app.OfferDecision.offer) : null;
-        const fromTerms =
-          app?.termsOffers?.[0]?.approvedAmount != null
-            ? Number(app.termsOffers[0].approvedAmount)
-            : null;
-        const fromPurchaseAmount =
-          contract?.purchaseAmount != null
-            ? Number(String(contract.purchaseAmount).replace(/[$,\s]/g, ''))
-            : null;
-        const fromPurchasePrice =
-          contract?.purchasePrice != null
-            ? Number(String(contract.purchasePrice).replace(/[$,\s]/g, ''))
-            : null;
-        offerAmount =
-          fromOfferDecision != null && Number.isFinite(fromOfferDecision)
-            ? fromOfferDecision
+      // Live OfferDecision is source of truth; Contract.approvedAmount can lag after edits.
+      const decisionNorm = String(app?.OfferDecision?.decision ?? '')
+        .trim()
+        .toLowerCase();
+      const fromOfferDecision =
+        decisionNorm !== 'declined' && app?.OfferDecision?.offer != null
+          ? Number(app.OfferDecision.offer)
+          : null;
+      const fromContract =
+        contract?.approvedAmount != null ? Number(contract.approvedAmount) : null;
+      const fromTerms =
+        app?.termsOffers?.[0]?.approvedAmount != null
+          ? Number(app.termsOffers[0].approvedAmount)
+          : null;
+      const fromPurchaseAmount =
+        contract?.purchaseAmount != null
+          ? Number(String(contract.purchaseAmount).replace(/[$,\s]/g, ''))
+          : null;
+      const fromPurchasePrice =
+        contract?.purchasePrice != null
+          ? Number(String(contract.purchasePrice).replace(/[$,\s]/g, ''))
+          : null;
+
+      let offerAmount: number | null =
+        fromOfferDecision != null && Number.isFinite(fromOfferDecision)
+          ? fromOfferDecision
+          : fromContract != null && Number.isFinite(fromContract)
+            ? fromContract
             : fromTerms != null && Number.isFinite(fromTerms)
               ? fromTerms
               : fromPurchaseAmount != null && Number.isFinite(fromPurchaseAmount)
@@ -1587,7 +1615,6 @@ export class DocusignService {
                 : fromPurchasePrice != null && Number.isFinite(fromPurchasePrice)
                   ? fromPurchasePrice
                   : null;
-      }
 
       return {
         businessName: businessName || null,
@@ -2649,10 +2676,19 @@ export class DocusignService {
     userId: string,
     applicationId: string,
     envelopeId: string,
+    contractId?: number,
   ) {
     const newEnvelopeId = String(envelopeId).trim();
+    const resolvedAppId =
+      (await resolveExistingApplicationId(applicationId)) ||
+      (await resolveExistingApplicationIdFromContract(contractId));
+    if (!resolvedAppId) {
+      throw new BadRequestException(
+        `Cannot link DocuSign envelope: application not found for id "${String(applicationId || '').trim()}".`,
+      );
+    }
     const existingDoc = await prisma.document.findUnique({
-      where: { applicationId },
+      where: { applicationId: resolvedAppId },
       select: {
         envelopeId: true,
         status: true,
@@ -2668,7 +2704,7 @@ export class DocusignService {
     // Fall back to application creator / sales rep (same pattern as other proxy FK writes).
     const documentOwnerUserId = await resolveDocumentOwnerNumericUserId(
       userId,
-      applicationId,
+      resolvedAppId,
       existingDoc?.userId,
     );
     if (documentOwnerUserId == null) {
@@ -2680,7 +2716,7 @@ export class DocusignService {
     const priorEnvelopeId = String(existingDoc?.envelopeId ?? '').trim();
     if (priorEnvelopeId && priorEnvelopeId !== newEnvelopeId) {
       const contractRow = await prisma.contract.findUnique({
-        where: { applicationId },
+        where: { applicationId: resolvedAppId },
         select: { id: true, status: true },
       });
       const archiveStatus = resolveArchivedMainContractEnvelopeStatus(
@@ -2692,7 +2728,7 @@ export class DocusignService {
         contractRow?.status,
       );
 
-      await archiveMainContractEnvelopeToHistory(applicationId, {
+      await archiveMainContractEnvelopeToHistory(resolvedAppId, {
         envelopeId: priorEnvelopeId,
         status: archiveStatus,
         sentAt: existingDoc?.sentAt,
@@ -2703,7 +2739,7 @@ export class DocusignService {
         signedPdfPublicId: existingDoc?.signedPdfPublicId,
       });
 
-      await syncApplicationOnMainContractResend(prisma, applicationId, {
+      await syncApplicationOnMainContractResend(prisma, resolvedAppId, {
         source: 'docusign.linkEnvelopeToApplication',
         contractId: contractRow?.id,
         contractStatusPrevious: String(contractRow?.status ?? ''),
@@ -2711,12 +2747,12 @@ export class DocusignService {
       });
     }
 
-    await clearAchAuthorizationIfMatchesMainContract(applicationId, newEnvelopeId);
+    await clearAchAuthorizationIfMatchesMainContract(resolvedAppId, newEnvelopeId);
 
     await prisma.document.upsert({
-      where: { applicationId },
+      where: { applicationId: resolvedAppId },
       create: {
-        applicationId,
+        applicationId: resolvedAppId,
         envelopeId: newEnvelopeId,
         status: 'draft',
         userId: documentOwnerUserId,
@@ -3580,9 +3616,21 @@ export class DocusignService {
       accountId: string;
     },
   ) {
-    const appId = String(options.applicationId || '').trim();
+    const rawAppRef = String(options.applicationId || '').trim();
+    const appId =
+      (await resolveExistingApplicationId(options.applicationId)) ||
+      (await resolveExistingApplicationIdFromContract(options.contractId));
+    if (
+      !appId &&
+      !options.skipApplicationEnvelopeLink &&
+      (rawAppRef || (Number(options.contractId) > 0))
+    ) {
+      throw new BadRequestException(
+        `Cannot link DocuSign envelope: application not found for id "${rawAppRef}".`,
+      );
+    }
     if (appId && !options.skipApplicationEnvelopeLink) {
-      await this.linkEnvelopeToApplication(userId, appId, envelopeId);
+      await this.linkEnvelopeToApplication(userId, appId, envelopeId, options.contractId);
       const contractIdNum = Number(options.contractId);
       await persistMainContractSendPackage(
         appId,
@@ -3682,7 +3730,7 @@ export class DocusignService {
 
     let envelopeStatus: 'created' | 'sent' = 'created';
     if (prefillApplied.applied > 0) {
-      await this.sleep(autoSend ? 4000 : 5000);
+      await this.sleep(autoSend ? 1000 : 1500);
     }
     if (autoSend) {
       try {
@@ -3694,7 +3742,7 @@ export class DocusignService {
         invalidateCachedEnvelopeRecipients(options.accountId, envelopeId);
         envelopeStatus = 'sent';
         if (prefillApplied.applied > 0) {
-          await this.sleep(6000);
+          await this.sleep(1500);
         }
         if (appId && !options.skipApplicationEnvelopeLink) {
           await this.markEnvelopeSent(appId, envelopeId);
@@ -3714,12 +3762,14 @@ export class DocusignService {
             options.title,
           );
         }
-        await this.archiveEnvelopePdfToCloudinary({
+        this.archiveEnvelopePdfToCloudinary({
           envelopeId: String(envelopeId),
           applicationId: appId || undefined,
           userId,
           phase: 'sent',
-        });
+        }).catch((archiveErr) =>
+          console.error('[DocuSign] background PDF archive failed:', archiveErr),
+        );
       } catch (sendErr) {
         console.error('[DocuSign] auto-send failed:', sendErr);
       }
@@ -3998,8 +4048,20 @@ export class DocusignService {
       state: contractState,
     });
     const funderDefaultCcEmail = String(funderProfile?.defaultCcEmail ?? '').trim() || null;
-    const funderDefaultCcList = funderDefaultCcEmail
-      ? funderDefaultCcEmail.split(/[,;\n]+/).map((part) => part.trim()).filter(Boolean)
+    const docusignAccountId = String(funderProfile?.docusignAccountProfileId ?? '').trim();
+    let docusignDefaultCcEmail: string | null = null;
+    if (docusignAccountId) {
+      const ds = await prisma.docuSignAccountProfile.findUnique({
+        where: { id: docusignAccountId },
+        select: { defaultCcEmail: true },
+      });
+      docusignDefaultCcEmail = String(ds?.defaultCcEmail ?? '').trim() || null;
+    }
+    const funderDefaultCcList = (docusignDefaultCcEmail || funderDefaultCcEmail)
+      ? String(docusignDefaultCcEmail || funderDefaultCcEmail)
+          .split(/[,;\n]+/)
+          .map((part) => part.trim())
+          .filter(Boolean)
       : [];
     const { client, accountId } = await this.getAuthContext(userId, {
       funderName,
@@ -4558,6 +4620,63 @@ export class DocusignService {
     return { success: true, achAuthorization: false, docusignStatus: crmDsStatus || 'voided' };
   }
 
+  async resendEnvelope(
+    userId: string,
+    envelopeId: string,
+    hints?: Partial<EnvelopeFunderAuthHints>,
+  ) {
+    const eid = String(envelopeId || '').trim();
+    if (!eid) {
+      throw new BadRequestException('Missing envelopeId');
+    }
+
+    const candidates = [...(await listEnvelopeFunderAuthCandidates(eid, hints))];
+    if (!candidates.length) {
+      candidates.push({ usePlatformDefault: true });
+    }
+
+    let lastErr: unknown;
+    const tried: string[] = [];
+
+    for (const candidate of candidates) {
+      const label = candidate.usePlatformDefault
+        ? 'platform-default'
+        : String(candidate.funderProfileId || candidate.funderName || 'unknown');
+      tried.push(label);
+      try {
+        const { client, accountId } = await this.getAuthContext(userId, {
+          ...candidate,
+          requireFunderCredentials: !candidate.usePlatformDefault,
+        });
+        await client.put(
+          `/v2.1/accounts/${accountId}/envelopes/${eid}?resend_envelope=true`,
+          { status: 'sent' },
+        );
+        console.info('[DocuSign] resend succeeded', { envelopeId: eid, candidate: label });
+        return { success: true, envelopeId: eid };
+      } catch (err: unknown) {
+        lastErr = err;
+        if (isDocuSignPollingLimitError(err)) {
+          throw new BadRequestException(
+            'DocuSign polling limit reached. Wait about an hour, then try again.',
+          );
+        }
+        if (isDocuSignUserNotEnvelopeSenderError(err)) {
+          continue;
+        }
+        const msg = formatDocusignApiErrorMessage(err);
+        if (/no active linked DocuSign|no funder DocuSign credentials/i.test(msg)) {
+          continue;
+        }
+        throw new BadRequestException(msg);
+      }
+    }
+
+    throw new BadRequestException(
+      `${formatDocusignApiErrorMessage(lastErr)} Tried sender accounts: ${tried.join(', ') || 'none'}.`,
+    );
+  }
+
   /** CRM-only envelope status for void/delete — avoids DocuSign status GET (polling quota). */
   private async resolveCrmEnvelopeInternalStatus(envelopeId: string): Promise<string> {
     const eid = String(envelopeId || '').trim();
@@ -4871,18 +4990,24 @@ export class DocusignService {
     await this.assertTenantEnvelopeKnown(eid, options);
 
     // Prefer durable Cloudinary archive (per-funder folder) — zero DocuSign GETs.
-    // Skip when Document is completed/signed but archive is still the sent (unsigned) package.
+    // Skip only when we *know* the archive is the sent (unsigned) package.
     const storedArchive = await getStoredEnvelopePdfArchive(eid);
     const storedUrl = storedArchive?.url || null;
+    const storedPublicId = storedArchive?.publicId || null;
     const docFullySigned = isDocumentFullySignedStatus(storedArchive?.status);
-    const archiveIsSigned = isSignedPhaseArchiveUrl(storedUrl);
-    const staleSentArchive = Boolean(storedUrl && docFullySigned && !archiveIsSigned);
+    const archiveIsSigned =
+      isSignedPhaseArchiveUrl(storedUrl) || isSignedPhaseArchiveUrl(storedPublicId);
+    const archiveIsSent =
+      isSentPhaseArchiveUrl(storedUrl) || isSentPhaseArchiveUrl(storedPublicId);
+    const staleSentArchive = Boolean(
+      storedUrl && docFullySigned && archiveIsSent && !archiveIsSigned,
+    );
 
     if (storedUrl && !staleSentArchive) {
       const cacheVariant = archiveIsSigned || docFullySigned ? 'completed' : 'preview';
       const cached = getCachedEnvelopePdf(eid, cacheVariant);
       if (cached?.length) return cached;
-      const fromCloud = await fetchStoredSignedPdfBuffer(storedUrl);
+      const fromCloud = await fetchStoredSignedPdfBuffer(storedUrl, storedPublicId);
       if (fromCloud?.length) {
         setCachedEnvelopePdf(eid, cacheVariant, fromCloud);
         return fromCloud;
@@ -5030,6 +5155,18 @@ export class DocusignService {
           throw err;
         }
         throw new BadRequestException(msg || 'DocuSign PDF download failed');
+      }
+    }
+
+    if (storedUrl) {
+      const fallbackCloud = await fetchStoredSignedPdfBuffer(storedUrl, storedPublicId);
+      if (fallbackCloud?.length) {
+        console.warn(
+          `[DocuSign] using Cloudinary archive after DocuSign download failed for ${eid}`,
+        );
+        const cacheVariant = archiveIsSigned || docFullySigned ? 'completed' : 'preview';
+        setCachedEnvelopePdf(eid, cacheVariant, fallbackCloud);
+        return fallbackCloud;
       }
     }
 

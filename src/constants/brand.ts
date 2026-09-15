@@ -4,9 +4,12 @@ import path from 'path';
 /** Display name used in transactional email copy (matches outbound mail From name). */
 export const BRAND_DISPLAY_NAME = 'Harbor View Capital';
 
-/** Hosted brand logo (Gmail/Outlook-safe absolute URL). */
-export const BRAND_LOGO_URL =
-    'https://res.cloudinary.com/dehrku8og/image/upload/v1786111779/ChatGPT_Image_Aug_7_2026_07_39_08_PM_zri2ha.png';
+/**
+ * Optional hosted brand logo (Gmail/Outlook-safe absolute URL).
+ * Prefer inline CID attachments from `public/harbor_*.png` (new lighthouse logo).
+ * Leave empty until a matching Cloudinary asset is uploaded.
+ */
+export const BRAND_LOGO_URL = '';
 
 /**
  * Inline brand logos used inside transactional email templates.

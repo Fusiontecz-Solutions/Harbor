@@ -69,11 +69,11 @@ export function applyDocuSignPrefillTabStyle<T extends Record<string, string | u
   };
 }
 
-/** Ensure tab height can fit size9 — short boxes cause DocuSign to visually shrink text. */
+/** Ensure tab height can fit size9 — wrap boxes keep their layout height. */
 export function resolveDocuSignPrefillTabHeight(height?: string | number): string {
   const h = parseFloat(String(height ?? '').trim());
-  if (Number.isFinite(h) && h >= 19) return String(Math.round(h));
-  return '19';
+  if (Number.isFinite(h) && h >= 14) return String(Math.round(h));
+  return '14';
 }
 
 /** Approximate DocuSign text-tab width (px) so the field hugs prefilled content. */
@@ -100,17 +100,59 @@ export function docuSignTextTabWidthForValue(
   return String(Math.max(8, Math.min(fit, 360)));
 }
 
+/** Tall enough for two lines — keep layout width (do not shrink-to-fit). */
+const WRAP_TAB_MIN_HEIGHT_PX = 28;
+
+export function isDocuSignWrapTextTab(height?: string | number): boolean {
+  const h = parseFloat(String(height ?? '').trim());
+  return Number.isFinite(h) && h >= WRAP_TAB_MIN_HEIGHT_PX;
+}
+
+/** Insert line breaks so a long address fills a rectangular wrap tab. */
+export function wrapDocuSignTabValue(
+  value: string,
+  widthPx: number,
+  fontSizePt = 9,
+): string {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  const maxChars = Math.max(12, Math.floor(widthPx / (fontSizePt * 0.55)));
+  if (text.length <= maxChars) return text;
+  const lines: string[] = [];
+  let rest = text;
+  while (rest.length > maxChars) {
+    const slice = rest.slice(0, maxChars + 1);
+    const breakAt = Math.max(slice.lastIndexOf(', '), slice.lastIndexOf(' '));
+    const idx = breakAt >= Math.floor(maxChars * 0.45) ? breakAt : maxChars;
+    lines.push(rest.slice(0, idx).replace(/[,\s]+$/, ''));
+    rest = rest.slice(idx).replace(/^[,\s]+/, '');
+  }
+  if (rest) lines.push(rest);
+  return lines.join('\n');
+}
+
 /**
  * Width for a prefilled tab: fit to value length.
  * Layout `width` is only a max cap when set to a positive number; `auto` / omitted = fit only.
+ * Wrap boxes (height ≥ 28) keep the layout width so text wraps inside a rectangle.
+ * Harbor contract sit-on-blank tabs also keep layout width so a short value (e.g. "SWE")
+ * does not shrink into a tiny box floating above the underline.
  */
 export function resolveDocuSignPrefillTabWidth(options: {
   value: string;
   height?: string | number;
   layoutWidth?: string | number;
   fontSize?: string | number;
+  keepLayoutWidth?: boolean;
 }): string {
   const configured = parseFloat(String(options.layoutWidth ?? '').trim());
+  if (
+    (options.keepLayoutWidth || isDocuSignWrapTextTab(options.height)) &&
+    Number.isFinite(configured) &&
+    configured > 0
+  ) {
+    return String(Math.round(configured));
+  }
   const text = String(options.value || '').trim();
   if (!text && Number.isFinite(configured) && configured > 0) {
     return String(configured);

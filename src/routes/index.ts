@@ -27,6 +27,7 @@ import isoRoutes from './isoRoutes';
 import mailRoutes from './mailRoutes';
 import integrationSettingsRoutes from './integrationSettingsRoutes';
 import sendgridWebhookRoutes from './sendgridWebhookRoutes';
+import messagingRoutes from './messagingRoutes';
 
 /**
  * Contract-workflow API surface.
@@ -59,5 +60,9 @@ router.use('/iso', isoRoutes);
 router.use('/sendgrid', sendgridWebhookRoutes);
 router.use('/mail', mailRoutes);
 router.use('/integration-settings', integrationSettingsRoutes);
+// SMS / voice communication platform (Infobip): inbox, broadcasts, contacts,
+// DNC and calling. Its own router handles the split between the public
+// provider callbacks and the authenticated agent endpoints.
+router.use('/messaging', messagingRoutes);
 
 export default router;

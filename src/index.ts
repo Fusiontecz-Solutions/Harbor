@@ -10,6 +10,7 @@ import cloudinaryConnect from './config/cloudinary';
 import { initializeSocketIO } from './socket/index';
 import { testRedisConnection } from './config/redis';
 import { startApplicationApprovalWorker } from './workers/applicationApprovalWorker';
+import { startSmsBroadcastWorker } from './workers/smsBroadcastWorker';
 import { verifySuperAdminProxy } from './middleware/verifySuperAdminProxy';
 import { activityLogger } from './middleware/activityLogger';
 import { getDefaultMailFrom, isSendGridConfigured } from './config/nodemailer';
@@ -89,6 +90,11 @@ void testRedisConnection()
   .catch(console.error)
   .finally(() => {
     startApplicationApprovalWorker();
+    // SMS broadcast sender. Concurrency here controls how many campaign chunks
+    // progress at once; the actual send rate is governed by the Redis token
+    // buckets in services/messaging/tokenBucket.ts, so raising it cannot breach
+    // the provider limit.
+    startSmsBroadcastWorker();
   });
 
 // Initialize Socket.IO
@@ -136,6 +142,8 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
 // Start the HTTP server after DB is ready (seed default templates)
 void (async () => {
   await connectDB();
+  const { warmupDealIdSequence } = await import('./services/nextDealIdService');
+  warmupDealIdSequence();
   httpServer.listen(PORT, () => {
     console.log(`Server is running on http://localhost:${PORT}`);
     console.log(`Socket.IO server initialized`);

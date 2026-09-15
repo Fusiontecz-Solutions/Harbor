@@ -162,6 +162,22 @@ export function initializeSocketIO(httpServer: HttpServer): void {
     io.emit('user:online', { userId });
     console.log(`✅ User connected: ${userId}`);
 
+    // Messaging (SMS/voice) rooms. Joined on connect so an agent starts
+    // receiving inbox list updates without an extra round-trip; per-thread
+    // rooms are joined only while a conversation is open, which keeps a busy
+    // broadcast from fanning out to every connected client.
+    socket.join('messaging:inbox');
+
+    socket.on('messaging:join_conversation', (data: { conversationId?: string }) => {
+      const conversationId = String(data?.conversationId || '').trim();
+      if (conversationId) socket.join(`messaging:conv:${conversationId}`);
+    });
+
+    socket.on('messaging:leave_conversation', (data: { conversationId?: string }) => {
+      const conversationId = String(data?.conversationId || '').trim();
+      if (conversationId) socket.leave(`messaging:conv:${conversationId}`);
+    });
+
     socket.on('join_conversation', (data: { conversationId: string }) => {
       const { conversationId } = data || {};
       if (conversationId) {

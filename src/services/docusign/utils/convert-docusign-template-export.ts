@@ -37,6 +37,8 @@ export type DocumentLayoutPlacement = {
   bold?: boolean;
   /** Explicit DocuSign/PDF font size in points (e.g. 14 → size14). */
   fontSize?: string | number;
+  /** DocuSign SignHere / InitialHere scale (e.g. 0.5). */
+  scaleValue?: string;
 };
 
 export type DocumentLayoutBrandingLogo = {

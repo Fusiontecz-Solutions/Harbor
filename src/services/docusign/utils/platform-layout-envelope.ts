@@ -31,6 +31,11 @@ import {
   resolveCoordinateLayoutKeyForTemplate,
   resolveTemplateRefForMerge,
 } from './merge-template-resolve';
+import { buildAddendumDocumentLayout } from './addendum-document-layout';
+import {
+  resolveAddendumDocumentConfigKey,
+  resolveAddendumPdfVariant,
+} from '../addendum-document-config';
 import {
   DOCUSIGN_COMBINE_PACKAGE_PDF,
   DOCUSIGN_DEFAULT_ROLE_NAME,
@@ -40,6 +45,7 @@ import { mergeLayoutPdfsToSingleDocument } from './merge-layout-pdfs';
 import {
   resolveMainContractCoordinateLayoutKey,
 } from './resolve-main-contract-layout';
+import { applyClearCapitalMainContractLayout } from './clear-capital-contract-layout';
 import {
   applyAllianceBridgeContractPrefillToFieldList,
   shouldApplyAllianceBridgeContractPrefill,
@@ -101,27 +107,19 @@ async function applyFunderBrandingToLayoutPdf(
   return { ...layout, documentBase64: stamped };
 }
 
-async function resolveCoordinateLayoutKeyForFunderPdf(
-  funderLayoutKey: string,
-  contractState?: string | null,
-): Promise<DocumentLayoutKey> {
+async function resolveFunderRowForContractLayout(funderLayoutKey: string): Promise<{
+  name: string | null;
+  displayName: string | null;
+  mainContractLayoutKey: string | null;
+} | null> {
   const funderId = String(funderLayoutKey || '')
     .trim()
     .replace(/^funder_/i, '');
-  if (funderId) {
-    const row = await prisma.funderProfile.findUnique({
-      where: { id: funderId },
-      select: { name: true, displayName: true, mainContractLayoutKey: true },
-    });
-    if (row) {
-      return resolveMainContractCoordinateLayoutKey({
-        funderName: row.name,
-        state: contractState,
-        mainContractLayoutKey: row.mainContractLayoutKey,
-      });
-    }
-  }
-  return DOCUMENT_LAYOUT_KEYS.contract;
+  if (!funderId) return null;
+  return prisma.funderProfile.findUnique({
+    where: { id: funderId },
+    select: { name: true, displayName: true, mainContractLayoutKey: true },
+  });
 }
 
 export type FunderLayoutContext = {
@@ -152,7 +150,14 @@ export async function loadMainContractLayoutPackage(
   const key = String(layoutKey || '').trim() || DOCUMENT_LAYOUT_KEYS.contract;
 
   if (isFunderContractLayoutKey(key)) {
-    const coordinateKey = await resolveCoordinateLayoutKeyForFunderPdf(key, contractState);
+    const funderRow = await resolveFunderRowForContractLayout(key);
+    const coordinateKey = funderRow
+      ? resolveMainContractCoordinateLayoutKey({
+          funderName: funderRow.name,
+          state: contractState,
+          mainContractLayoutKey: funderRow.mainContractLayoutKey,
+        })
+      : DOCUMENT_LAYOUT_KEYS.contract;
     const layout = getDocumentLayout(coordinateKey);
     const pdfUrl = await findBoldSignTemplatePdfUrlByExactLayoutKey(key);
     if (pdfUrl) {
@@ -162,10 +167,15 @@ export async function loadMainContractLayoutPackage(
         orderBy: { createdAt: 'desc' },
         select: { name: true },
       });
+      const adjusted = applyClearCapitalMainContractLayout(layout, {
+        funderName: funderRow?.name,
+        displayName: funderRow?.displayName,
+        templateName: row?.name,
+      });
       return {
-        ...layout,
+        ...adjusted,
         key,
-        name: row?.name || layout.name,
+        name: row?.name || adjusted.name,
         documentBase64,
       };
     }
@@ -216,6 +226,35 @@ export async function loadLatestContractLayoutPackage(): Promise<DocumentLayoutW
   return loadMainContractLayoutPackage(DOCUMENT_LAYOUT_KEYS.contract);
 }
 
+/**
+ * Prefer funder-specific addendum coords (Clear Capital vs Harbor View guarantee pages).
+ * Falls back to the platform registry layout when the ref is not an addendum.
+ */
+function resolveSupplementalCoordinateLayout(options: {
+  layoutKeyOrType: string;
+  funderName?: string | null;
+  templateName?: string | null;
+  pdfUrl?: string | null;
+}): DocumentLayout {
+  const { layoutKeyOrType, funderName, templateName, pdfUrl } = options;
+  const addendumKey = resolveAddendumDocumentConfigKey(layoutKeyOrType);
+  if (addendumKey) {
+    const variant = resolveAddendumPdfVariant({
+      funderName,
+      name: templateName,
+      pdfUrl,
+      layoutKey: layoutKeyOrType,
+      fileName: String(pdfUrl || '')
+        .split('/')
+        .pop()
+        ?.split('?')[0],
+    });
+    const built = buildAddendumDocumentLayout(addendumKey, variant);
+    if (built) return built;
+  }
+  return getDocumentLayout(layoutKeyOrType as DocumentLayoutKey);
+}
+
 export async function loadSupplementalLayoutPackage(
   ref: string,
   funderContext?: FunderLayoutContext,
@@ -225,7 +264,6 @@ export async function loadSupplementalLayoutPackage(
 
   const pack = await (async (): Promise<DocumentLayoutWithBase64> => {
   if (isDocumentLayoutKey(sourceRef)) {
-    const layout = getDocumentLayout(sourceRef);
     if (funder?.id) {
       const docsFunderId =
         resolveAddendumDocumentsLayoutFunderId(funder) ||
@@ -266,6 +304,17 @@ export async function loadSupplementalLayoutPackage(
             orderBy: { createdAt: 'desc' },
             select: { name: true },
           });
+          // Use docs-source funder name for PDF geometry (shared Harbor docs → Harbor coords).
+          const docsFunder =
+            docsFunderId === funder.id
+              ? funder
+              : await resolveFunderProfile({ funderProfileId: docsFunderId });
+          const layout = resolveSupplementalCoordinateLayout({
+            layoutKeyOrType: sourceRef,
+            funderName: docsFunder?.name || funder.name,
+            templateName: row?.name,
+            pdfUrl: scopedPdfUrl,
+          });
           return {
             ...layout,
             key: scopedKey,
@@ -280,11 +329,15 @@ export async function loadSupplementalLayoutPackage(
         }
       }
     }
+    const layout = resolveSupplementalCoordinateLayout({
+      layoutKeyOrType: sourceRef,
+      funderName: funder?.name,
+    });
     const documentBase64 = await loadPlatformDocumentPdfBase64(sourceRef);
     return { ...layout, documentBase64 };
   }
 
-  // Funder-scoped addendum/ACH keys reuse platform coordinates; PDF comes from the funder row.
+  // Funder-scoped addendum/ACH keys: PDF from funder row; coords from funder PDF variant.
   if (isFunderSupplementalLayoutKey(sourceRef)) {
     const parsed = parseFunderSupplementalLayoutKey(sourceRef);
     const coordinateKey = resolveCoordinateLayoutKeyForTemplate({
@@ -292,15 +345,27 @@ export async function loadSupplementalLayoutPackage(
       type: parsed?.supplementalType,
     });
     if (coordinateKey) {
-      const layout = getDocumentLayout(coordinateKey);
       const pdfUrl = await findBoldSignTemplatePdfUrlByExactLayoutKey(sourceRef);
+      const row = await prisma.boldSignTemplate.findFirst({
+        where: { OR: [{ layoutKey: sourceRef }, { templateId: sourceRef }] },
+        orderBy: { createdAt: 'desc' },
+        select: { name: true, type: true },
+      });
+      let scopedFunderName = funder?.name || null;
+      if (parsed?.funderId) {
+        const scopedProfile = await resolveFunderProfile({
+          funderProfileId: parsed.funderId,
+        });
+        if (scopedProfile?.name) scopedFunderName = scopedProfile.name;
+      }
+      const layout = resolveSupplementalCoordinateLayout({
+        layoutKeyOrType: coordinateKey,
+        funderName: scopedFunderName,
+        templateName: row?.name,
+        pdfUrl,
+      });
       if (pdfUrl) {
         const documentBase64 = await fetchPdfAsBase64(pdfUrl, sourceRef);
-        const row = await prisma.boldSignTemplate.findFirst({
-          where: { OR: [{ layoutKey: sourceRef }, { templateId: sourceRef }] },
-          orderBy: { createdAt: 'desc' },
-          select: { name: true, type: true },
-        });
         return {
           ...layout,
           key: sourceRef,
@@ -320,9 +385,19 @@ export async function loadSupplementalLayoutPackage(
   }
 
   const resolved = await resolveTemplateRefForMerge(sourceRef);
-  const layout =
-    resolved.inlineLayout ||
-    (resolved.layoutKey ? getDocumentLayout(resolved.layoutKey) : null);
+  const addendumHint =
+    resolveAddendumDocumentConfigKey(resolved.layoutKey) ||
+    resolveAddendumDocumentConfigKey(sourceRef) ||
+    resolveAddendumDocumentConfigKey(resolved.name);
+  const layout = addendumHint
+    ? resolveSupplementalCoordinateLayout({
+        layoutKeyOrType: addendumHint,
+        funderName: funder?.name,
+        templateName: resolved.name,
+        pdfUrl: resolved.pdfUrl,
+      })
+    : resolved.inlineLayout ||
+      (resolved.layoutKey ? getDocumentLayout(resolved.layoutKey) : null);
   if (!layout) {
     throw new Error(`Supplemental document "${resolved.name || ref}" has no layout.`);
   }
@@ -622,11 +697,15 @@ export async function buildPlatformLayoutEnvelopeDefinition(options: {
     }
     layouts.push(mainLayout);
   }
-  for (const ref of options.supplementalRefs || []) {
-    layouts.push(await loadSupplementalLayoutPackage(ref, funderContext));
-  }
-  for (const ref of standaloneRefs) {
-    layouts.push(await loadSupplementalLayoutPackage(ref, funderContext));
+  const allSupplementalRefs = [
+    ...(options.supplementalRefs || []),
+    ...standaloneRefs,
+  ];
+  if (allSupplementalRefs.length) {
+    const supplementals = await Promise.all(
+      allSupplementalRefs.map((ref) => loadSupplementalLayoutPackage(ref, funderContext)),
+    );
+    layouts.push(...supplementals);
   }
   if (!layouts.length) {
     throw new Error('At least one document layout is required.');
@@ -737,37 +816,37 @@ export async function buildPlatformLayoutEnvelopeDefinition(options: {
   const flattenedLayouts: DocumentLayoutWithBase64[] = [];
   const flattenedLayoutKeys = new Set<string>();
   if (shouldFlatten) {
-    for (const layout of layouts) {
-      if (!shouldFlattenLayoutPdf(layout)) {
-        flattenedLayouts.push(layout);
-        continue;
-      }
-      try {
-        const buf = await renderFlattenedLayoutPdf(layout, values, partyCounts);
-        if (buf?.length) {
-          flattenedLayouts.push({
-            ...layout,
-            documentBase64: buf.toString('base64'),
-          });
-          flattenedLayoutKeys.add(layout.key);
-          continue;
+    const flattenResults = await Promise.all(
+      layouts.map(async (layout) => {
+        if (!shouldFlattenLayoutPdf(layout)) return { layout, flattened: false as const };
+        try {
+          const buf = await renderFlattenedLayoutPdf(layout, values, partyCounts);
+          if (buf?.length) {
+            return {
+              layout: { ...layout, documentBase64: buf.toString('base64') },
+              flattened: true as const,
+              key: layout.key,
+            };
+          }
+        } catch (err) {
+          console.warn(
+            `[DocuSign] flatten prefill into PDF failed for layout "${layout.key}":`,
+            err,
+          );
         }
-      } catch (err) {
-        console.warn(
-          `[DocuSign] flatten prefill into PDF failed for layout "${layout.key}":`,
-          err,
-        );
-      }
-      flattenedLayouts.push(layout);
+        return { layout, flattened: false as const };
+      }),
+    );
+    for (const result of flattenResults) {
+      flattenedLayouts.push(result.layout);
+      if (result.flattened && 'key' in result) flattenedLayoutKeys.add(result.key!);
     }
   } else {
     flattenedLayouts.push(...layouts);
   }
   const prefillFlattenedInPdf = flattenedLayoutKeys.size > 0;
 
-  for (const layout of flattenedLayouts) {
-    await assertLayoutPlacementsFitPdfPages(layout);
-  }
+  await Promise.all(flattenedLayouts.map((layout) => assertLayoutPlacementsFitPdfPages(layout)));
 
   let mergedDocument: { name: string; documentBase64: string } | undefined;
   let pageOffsetByLayoutKey: Map<string, number> | undefined;

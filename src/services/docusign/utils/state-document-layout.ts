@@ -1,6 +1,7 @@
 import type { DocumentLayout, DocumentLayoutPlacement } from './convert-docusign-template-export';
 import {
   getStateDocumentConfig,
+  inferDisclosureDealTypeFromTemplate,
   resolveStateDocumentConfigKey,
   type StateDocumentFieldConfig,
 } from '../state-document-config';
@@ -24,7 +25,7 @@ function textPlacements(
       y: tab.y,
       /** Omitted → envelope builder sizes tab width to the prefilled value. */
       width: tab.width && tab.width !== 'auto' ? tab.width : undefined,
-      height: tab.height || '18',
+      height: tab.height || '14',
       optional: tab.optional === true,
       lockedForSigner: tab.lockedForSigner === true,
       signerParty: 'primary',
@@ -50,7 +51,7 @@ function datePlacements(
       pageNumber: tab.pageNumber || config.pageNumber,
       x: tab.x,
       y: tab.y,
-      height: '18',
+      height: '14',
       signerParty: tab.signerParty === 'secondary' ? 'secondary' : 'primary',
     });
     id += 1;
@@ -73,8 +74,9 @@ function signaturePlacements(
       pageNumber: tab.pageNumber || config.pageNumber,
       x: tab.x,
       y: tab.y,
-      width: '200',
-      height: '40',
+      width: tab.width || (tab.scaleValue ? '90' : '200'),
+      height: tab.height || (tab.scaleValue ? '22' : '40'),
+      scaleValue: tab.scaleValue,
       signerParty: tab.signerParty === 'secondary' ? 'secondary' : 'primary',
     });
     id += 1;
@@ -97,8 +99,9 @@ function initialPlacements(
       pageNumber: tab.pageNumber || config.pageNumber,
       x: tab.x,
       y: tab.y,
-      width: '80',
-      height: '24',
+      width: tab.width || '96',
+      height: tab.height || '28',
+      scaleValue: tab.scaleValue,
       signerParty: 'primary',
     });
     id += 1;
@@ -161,15 +164,18 @@ export function tryBuildStateDisclosureLayoutFromDbRow(row: {
   frequency?: string | null;
   type?: string | null;
   pdfUrl?: string | null;
+  layoutKey?: string | null;
 }): DocumentLayout | null {
   const type = String(row.type || '').trim().toLowerCase();
   if (type && type !== 'disclosure') return null;
 
-  const config = getStateDocumentConfig(row.frequency, row.state);
+  const dealType = inferDisclosureDealTypeFromTemplate(row);
+  const config = getStateDocumentConfig(row.frequency, row.state, dealType);
   if (!config) return null;
 
   const configKey =
-    resolveStateDocumentConfigKey(row.frequency, row.state) || 'disclosure';
+    resolveStateDocumentConfigKey(row.frequency, row.state, dealType) ||
+    'disclosure';
 
   const fileName = String(row.pdfUrl || '')
     .split('/')

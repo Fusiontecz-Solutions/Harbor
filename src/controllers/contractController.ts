@@ -1274,8 +1274,10 @@ class ContractController {
       const data = await contractService.getUploadedContractDocuments(contractId);
       return res.status(200).json({ success: true, data });
     } catch (error: any) {
-      console.error('Get uploaded contract documents error:', error);
       const statusCode = error?.message === 'Contract not found' ? 404 : 500;
+      if (statusCode !== 404) {
+        console.error('Get uploaded contract documents error:', error);
+      }
       return res.status(statusCode).json({
         success: false,
         message: error?.message || 'Internal server error',
@@ -1433,7 +1435,13 @@ class ContractController {
       return res.status(201).json({ success: true, message: 'Template mapping created', data });
     } catch (error: any) {
       console.error('Create contract template mapping error:', error);
-      return res.status(500).json({ success: false, message: error?.message || 'Internal server error' });
+      const statusCode =
+        Number(error?.statusCode) ||
+        (error?.message === 'Contract not found' ? 404 : 500);
+      return res.status(statusCode).json({
+        success: false,
+        message: error?.message || 'Internal server error',
+      });
     }
   }
 

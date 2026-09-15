@@ -2,6 +2,7 @@ import type { Role } from '@prisma/client';
 import type { Request } from 'express';
 import prisma from '../config/prismaClient';
 import { resolveAuditLogUserId } from '../middleware/authMiddleware';
+import { resolveExistingApplicationId } from '../utils/resolveExistingApplicationId';
 import { markActivityLogged } from './outboundCommunicationService';
 import type { AuthenticatedUser } from './applicationService';
 
@@ -43,7 +44,12 @@ export interface CreateApplicationActivityLogInput {
 }
 
 export async function createApplicationActivityLog(input: CreateApplicationActivityLogInput) {
-  const { applicationId, user, actionType, actionDescription, previousStatus, currentStatus, metadata, req } = input;
+  const { user, actionType, actionDescription, previousStatus, currentStatus, metadata, req } = input;
+
+  // Never write a UUID that is not Application.id — P2003 on fk_application_activity_application.
+  const applicationId = input.applicationId
+    ? await resolveExistingApplicationId(input.applicationId)
+    : null;
 
   const userId = await resolveAuditLogUserId(req, {
     user,

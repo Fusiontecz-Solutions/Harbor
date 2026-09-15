@@ -11,18 +11,29 @@ import type { PrefillFieldInput } from './docusign-prefill';
 import { DOCUSIGN_DEFAULT_ROLE_NAME, DOCUSIGN_SECONDARY_ROLE_NAME } from './docusign-client';
 import {
   applyDocuSignPrefillTabStyle,
+  isDocuSignWrapTextTab,
   resolveDocuSignFontSizeToken,
   resolveDocuSignPrefillTabWidth,
+  wrapDocuSignTabValue,
 } from './docusign-tab-style';
 import { embedArialBoldPdfFont, embedArialPdfFont } from './embed-arial-pdf-font';
 import { DOCUMENT_LAYOUT_KEYS } from '../layouts/document-layout.registry';
 import { isFunderContractLayoutKey } from '../../../utils/funderContractLayout';
 import {
+  isAddressPlaceholderToken,
+  isUsableDisclosureStreetLine,
+  toUsStateAbbreviation,
+} from '../../../utils/usStateMatch';
+import {
   buildScopedValuesForLayout,
   DISCLOSURE_MERCHANT_BUSINESS_NAME_VARS,
+  DISCLOSURE_RECIPIENT_ADDRESS_VARS,
+  DISCLOSURE_ESTIMATED_PAYMENT_VARS,
   isMainContractLayoutKey,
   isStateDisclosureTextPlacement,
   resolveDisclosureMerchantBusinessName,
+  resolveDisclosureRecipientAddress,
+  resolveDisclosureEstimatedPayment,
   resolveSupplementalEnvelopeTabLabel,
   toDisclosureScopedPrefillId,
 } from './layout-prefill-scope';
@@ -104,11 +115,12 @@ export type LayoutPartyCounts = {
 
 /** Canonical CRM keys copied to legacy / duplicate tab labels automatically. */
 const PREFILL_VALUE_ALIASES: Record<string, string[]> = {
-  agreement_date: ['signature_date', 'disclosure_date', 'addendum_date'],
+  agreement_date: ['signature_date', 'disclosure_date', 'addendum_date', 'first_payment_date'],
   addendum_date: ['agreement_date', 'signature_date', 'disclosure_date'],
   signature_date: ['agreement_date', 'addendum_date', 'Signature_date', 'disclosure_date'],
   Signature_date: ['signature_date', 'agreement_date', 'addendum_date', 'disclosure_date'],
   disclosure_date: ['agreement_date', 'addendum_date', 'signature_date'],
+  first_payment_date: ['agreement_date', 'signature_date', 'disclosure_date'],
   /** Texas ACH / page-11 owner date labels — prefill from shared agreement date. */
   agreement_date_owner1_p11: [
     'agreement_date',
@@ -203,6 +215,8 @@ const PREFILL_VALUE_ALIASES: Record<string, string[]> = {
   guarantor_address_city: ['business_address_contract_city'],
   guarantor_address_state: ['business_address_contract_state'],
   guarantor_address_zip: ['business_address_contract_zip'],
+  guarantor_email: ['client_email'],
+  client_email: ['guarantor_email'],
   authorization_client_name: [
     'client_legal_name',
     'security_business_name',
@@ -237,17 +251,37 @@ const PREFILL_VALUE_ALIASES: Record<string, string[]> = {
   entity_type: ['typeOfEntity1', 'typeofentity1'],
   typeofentity1: ['entity_type', 'typeOfEntity1'],
   typeOfEntity1: ['entity_type', 'typeofentity1'],
+  owner_print_title: ['print_title', 'guarantor_print_title', 'owner_title'],
+  guarantor_print_title: ['owner_print_title', 'print_title', 'owner_title'],
+  print_title: ['owner_print_title', 'guarantor_print_title'],
   federal_tax_id_ein: ['security_tax_ein', 'authorization_client_tax_id'],
   security_tax_ein: ['federal_tax_id_ein', 'authorization_client_tax_id'],
   frequency: ['paymentterms', 'payment_terms'],
   remittance: [
-    'ach_authorization_account_holder_bank_transaction_fee',
     'estimated_payment',
     'estimated_payment_amount',
     'disclosure_estimated_payment',
     'theestimatedpayment',
+    'weekly_payments',
+    'fordailypayments',
   ],
-  net_to_merchant: ['netfundprovided', 'net_fund_provided'],
+  weekly_payments: [
+    'fordailypayments',
+    'disclosure_estimated_payment',
+    'estimated_payment',
+    'estimated_payment_amount',
+    'remittance',
+    'theestimatedpayment',
+  ],
+  fordailypayments: [
+    'weekly_payments',
+    'disclosure_estimated_payment',
+    'estimated_payment',
+    'estimated_payment_amount',
+    'remittance',
+    'theestimatedpayment',
+  ],
+  net_to_merchant: ['netfundprovided', 'net_fund_provided', 'NetFundProvided'],
   purchase_amount: [
     'disclosure_amount_financed',
     'funding_provided',
@@ -288,6 +322,13 @@ const PREFILL_VALUE_ALIASES: Record<string, string[]> = {
   total_amount_business_fund: ['disclosure_amount_financed', 'funding_provided'],
   total_amount_of_fund_disbursed: ['disclosure_recipient_funds', 'net_to_merchant'],
   total_amount_fund_disbursed: ['disclosure_recipient_funds', 'total_amount_of_fund_disbursed', 'net_to_merchant'],
+  disclosure_recipient_funds: [
+    'funding_provided_direct',
+    'total_amount_of_fund_disbursed',
+    'total_amount_fund_disbursed',
+  ],
+  estimated_annual_percentage_rate: ['disclosure_apr'],
+  disclosure_apr: ['estimated_annual_percentage_rate'],
   total_amount_of_fund_provided: ['disclosure_amount_financed', 'funding_provided', 'total_amount_business_fund'],
   total_of_payments: ['disclosure_total_payment', 'total_repayment_amount', 'purchase_price'],
   total_amount_sales_based_financing: ['disclosure_amount_financed', 'funding_provided', 'total_amount_business_fund'],
@@ -313,6 +354,7 @@ const PREFILL_VALUE_ALIASES: Record<string, string[]> = {
     'client_name',
   ],
   disclosure_date2: ['disclosure_date', 'agreement_date', 'signature_date'],
+  initials_date: ['disclosure_date', 'agreement_date', 'signature_date'],
   recipient_name: [
     'legal_name',
     'client_legal_name',
@@ -348,12 +390,63 @@ const PREFILL_VALUE_ALIASES: Record<string, string[]> = {
   ],
   estimated_time_periodic_paymement: ['disclosure_term_days', 'estimated_number_of_payments'],
   theestimatedpayment: ['disclosure_estimated_payment', 'estimated_payment'],
-  payment_exceed_percent: ['disclosure_payment_terms', 'percent_of_business_income'],
+  payment_exceed_percent: [
+    'disclosure_payment_terms',
+    'percent_of_business_income',
+    'payement_exceeded_percent',
+    'payment_exceeded_percent',
+  ],
+  payement_exceeded_percent: [
+    'disclosure_payment_terms',
+    'percent_of_business_income',
+    'payment_exceeded_percent',
+    'payment_exceed_percent',
+  ],
+  payment_exceeded_percent: [
+    'disclosure_payment_terms',
+    'percent_of_business_income',
+    'payement_exceeded_percent',
+    'payment_exceed_percent',
+  ],
+  disclosure_payment_terms: [
+    'payement_exceeded_percent',
+    'payment_exceeded_percent',
+    'payment_exceed_percent',
+    'percent_of_business_income',
+  ],
   signature1_date: ['disclosure_date', 'agreement_date', 'signature_date'],
   signature2_date: ['disclosure_date', 'agreement_date', 'signature_date'],
   estimated_payment_amount: ['disclosure_estimated_payment', 'estimated_payment', 'remittance'],
   monthly_income: ['disclosure_avg_monthly_revenue', 'avarage_monthly_income', 'etimated_average_income'],
-  appendix_underwriting_fees: ['disclosure_broker_fee', 'underwriter_fee', 'underwriterfee', 'underwriter_fees'],
+  appendix_underwriting_fees: [
+    'disclosure_broker_fee',
+    'underwriter_fee',
+    'underwriterfee',
+    'underwriter_fees',
+    'originationFee',
+    'origination_fee',
+  ],
+  underwriter_fee: [
+    'appendix_underwriting_fees',
+    'underwriterfee',
+    'underwriter_fees',
+    'originationFee',
+    'origination_fee',
+  ],
+  originationFee: [
+    'appendix_underwriting_fees',
+    'underwriter_fee',
+    'underwriterfee',
+    'underwriter_fees',
+    'origination_fee',
+  ],
+  origination_fee: [
+    'appendix_underwriting_fees',
+    'underwriter_fee',
+    'underwriterfee',
+    'underwriter_fees',
+    'originationFee',
+  ],
   owner1_guarantor_name: ['guaranty_owner1_name', 'guaranty_guarantor1_name', 'guaranty_client_name'],
   guaranty_owner1_name: ['owner1_guarantor_name', 'guaranty_guarantor1_name', 'guaranty_client_name', 'client_name'],
   guaranty_guarantor1_name: ['owner1_guarantor_name', 'guaranty_owner1_name', 'guaranty_client_name', 'client_name'],
@@ -415,27 +508,80 @@ const OWNER2_INITIAL_OFFSET_X = 108;
 const OWNER2_INITIAL_OFFSET_Y = -6;
 
 /**
- * Optional extra nudge for main Woodmere `contract` only.
+ * Optional extra nudge for the shared Harbor View / Clear Capital main contract
+ * (`contract.layout.json`, including funder-scoped PDF storage keys).
  * Default 0 — layout JSON y values are already the DocuSign positions
  * (including the +3px-from-top shift baked into contract.layout.json).
- * Never apply to addendums, ACH, state disclosures, or other funder layouts.
+ * Clear Capital page-1 header offset is applied in
+ * `applyClearCapitalMainContractLayout`, not here.
+ * Never apply to addendums, ACH, or state disclosures.
  */
 const CONTRACT_TAB_Y_OFFSET = Number(process.env.DOCUSIGN_CONTRACT_TAB_Y_OFFSET ?? 0) || 0;
 
-function isWoodmereMainContractLayoutKey(layoutKey?: string): boolean {
+/**
+ * Sit-on-blank: DocuSign yPosition is the TOP of the tab. A 14px tab matches
+ * size9 text so the bottom edge rests on the underline (ACH account-holder look).
+ * Do not apply a global Y lift — that floated dates / page-2 inline blanks.
+ */
+const SIT_ON_BLANK_TEXT_TAB_HEIGHT = '14';
+
+/** Platform `contract` plus funder_<uuid> uploads that reuse contract.layout.json. */
+function isSharedMainContractLayoutKey(layoutKey?: string): boolean {
   const key = String(layoutKey || '').trim();
-  // Strict: only the platform main contract — not addendum / disclosure / ACH / funder variants.
-  return key === 'contract' || key === DOCUMENT_LAYOUT_KEYS.contract;
+  if (key === 'contract' || key === DOCUMENT_LAYOUT_KEYS.contract) return true;
+  return isFunderContractLayoutKey(key);
+}
+
+/** P / CA / NY / VA addendums — keep layout width so short values (e.g. SWE) do not shrink into a floating box. */
+function isAddendumSitOnBlankLayout(layoutKey?: string): boolean {
+  const key = String(layoutKey || '').trim().toLowerCase();
+  if (!key) return false;
+  return (
+    key === 'addendum_p' ||
+    key === 'addendum_ca' ||
+    key === 'addendum_ny' ||
+    key === 'addendum_va' ||
+    key === 'addendum_epa' ||
+    key.includes('addendum_p') ||
+    key.includes('addendum_ca') ||
+    key.includes('addendum_ny') ||
+    key.includes('addendum_va') ||
+    key.includes('addendum_epa')
+  );
+}
+
+function keepPrefillTabLayoutWidth(layoutKey?: string): boolean {
+  return isSharedMainContractLayoutKey(layoutKey) || isAddendumSitOnBlankLayout(layoutKey);
 }
 
 function resolveTabYPosition(y: string | undefined, layoutKey?: string): string {
   const raw = String(y ?? '0').trim();
   const n = parseFloat(raw);
   if (!Number.isFinite(n)) return raw || '0';
-  if (!CONTRACT_TAB_Y_OFFSET || !isWoodmereMainContractLayoutKey(layoutKey)) {
+  if (!CONTRACT_TAB_Y_OFFSET || !isSharedMainContractLayoutKey(layoutKey)) {
     return raw;
   }
   return String(Math.max(0, Math.round(n + CONTRACT_TAB_Y_OFFSET)));
+}
+
+/** Text/date tab top + height so the box sits on the underline instead of cutting through it. */
+function resolveSitOnBlankTextTabMetrics(
+  placement: DocumentLayoutPlacement,
+  layoutKey?: string,
+): { y: string; height: string } {
+  const yRaw = resolveTabYPosition(placement.y, layoutKey);
+  if (isDocuSignWrapTextTab(placement.height)) {
+    return {
+      y: yRaw,
+      height: String(placement.height),
+    };
+  }
+  const configured = parseFloat(String(placement.height ?? '').trim());
+  const height =
+    Number.isFinite(configured) && configured > 0 && configured < 14
+      ? String(Math.round(configured))
+      : SIT_ON_BLANK_TEXT_TAB_HEIGHT;
+  return { y: yRaw, height };
 }
 
 const PARTY2_NAME_KEYS = [
@@ -495,6 +641,81 @@ function resolveContractLegalNameValue(values: Record<string, string>): string {
   ).trim();
 }
 
+/** Street + city + state + ZIP for single-line Contact Address tabs. */
+function composeUsMailingAddress(
+  street: string,
+  city: string,
+  state: string,
+  zip: string,
+): string {
+  const line = String(street || '').trim();
+  const cityPart = String(city || '').trim();
+  const stateZip = [String(state || '').trim(), String(zip || '').trim()]
+    .filter(Boolean)
+    .join(' ');
+  if (cityPart && line.toLowerCase().includes(cityPart.toLowerCase())) return line;
+  const cityLine = [cityPart, stateZip].filter(Boolean).join(', ');
+  return [line, cityLine].filter(Boolean).join(', ');
+}
+
+function resolveGuarantorFullAddress(values: Record<string, string>): string {
+  const street = String(
+    values.guarantor_address || values.business_address_contract || '',
+  ).trim();
+  const city = String(
+    values.guarantor_address_city || values.business_address_contract_city || '',
+  ).trim();
+  const state = String(
+    values.guarantor_address_state || values.business_address_contract_state || '',
+  ).trim();
+  const zip = String(
+    values.guarantor_address_zip || values.business_address_contract_zip || '',
+  ).trim();
+  const composed = composeUsMailingAddress(street, city, state, zip);
+  return composed && isUsableDisclosureStreetLine(composed) ? composed : street;
+}
+
+function resolveBusinessFullAddress(values: Record<string, string>): string {
+  const street = String(
+    values.business_address || values.security_business_address || '',
+  ).trim();
+  const city = String(
+    values.business_address_city || values.security_business_address_city || '',
+  ).trim();
+  const state = String(
+    values.business_address_state || values.security_business_address_state || '',
+  ).trim();
+  const zip = String(
+    values.business_address_zip || values.security_business_address_zip || '',
+  ).trim();
+  const composed = composeUsMailingAddress(street, city, state, zip);
+  return composed && isUsableDisclosureStreetLine(composed) ? composed : street;
+}
+
+function layoutDefinesVariable(
+  layout: DocumentLayout | undefined,
+  variable: string,
+): boolean {
+  if (!layout?.placements?.length) return false;
+  const needle = String(variable || '').trim().toLowerCase();
+  if (!needle) return false;
+  return layout.placements.some(
+    (placement) => String(placement.variable || '').trim().toLowerCase() === needle,
+  );
+}
+
+/** Harbor page 1 is one street line; Alliance keeps separate city/state/ZIP tabs. */
+function shouldComposeFullAddressOnStreetTab(
+  layout: DocumentLayout | undefined,
+  streetVariable: string,
+): boolean {
+  const base = String(streetVariable || '').trim().toLowerCase();
+  if (!base || !layout?.placements?.length) return false;
+  return !['city', 'state', 'zip'].some((part) =>
+    layoutDefinesVariable(layout, `${base}_${part}`),
+  );
+}
+
 /**
  * CRM clientName / layout `client_name` (e.g. client_name__p2_p87).
  * Prefer owner / client person name — never business legal name.
@@ -544,15 +765,14 @@ export const FILL_AT_SIGNING_VARIABLES = new Set([
   'ach_authorization_other_infomation',
 ]);
 
-/** Harbor View Capital MCA — financial institution portal section. */
+/** Shared Harbor View / Clear Capital MCA — financial institution portal section. */
 const HARBOR_CONTRACT_FILL_AT_SIGNING_PAGE = '19';
 
-/** Harbor main contract (and funder-scoped contract uploads using the same coords). */
+/** Harbor View + Clear Capital main contract (funder-scoped PDFs use the same coords). */
 function usesHarborMainContractLayout(layoutKey: string | undefined): boolean {
   const key = String(layoutKey || '').trim();
-  if (!key || key === DOCUMENT_LAYOUT_KEYS.contract) return true;
-  if (isFunderContractLayoutKey(key)) return true;
-  return false;
+  if (!key) return true;
+  return isSharedMainContractLayoutKey(key);
 }
 
 /** Contract page 1 — merchant may confirm/enter phone at signing (optional, stays editable). */
@@ -786,6 +1006,17 @@ function expandPrefillValues(
     todayUs;
   if (!String(out.agreement_date || '').trim()) out.agreement_date = agreementDate;
   if (!String(out.signature_date || '').trim()) out.signature_date = agreementDate;
+  if (!String(out.first_payment_date || '').trim()) out.first_payment_date = agreementDate;
+  if (!String(out.guarantor_email || '').trim()) {
+    out.guarantor_email = String(out.client_email || '').trim();
+  }
+  if (!String(out.client_email || '').trim()) {
+    out.client_email = String(out.guarantor_email || '').trim();
+  }
+  if (!String(out.owner_print_title || '').trim()) out.owner_print_title = 'OWNER';
+  if (!String(out.guarantor_print_title || '').trim()) {
+    out.guarantor_print_title = String(out.owner_print_title || 'OWNER').trim() || 'OWNER';
+  }
 
   for (const [canonical, aliases] of Object.entries(PREFILL_VALUE_ALIASES)) {
     const v = String(out[canonical] || '').trim();
@@ -793,6 +1024,23 @@ function expandPrefillValues(
     for (const alias of aliases) {
       if (!String(out[alias] || '').trim()) out[alias] = v;
     }
+  }
+
+  // Contract PDF “$___ per ____”: DAY / WEEK (not DAILY / WEEKLY).
+  for (const key of [
+    'frequency',
+    'paymentterms',
+    'payment_terms',
+    'paymentfrequency',
+    'payment_frequency',
+  ]) {
+    const raw = String(out[key] || '').trim();
+    if (!raw) continue;
+    const text = raw.toLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ');
+    if (text === 'day' || text === 'daily') out[key] = 'DAY';
+    else if (text === 'week' || text === 'weekly') out[key] = 'WEEK';
+    else if (text === 'bi week' || text === 'biweekly') out[key] = 'BI-WEEK';
+    else if (text === 'month' || text === 'monthly') out[key] = 'MONTH';
   }
 
   /**
@@ -804,6 +1052,18 @@ function expandPrefillValues(
     String(out.disclosure_amount_financed || '').trim();
   if (offerAmount) {
     out.funding_provided = offerAmount;
+  }
+  if (!String(out.funding_provided_direct || '').trim()) {
+    out.funding_provided_direct =
+      String(out.disclosure_recipient_funds || '').trim() ||
+      String(out.funding_provided || '').trim() ||
+      offerAmount;
+  }
+  if (!String(out.estimated_annual_percentage_rate || '').trim()) {
+    out.estimated_annual_percentage_rate = String(out.disclosure_apr || '').trim();
+  }
+  if (!String(out.income_lookback_months || '').trim()) {
+    out.income_lookback_months = '4';
   }
 
   /**
@@ -1171,19 +1431,42 @@ function formatFlexAddendumMoneyUsd(value: string): string {
   }).format(n);
 }
 
+const ACH_ST_TAB_LABELS = new Set([
+  'ach_authorization_account_holder_state',
+  'ach_authorization_account_holder_bank_state',
+]);
+
+/** Contract ACH Address/City/ST tabs — street not country, ST as 2-letter code. */
+function normalizeAchContractAddressTabValue(variable: string, value: string): string {
+  const key = String(variable || '').trim().toLowerCase();
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return '';
+  if (key === 'ach_authorization_account_holder_address') {
+    return isUsableDisclosureStreetLine(trimmed) ? trimmed : '';
+  }
+  if (key === 'ach_authorization_account_holder_city') {
+    return isAddressPlaceholderToken(trimmed) ? '' : trimmed;
+  }
+  if (ACH_ST_TAB_LABELS.has(key)) {
+    return toUsStateAbbreviation(trimmed) || trimmed;
+  }
+  return trimmed;
+}
+
 function resolveTextPlacementValue(
   variable: string,
   values: Record<string, string>,
   placement?: DocumentLayoutPlacement,
   layoutKey?: string,
+  layout?: DocumentLayout,
 ): string {
   const key = String(variable || '').trim();
   if (!key) return '';
 
   const formatIfMoney = (raw: string) =>
     FLEX_ADDENDUM_MONEY_VARIABLES.has(key.toLowerCase())
-      ? formatFlexAddendumMoneyUsd(raw)
-      : raw;
+      ? formatFlexAddendumMoneyUsd(normalizeAchContractAddressTabValue(key, raw))
+      : normalizeAchContractAddressTabValue(key, raw);
 
   // State disclosures use per-slot sourceTabLabel keys (funder_name_5, client_name_1).
   // Resolve those before any owner-name remapping so Woodmere funder/merchant fills work.
@@ -1203,6 +1486,15 @@ function resolveTextPlacementValue(
       if (business) return formatIfMoney(business);
     }
     const sharedDirect = String(values[key] ?? '').trim();
+    if (DISCLOSURE_RECIPIENT_ADDRESS_VARS.has(key.toLowerCase())) {
+      const address = resolveDisclosureRecipientAddress(values);
+      if (address) return formatIfMoney(address);
+      return '';
+    }
+    if (DISCLOSURE_ESTIMATED_PAYMENT_VARS.has(key.toLowerCase())) {
+      const payment = resolveDisclosureEstimatedPayment(values);
+      if (payment) return formatIfMoney(payment);
+    }
     if (sharedDirect) return formatIfMoney(sharedDirect);
   }
 
@@ -1233,6 +1525,27 @@ function resolveTextPlacementValue(
     const personal = resolvePersonalClientNameValue(values);
     if (personal) return formatIfMoney(personal);
     return '';
+  }
+
+  if (key.toLowerCase() === 'guarantor_address') {
+    const fullAddress = resolveGuarantorFullAddress(values);
+    if (fullAddress) return formatIfMoney(fullAddress);
+  }
+
+  if (
+    key.toLowerCase() === 'business_address' &&
+    shouldComposeFullAddressOnStreetTab(layout, 'business_address')
+  ) {
+    const fullAddress = resolveBusinessFullAddress(values);
+    if (fullAddress) return formatIfMoney(fullAddress);
+  }
+
+  if (
+    key.toLowerCase() === 'business_address_contract' &&
+    shouldComposeFullAddressOnStreetTab(layout, 'business_address_contract')
+  ) {
+    const fullAddress = resolveGuarantorFullAddress(values);
+    if (fullAddress) return formatIfMoney(fullAddress);
   }
 
   if (
@@ -1387,7 +1700,18 @@ function toTextTab(
     height: placement.height,
     layoutWidth: placement.width,
     fontSize: placement.fontSize,
+    keepLayoutWidth: keepPrefillTabLayoutWidth(layoutKey),
   });
+  const wrapWidthPx = parseFloat(width) || 0;
+  const wrapFontPt =
+    parseFloat(String(resolveDocuSignFontSizeToken({
+      fontSize: placement.fontSize || '9',
+      height: placement.height,
+    })).replace(/^size/i, '')) || 9;
+  const wrappedValue =
+    tabValue && isDocuSignWrapTextTab(placement.height) && wrapWidthPx > 0
+      ? wrapDocuSignTabValue(tabValue, wrapWidthPx, wrapFontPt)
+      : tabValue;
   // Page-16 ACH and page-1 client phone stay editable; other prefilled text locks at send.
   const lockTab = signerEditable ? false : lockDataTabs || Boolean(placement.lockedForSigner);
   const optionalTab = !isRequiredSignerTextField(placement, layoutKey);
@@ -1396,9 +1720,10 @@ function toTextTab(
   const tabName = clearsValueAtSend(layoutKey, placement)
     ? tabLabel || variable || undefined
     : variable || undefined;
+  const sitOnBlank = resolveSitOnBlankTextTabMetrics(placement, layoutKey);
   const fontSize = resolveDocuSignFontSizeToken({
     fontSize: placement.fontSize || '9',
-    height: placement.height,
+    height: sitOnBlank.height,
   });
   return applyDocuSignPrefillTabStyle(
     {
@@ -1407,8 +1732,8 @@ function toTextTab(
       documentId: envelopeDocumentId,
       pageNumber: placement.pageNumber,
       xPosition: placement.x,
-      yPosition: resolveTabYPosition(placement.y, layoutKey),
-      ...(tabValue ? { value: tabValue } : {}),
+      yPosition: sitOnBlank.y,
+      ...(wrappedValue ? { value: wrappedValue } : {}),
       ...(optionalTab ? { optional: 'true' } : { required: 'true', optional: 'false' }),
       ...(lockTab ? { locked: 'true' } : {}),
       ...(placement.bold ? { bold: 'true' } : {}),
@@ -1417,9 +1742,9 @@ function toTextTab(
       disableAutoSize: 'true',
       fontSize,
       width,
-      ...(placement.height ? { height: String(placement.height) } : { height: '19' }),
+      height: sitOnBlank.height,
     },
-    { height: placement.height || '19', fontSize },
+    { height: sitOnBlank.height, fontSize },
   );
 }
 
@@ -1453,6 +1778,7 @@ export async function renderFlattenedLayoutPdf(
       scopedExpanded,
       placement,
       layout.key,
+      layout,
     );
     if (!text) continue;
 
@@ -1460,15 +1786,16 @@ export async function renderFlattenedLayoutPdf(
     const page = pages[pageIndex];
     if (!page) continue;
 
+    const sitOnBlank = resolveSitOnBlankTextTabMetrics(placement, layout.key);
     const fontSizeToken = resolveDocuSignFontSizeToken({
       fontSize: placement.fontSize,
-      height: placement.height,
+      height: sitOnBlank.height,
     });
     const fontSize =
       parseFloat(String(fontSizeToken).replace(/^size/i, '')) || 9;
     const { height: pageHeight } = page.getSize();
     const x = parseFloat(String(placement.x || '0')) || 0;
-    const yTop = parseFloat(resolveTabYPosition(placement.y, layout.key)) || 0;
+    const yTop = parseFloat(sitOnBlank.y) || 0;
     const y = pageHeight - yTop - fontSize;
 
     const maxWidth = parseFloat(
@@ -1477,15 +1804,25 @@ export async function renderFlattenedLayoutPdf(
         height: placement.height,
         layoutWidth: placement.width,
         fontSize: placement.fontSize,
+        keepLayoutWidth: keepPrefillTabLayoutWidth(layout.key),
       }),
     );
-    page.drawText(text, {
-      x,
-      y: Math.max(2, y),
-      size: fontSize,
-      font: placement.bold ? boldFont : font,
-      color: rgb(0, 0, 0),
-      maxWidth: Number.isFinite(maxWidth) && maxWidth > 0 ? maxWidth : undefined,
+    const wrapWidthPx = Number.isFinite(maxWidth) && maxWidth > 0 ? maxWidth : 0;
+    const drawText =
+      isDocuSignWrapTextTab(placement.height) && wrapWidthPx > 0
+        ? wrapDocuSignTabValue(text, wrapWidthPx, fontSize)
+        : text;
+    const lines = drawText.split(/\r?\n/).filter((line) => line.length > 0);
+    const lineHeight = fontSize * 1.25;
+    lines.forEach((line, index) => {
+      page.drawText(line, {
+        x,
+        y: Math.max(2, y - index * lineHeight),
+        size: fontSize,
+        font: placement.bold ? boldFont : font,
+        color: rgb(0, 0, 0),
+        maxWidth: wrapWidthPx > 0 ? wrapWidthPx : undefined,
+      });
     });
   }
 
@@ -1526,7 +1863,7 @@ function toSignTab(
   const id = String(placement.id || '').trim();
   const tabLabel =
     id && !scoped.includes(id) ? `${scoped}__${id}` : scoped;
-  return {
+  const tab: DocuSignTab = {
     tabLabel,
     documentId: envelopeDocumentId,
     pageNumber: placement.pageNumber,
@@ -1535,6 +1872,19 @@ function toSignTab(
     optional: placement.optional ? 'true' : 'false',
     shared: 'false',
   };
+  if (placement.type === 'signature') {
+    tab.name = 'SignHere';
+    tab.stampType = 'signature';
+    tab.tabType = 'signhere';
+  } else if (placement.type === 'initial') {
+    tab.name = 'InitialHere';
+    tab.tabType = 'initialhere';
+  }
+  const scale = String(placement.scaleValue || '').trim();
+  if (scale) tab.scaleValue = scale;
+  if (placement.width) tab.width = String(placement.width);
+  if (placement.height) tab.height = String(placement.height);
+  return tab;
 }
 
 function toAttachmentTab(
@@ -1598,6 +1948,7 @@ export function buildRecipientTabsByRoleForLayout(
         scopedValues,
         placement,
         layout.key,
+        layout,
       );
       if (!value && !shouldIncludeEmptyTextPlacement(placement, layout.key)) continue;
       const tab = toTextTab(placement, value, envelopeDocumentId, false, layout.key);
@@ -1737,6 +2088,7 @@ export function buildEnvelopeFromLayouts(options: BuildEnvelopeFromLayoutOptions
           scopedValues,
           placement,
           layout.key,
+          layout,
         );
         if (!value && !shouldIncludeEmptyTextPlacement(placement, layout.key)) continue;
         const tab = toTextTab(tabPlacement, value, envelopeDocId, options.lockDataTabs, layout.key);

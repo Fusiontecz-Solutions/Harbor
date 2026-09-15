@@ -6,9 +6,13 @@ import {
 } from './applicationService';
 import {
     buildOperationsStatusFilterWhere,
+    contractGeneratedStrictMatchWhere,
+    contractPendingStrictMatchWhere,
+    contractSentStrictMatchWhere,
     excludeSoftDeletedWhere,
     normalizeOperationsStatusKey,
     resolveOperationsListFilterMode,
+    signedContractsStrictMatchWhere,
     type OperationsStatusFilterMode,
 } from './operationsStatusFilter';
 import { aggregateQueueMetricsByCurrentQueue } from './operationsDashboardQueueMetricsService';
@@ -229,16 +233,11 @@ export async function listOperationsDashboardRecentCases(
         .toUpperCase()
         .replace(/-/g, '_');
     const isOperations = roleUpper === 'OPERATIONS';
-    const recentDealsWhere = isSuperAdmin
-        ? {
-              OR: [
-                  buildOperationsStatusFilterWhere('Funded', filterMode),
-                  buildOperationsStatusFilterWhere('Disbursment', filterMode),
-              ],
-          }
-        : isOperations
-          ? buildOperationsStatusFilterWhere('Contract_Signed', filterMode)
-          : buildOperationsStatusFilterWhere('Contracted', filterMode);
+    // SUPER_ADMIN and OPERATIONS: latest Contract Signed applications.
+    const recentDealsWhere =
+        isSuperAdmin || isOperations
+            ? buildOperationsStatusFilterWhere('Contract_Signed', filterMode)
+            : buildOperationsStatusFilterWhere('Contracted', filterMode);
     const where = combineWhere(
         combineWhere(visibilityBase, recentDealsWhere),
         excludeSoftDeletedWhere(),
@@ -295,4 +294,302 @@ export async function listOperationsDashboardRecentCases(
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
     }));
+}
+
+export type OperationsPaymentPerformancePeriod = 'daily' | 'weekly' | 'monthly';
+
+export type OperationsPaymentPerformancePoint = {
+    label: string;
+    /** Contract Pending offer/approved amounts. */
+    pending: number;
+    /** Contract Signed offer/approved amounts. */
+    approved: number;
+};
+
+function toFiniteAmount(value: unknown): number | null {
+    if (value == null || value === '') return null;
+    if (typeof value === 'number') {
+        return Number.isFinite(value) ? value : null;
+    }
+    if (typeof value === 'object' && value !== null) {
+        const decimalLike = value as { toNumber?: () => number; toFixed?: (digits?: number) => string };
+        if (typeof decimalLike.toNumber === 'function') {
+            const n = Number(decimalLike.toNumber());
+            return Number.isFinite(n) ? n : null;
+        }
+        if (typeof decimalLike.toFixed === 'function') {
+            const n = Number(decimalLike.toFixed(20));
+            return Number.isFinite(n) ? n : null;
+        }
+    }
+    const s = String(value).replace(/[$,\s]/g, '').trim();
+    if (!s) return null;
+    const num = Number(s);
+    return Number.isFinite(num) ? num : null;
+}
+
+function firstPositiveAmount(...values: Array<number | null | undefined>): number {
+    for (const value of values) {
+        if (value != null && value > 0) return value;
+    }
+    return 0;
+}
+
+function startOfLocalDay(date: Date): Date {
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
+}
+
+function endOfLocalDay(date: Date): Date {
+    return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999);
+}
+
+function addLocalDays(date: Date, days: number): Date {
+    const next = new Date(date);
+    next.setDate(next.getDate() + days);
+    return next;
+}
+
+function formatDayLabel(date: Date): string {
+    return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function formatMonthLabel(date: Date): string {
+    return date.toLocaleDateString('en-US', { month: 'short' });
+}
+
+function compactWorkflowToken(value: string | null | undefined): string {
+    return String(value ?? '')
+        .trim()
+        .toLowerCase()
+        .replace(/[\s_-]+/g, '');
+}
+
+const SIGNED_CONTRACT_TOKENS = new Set([
+    'contractsigned',
+    'signedcontracts',
+    'signedcontract',
+]);
+
+const PENDING_CONTRACT_TOKENS = new Set([
+    'contractpending',
+    'contractgenerated',
+    'contractsent',
+    'contractout',
+    'contractsout',
+]);
+
+function classifyContractMoneyStage(
+    currentQueue: string | null | undefined,
+    currentState: string | null | undefined,
+): 'pending' | 'approved' | null {
+    const queueToken = compactWorkflowToken(currentQueue);
+    const stateToken = compactWorkflowToken(currentState);
+
+    if (SIGNED_CONTRACT_TOKENS.has(queueToken) || SIGNED_CONTRACT_TOKENS.has(stateToken)) {
+        return 'approved';
+    }
+
+    if (PENDING_CONTRACT_TOKENS.has(queueToken) || PENDING_CONTRACT_TOKENS.has(stateToken)) {
+        return 'pending';
+    }
+
+    return null;
+}
+
+function buildPaymentPerformanceBuckets(
+    period: OperationsPaymentPerformancePeriod,
+    now = new Date(),
+): Array<{ key: string; label: string; start: Date; end: Date }> {
+    if (period === 'daily') {
+        const today = startOfLocalDay(now);
+        return Array.from({ length: 14 }, (_, index) => {
+            const day = addLocalDays(today, index - 13);
+            const key = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, '0')}-${String(day.getDate()).padStart(2, '0')}`;
+            return {
+                key,
+                label: formatDayLabel(day),
+                start: day,
+                end: endOfLocalDay(day),
+            };
+        });
+    }
+
+    if (period === 'weekly') {
+        const today = startOfLocalDay(now);
+        const dayOfWeek = today.getDay(); // 0 = Sunday
+        const thisWeekStart = addLocalDays(today, -dayOfWeek);
+        return Array.from({ length: 8 }, (_, index) => {
+            const weekStart = addLocalDays(thisWeekStart, (index - 7) * 7);
+            const weekEnd = endOfLocalDay(addLocalDays(weekStart, 6));
+            const key = `${weekStart.getFullYear()}-W${String(weekStart.getMonth() + 1).padStart(2, '0')}-${String(weekStart.getDate()).padStart(2, '0')}`;
+            return {
+                key,
+                label: `${formatDayLabel(weekStart)}–${formatDayLabel(weekEnd)}`,
+                start: weekStart,
+                end: weekEnd > now ? endOfLocalDay(now) : weekEnd,
+            };
+        });
+    }
+
+    const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+    return Array.from({ length: 6 }, (_, index) => {
+        const monthStart = new Date(
+            thisMonthStart.getFullYear(),
+            thisMonthStart.getMonth() - (5 - index),
+            1,
+            0,
+            0,
+            0,
+            0,
+        );
+        const monthEnd = endOfLocalDay(
+            new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0),
+        );
+        const key = `${monthStart.getFullYear()}-${String(monthStart.getMonth() + 1).padStart(2, '0')}`;
+        return {
+            key,
+            label: formatMonthLabel(monthStart),
+            start: monthStart,
+            end: monthEnd > now ? endOfLocalDay(now) : monthEnd,
+        };
+    });
+}
+
+/**
+ * Payment Performance chart: Contract Pending vs Contract Signed money,
+ * bucketed by daily / weekly / monthly windows.
+ */
+export async function aggregateOperationsPaymentPerformanceTrend(
+    authUser: AuthenticatedUser | null,
+    period: OperationsPaymentPerformancePeriod,
+): Promise<OperationsPaymentPerformancePoint[]> {
+    const buckets = buildPaymentPerformanceBuckets(period);
+    const rangeStart = buckets[0]?.start;
+    const rangeEnd = buckets[buckets.length - 1]?.end;
+    if (!rangeStart || !rangeEnd) {
+        return [];
+    }
+
+    const visibilityBase = mergeApplicationVisibilityWhere(
+        authUser ? {} : { id: '00000000-0000-0000-0000-000000000000' },
+        authUser,
+    );
+    const stageWhere: Prisma.ApplicationWhereInput = {
+        OR: [
+            contractPendingStrictMatchWhere(),
+            contractGeneratedStrictMatchWhere(),
+            contractSentStrictMatchWhere(),
+            signedContractsStrictMatchWhere(),
+        ],
+    };
+    const where = combineWhere(
+        combineWhere(visibilityBase, stageWhere),
+        excludeSoftDeletedWhere(),
+    );
+
+    const apps = await prisma.application.findMany({
+        where,
+        select: {
+            id: true,
+            createdAt: true,
+            updatedAt: true,
+            loanAmount: true,
+            currentQueue: true,
+            currentState: true,
+        },
+    });
+
+    const totals = new Map<string, { pending: number; approved: number }>(
+        buckets.map((bucket) => [bucket.key, { pending: 0, approved: 0 }]),
+    );
+
+    if (apps.length === 0) {
+        return buckets.map((bucket) => ({
+            label: bucket.label,
+            pending: 0,
+            approved: 0,
+        }));
+    }
+
+    const appIds = apps.map((app) => app.id);
+    const [offerDecisions, termsOffers, contracts] = await Promise.all([
+        prisma.offerDecision.findMany({
+            where: { applicationId: { in: appIds } },
+            select: { applicationId: true, offer: true, decision: true },
+        }),
+        prisma.termsOffer.findMany({
+            where: { applicationId: { in: appIds } },
+            select: { applicationId: true, approvedAmount: true },
+            orderBy: { createdAt: 'desc' },
+        }),
+        prisma.contract.findMany({
+            where: { applicationId: { in: appIds } },
+            select: { applicationId: true, approvedAmount: true },
+        }),
+    ]);
+
+    const offerDecisionByApp = new Map(
+        offerDecisions.map((row) => [row.applicationId, row]),
+    );
+    const latestTermsByApp = new Map<string, number | null>();
+    for (const row of termsOffers) {
+        if (!latestTermsByApp.has(row.applicationId)) {
+            latestTermsByApp.set(row.applicationId, toFiniteAmount(row.approvedAmount));
+        }
+    }
+    const contractByApp = new Map<string, number | null>();
+    for (const row of contracts) {
+        if (row.applicationId && !contractByApp.has(row.applicationId)) {
+            contractByApp.set(row.applicationId, toFiniteAmount(row.approvedAmount));
+        }
+    }
+
+    const findBucket = (stamp: number) =>
+        buckets.find(
+            (item) => stamp >= item.start.getTime() && stamp <= item.end.getTime(),
+        );
+
+    for (const app of apps) {
+        const updatedStamp = app.updatedAt.getTime();
+        const createdStamp = app.createdAt.getTime();
+        const bucket =
+            findBucket(createdStamp) ??
+            findBucket(updatedStamp) ??
+            buckets[buckets.length - 1];
+        if (!bucket) continue;
+
+        const stage = classifyContractMoneyStage(app.currentQueue, app.currentState);
+        if (!stage) continue;
+
+        const od = offerDecisionByApp.get(app.id);
+        const odOffer =
+            od && String(od.decision ?? '').toLowerCase() !== 'declined'
+                ? toFiniteAmount(od.offer)
+                : null;
+        const amount = firstPositiveAmount(
+            odOffer,
+            latestTermsByApp.get(app.id),
+            contractByApp.get(app.id),
+            toFiniteAmount(app.loanAmount),
+        );
+        if (!(amount > 0)) continue;
+
+        const entry = totals.get(bucket.key);
+        if (!entry) continue;
+
+        if (stage === 'approved') {
+            entry.approved += amount;
+        } else {
+            entry.pending += amount;
+        }
+    }
+
+    return buckets.map((bucket) => {
+        const entry = totals.get(bucket.key);
+        return {
+            label: bucket.label,
+            pending: entry?.pending ?? 0,
+            approved: entry?.approved ?? 0,
+        };
+    });
 }

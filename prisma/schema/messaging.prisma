@@ -1,0 +1,323 @@
+/// ============================================================================
+/// Messaging (SMS + Voice) — Infobip-backed communication platform.
+/// ----------------------------------------------------------------------------
+/// Ported from the Fivra SMS platform, collapsed from its Kafka/microservice
+/// layout onto Harbor's single Express + BullMQ process.
+///
+/// Naming: every model is prefixed `Messaging*` / `Sms*` so nothing collides
+/// with the CRM side of the schema (Client, Contract, Note, Notification, …).
+/// A "contact" here is an SMS counterparty, NOT a CRM `Client`.
+/// ============================================================================
+
+enum MessagingContactStatus {
+  ACTIVE
+  BLOCKED
+}
+
+enum MessagingDirection {
+  INBOUND
+  OUTBOUND
+}
+
+/// Delivery lifecycle, normalized across providers so the UI never sees
+/// Infobip's raw group/status names.
+enum MessagingMessageStatus {
+  QUEUED
+  SENDING
+  SENT
+  DELIVERED
+  FAILED
+  UNDELIVERABLE
+  RECEIVED
+}
+
+enum SmsBroadcastStatus {
+  DRAFT
+  QUEUED
+  RUNNING
+  PAUSED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+/// Why a number may not be messaged. Checked before every outbound send.
+enum MessagingSuppressionReason {
+  STOP_KEYWORD
+  MANUAL_BLOCK
+  DNC_LIST
+  CARRIER_VIOLATION
+  BOUNCE
+}
+
+/// An SMS counterparty. Deduplicated per owning user on the E.164 phone number
+/// so two agents can each hold their own record for the same merchant.
+model MessagingContact {
+  id           String                 @id @default(uuid()) @db.Uuid
+  /// E.164 (+15551234567). Always written through normalizePhoneNumber().
+  phoneNumber  String
+  firstName    String?
+  lastName     String?
+  emailAddress String?
+  company      String?
+  street       String?
+  city         String?
+  state        String?
+  zip          String?
+  tags         String[]               @default([])
+  status       MessagingContactStatus @default(ACTIVE)
+  /// Where the row came from: manual | import | inbound | broadcast.
+  source       String                 @default("manual")
+  /// Optional link to the CRM client this number belongs to.
+  clientId     String?                @db.Uuid
+  ownerUserId  String?                @db.Uuid
+  createdAt    DateTime               @default(now())
+  updatedAt    DateTime               @updatedAt
+
+  client        Client?                 @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  owner         User?                   @relation("MessagingContactOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  conversations MessagingConversation[]
+  recipients    SmsBroadcastRecipient[]
+
+  @@unique([ownerUserId, phoneNumber])
+  @@index([phoneNumber])
+  @@index([status])
+  @@index([clientId])
+  @@index([createdAt])
+}
+
+/// Denormalized inbox row — one per (business number, contact number) pair.
+/// Mirrors Fivra's ConversationSummary: the inbox list reads ONLY this table so
+/// rendering 10k conversations never touches the message table.
+model MessagingConversation {
+  id             String    @id @default(uuid()) @db.Uuid
+  /// Our Infobip sender (long code / short code / alphanumeric sender ID).
+  businessNumber String
+  /// The merchant's number, E.164.
+  contactNumber  String
+  contactId      String?   @db.Uuid
+  ownerUserId    String?   @db.Uuid
+
+  lastMessageId        String?             @db.Uuid
+  lastMessageText      String?
+  lastMessageAt        DateTime?
+  lastMessageDirection MessagingDirection?
+  lastMessageHasMedia  Boolean             @default(false)
+  messageCount         Int                 @default(0)
+  unreadCount          Int                 @default(0)
+  /// True once any message on this thread came from a broadcast — this is what
+  /// makes broadcast replies surface in the normal chat inbox.
+  hasBroadcastMessage  Boolean             @default(false)
+  /// Set when the contact replied with STOP/UNSUBSCRIBE et al.
+  isOptedOut           Boolean             @default(false)
+  isArchived           Boolean             @default(false)
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+
+  contact  MessagingContact?  @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  owner    User?              @relation("MessagingConversationOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  messages MessagingMessage[]
+
+  @@unique([businessNumber, contactNumber])
+  @@index([ownerUserId, lastMessageAt])
+  @@index([lastMessageAt])
+  @@index([contactNumber])
+  @@index([unreadCount])
+}
+
+model MessagingMessage {
+  id             String                 @id @default(uuid()) @db.Uuid
+  conversationId String                 @db.Uuid
+  /// Infobip messageId. Unique so DLR webhooks are idempotent.
+  providerMessageId String?             @unique
+  /// Infobip bulkId, set for broadcast sends.
+  providerBulkId String?
+  direction      MessagingDirection
+  fromNumber     String
+  toNumber       String
+  body           String?
+  mediaUrls      String[]               @default([])
+  status         MessagingMessageStatus @default(QUEUED)
+  errorCode      String?
+  errorMessage   String?
+  /// Set when this message was produced by a broadcast — lets a reply be
+  /// attributed back to the campaign that triggered it.
+  broadcastId    String?                @db.Uuid
+  /// True when an inbound body matched a stop keyword.
+  isStopKeyword  Boolean                @default(false)
+  /// Segment count / price reported by the provider, for cost reporting.
+  segmentCount   Int?
+  priceAmount    Decimal?               @db.Decimal(12, 6)
+  priceCurrency  String?
+  sentById       String?                @db.Uuid
+  sentAt         DateTime?
+  deliveredAt    DateTime?
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  conversation MessagingConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  broadcast    SmsBroadcast?         @relation(fields: [broadcastId], references: [id], onDelete: SetNull)
+  sentBy       User?                 @relation("MessagingMessageSentBy", fields: [sentById], references: [id], onDelete: SetNull)
+
+  @@index([conversationId, createdAt])
+  @@index([broadcastId])
+  @@index([status])
+  @@index([providerBulkId])
+  @@index([createdAt])
+}
+
+/// A bulk send. Counters are denormalized and updated by a debounced writer in
+/// the worker so 50k delivery receipts don't become 50k UPDATE statements.
+model SmsBroadcast {
+  id             String             @id @default(uuid()) @db.Uuid
+  /// Human/URL-safe key used as the BullMQ job group and Redis bucket suffix.
+  campaignKey    String             @unique
+  name           String
+  body           String
+  mediaUrls      String[]           @default([])
+  /// Infobip sender the blast goes out from.
+  fromNumber     String
+  status         SmsBroadcastStatus @default(DRAFT)
+
+  totalRecipients    Int @default(0)
+  queuedCount        Int @default(0)
+  sentCount          Int @default(0)
+  deliveredCount     Int @default(0)
+  failedCount        Int @default(0)
+  undeliverableCount Int @default(0)
+  repliedCount       Int @default(0)
+  optOutCount        Int @default(0)
+  suppressedCount    Int @default(0)
+
+  /// Tokens/second allowed for THIS broadcast's Redis bucket. Null = account default.
+  throttlePerSecond Int?
+  scheduledAt       DateTime?
+  startedAt         DateTime?
+  finishedAt        DateTime?
+  createdById       String?   @db.Uuid
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  createdBy  User?                   @relation("SmsBroadcastCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  recipients SmsBroadcastRecipient[]
+  messages   MessagingMessage[]
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([createdById])
+}
+
+/// Pre-stored recipient rows. Written as QUEUED up front (Fivra's
+/// preStoreCampaignRecipients) so the funnel is complete even if the process
+/// dies mid-blast — the worker resumes from whatever is still QUEUED.
+model SmsBroadcastRecipient {
+  id          String                 @id @default(uuid()) @db.Uuid
+  broadcastId String                 @db.Uuid
+  phoneNumber String
+  contactId   String?                @db.Uuid
+  /// Per-recipient merge fields resolved into the body at send time.
+  mergeData   Json?
+  status      MessagingMessageStatus @default(QUEUED)
+  providerMessageId String?
+  errorCode    String?
+  errorMessage String?
+  /// Populated when the send was skipped by suppression/DNC/block.
+  suppressedReason MessagingSuppressionReason?
+  sentAt      DateTime?
+  createdAt   DateTime               @default(now())
+  updatedAt   DateTime               @updatedAt
+
+  broadcast SmsBroadcast      @relation(fields: [broadcastId], references: [id], onDelete: Cascade)
+  contact   MessagingContact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+
+  @@unique([broadcastId, phoneNumber])
+  @@index([broadcastId, status])
+  @@index([phoneNumber])
+  @@index([providerMessageId])
+}
+
+/// Numbers that must never be messaged again. Checked (through Redis) before
+/// every single send — one row per number per reason.
+model MessagingSuppression {
+  id          String                     @id @default(uuid()) @db.Uuid
+  phoneNumber String
+  reason      MessagingSuppressionReason
+  /// Free-text provenance: "inbound STOP", "manual block by <user>", "DNC API".
+  source      String?
+  active      Boolean                    @default(true)
+  createdById String?                    @db.Uuid
+  createdAt   DateTime                   @default(now())
+  updatedAt   DateTime                   @updatedAt
+
+  createdBy User? @relation("MessagingSuppressionCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@unique([phoneNumber, reason])
+  @@index([phoneNumber, active])
+  @@index([active])
+}
+
+/// Cached result of a Do-Not-Call lookup. TTL'd in Redis; persisted here so the
+/// paid lookup is never repeated for a number we already checked.
+model MessagingDncCheck {
+  id           String   @id @default(uuid()) @db.Uuid
+  phoneNumber  String   @unique
+  /// Normalized: "listed" | "clear" | "unknown".
+  status       String
+  carrier      String?
+  numberType   String?
+  /// Raw provider payload for audit.
+  rawResponse  Json?
+  checkedById  String?  @db.Uuid
+  checkedAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  checkedBy User? @relation("MessagingDncCheckedBy", fields: [checkedById], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([checkedAt])
+}
+
+/// Reusable message bodies with {{merge}} tokens, for 1:1 and broadcast alike.
+model MessagingTemplate {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String
+  body        String
+  /// Merge tokens referenced by `body`, e.g. ["firstName","company"].
+  variables   String[] @default([])
+  isActive    Boolean  @default(true)
+  createdById String?  @db.Uuid
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  createdBy User? @relation("MessagingTemplateCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@unique([name])
+  @@index([isActive])
+}
+
+/// Two-way calling log (Infobip Voice / WebRTC).
+model MessagingCall {
+  id             String             @id @default(uuid()) @db.Uuid
+  /// Infobip callId.
+  providerCallId String?            @unique
+  fromNumber     String
+  toNumber       String
+  direction      MessagingDirection
+  /// Provider call state, normalized: ringing | in-progress | completed | failed | no-answer | busy.
+  status         String             @default("ringing")
+  durationSeconds Int?
+  recordingUrl   String?
+  contactId      String?            @db.Uuid
+  userId         String?            @db.Uuid
+  startedAt      DateTime?
+  endedAt        DateTime?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  user User? @relation("MessagingCallUser", fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([fromNumber])
+  @@index([toNumber])
+  @@index([status])
+}

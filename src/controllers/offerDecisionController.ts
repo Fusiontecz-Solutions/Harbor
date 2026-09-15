@@ -4,12 +4,19 @@ import prisma from '../config/prismaClient';
 import type { AuthenticatedUser } from '../services/applicationService';
 import { getUnderwriterClaimMutationDenial } from '../services/underwriterClaimGuard';
 import {
-    flagNeedsContractReinitiation,
     isQueueEligibleForContractReinitiation,
     offerDecisionValuesChanged,
 } from '../services/contractReinitiationService';
 import { recordContractWorkflowActivityLog } from '../services/contractWorkflowActivityLog';
+import {
+    APPLICATION_QUEUE_CONTRACT_PENDING,
+    APPLICATION_STATE_CONTRACT_PENDING,
+    contractPendingApplicationUpdateData,
+    shouldAdvanceApplicationToContractPending,
+} from '../services/contractApplicationWorkflowSync';
+import { createApplicationActivityLog } from '../services/applicationActivityLogService';
 import { sanitizePaymentFrequencyForPersist } from '../utils/sanitizePaymentFrequency';
+import { syncTermsOfferFromOfferDecision } from '../services/syncTermsOfferFromOfferDecision';
 
 const authUserFromReq = (req: Request): AuthenticatedUser | null =>
   (req as any).user?.id
@@ -76,6 +83,7 @@ const mapOfferDecisionToApi = (row: any) => {
     ourRemit,
     totalRemit,
     refinanceAmount,
+    previousDealDate,
     declineReason,
     createdAt,
     updatedAt,
@@ -99,6 +107,7 @@ const mapOfferDecisionToApi = (row: any) => {
     ourRemit,
     totalRemit,
     refinanceAmount,
+    previousDealDate,
     declineReason,
     createdAt,
     updatedAt,
@@ -123,6 +132,7 @@ class OfferDecisionController {
         ourRemit,
         totalRemit,
         refinanceAmount,
+        previousDealDate,
       } = req.body;
 
       if (!rawApplication) {
@@ -183,6 +193,9 @@ class OfferDecisionController {
         ourRemit: parseNumber(ourRemit),
         totalRemit: parseNumber(totalRemit),
         refinanceAmount: parseNumber(refinanceAmount),
+        previousDealDate: previousDealDate
+          ? new Date(String(previousDealDate))
+          : null,
         declineReason: null,
       };
 
@@ -203,17 +216,28 @@ class OfferDecisionController {
       if ('ourRemit' in body) updateData.ourRemit = parseNumber(ourRemit);
       if ('totalRemit' in body) updateData.totalRemit = parseNumber(totalRemit);
       if ('refinanceAmount' in body) updateData.refinanceAmount = parseNumber(refinanceAmount);
+      if ('previousDealDate' in body) {
+        updateData.previousDealDate = previousDealDate
+          ? new Date(String(previousDealDate))
+          : null;
+      }
 
-      const priorOfferDecision = await prisma.offerDecision.findUnique({
-        where: { applicationId: app.id },
-        select: {
-          offer: true,
-          rate: true,
-          totalRemit: true,
-          term: true,
-          frequency: true,
-        },
-      });
+      const [priorOfferDecision, existingContract] = await Promise.all([
+        prisma.offerDecision.findUnique({
+          where: { applicationId: app.id },
+          select: {
+            offer: true,
+            rate: true,
+            totalRemit: true,
+            term: true,
+            frequency: true,
+          },
+        }),
+        prisma.contract.findUnique({
+          where: { applicationId: app.id },
+          select: { id: true, status: true, offerId: true },
+        }),
+      ]);
 
       const result = await prisma.offerDecision.upsert({
         where: { applicationId: app.id },
@@ -239,72 +263,187 @@ class OfferDecisionController {
           ? (Number(offerForCommission) * commissionPercentage) / 100
           : null;
 
-      try {
-        await prisma.application.update({
-          where: { id: app.id },
-          data: { commissionAmount: newCommissionAmount },
-        });
-      } catch (commissionErr) {
-        // Don't fail the offer save if mirroring the commission amount fails.
-        console.error(
-          'OfferDecision upsert: failed to update Application.commissionAmount',
-          commissionErr,
-        );
-      }
-
-      try {
-        const existingContract = await prisma.contract.findUnique({
-          where: { applicationId: app.id },
-          select: { id: true },
-        });
-        const offerChanged = offerDecisionValuesChanged(priorOfferDecision, {
-          offer: result.offer,
-          rate: result.rate,
-          totalRemit: result.totalRemit,
-          term: result.term,
-          frequency: result.frequency,
-        });
-        if (
-          existingContract &&
+      const decisionNorm = String(decision).trim().toLowerCase();
+      const isApprovedDecision = decisionNorm === 'approved';
+      const movedToContractPending =
+        isApprovedDecision && shouldAdvanceApplicationToContractPending(app);
+      const offerChanged = offerDecisionValuesChanged(priorOfferDecision, {
+        offer: result.offer,
+        rate: result.rate,
+        totalRemit: result.totalRemit,
+        term: result.term,
+        frequency: result.frequency,
+      });
+      const queueAfterSave = movedToContractPending
+        ? APPLICATION_QUEUE_CONTRACT_PENDING
+        : app.currentQueue;
+      const needsContractReinitiation = Boolean(
+        existingContract &&
           offerChanged &&
-          isQueueEligibleForContractReinitiation(app.currentQueue)
-        ) {
-          await flagNeedsContractReinitiation(app.id);
-          await recordContractWorkflowActivityLog(
-            app.id,
-            'REINITIATION_REQUIRED',
-            {
-              user: authUserFromReq(req),
-              req,
-              actorName: String((req as any).user?.name || ''),
-              source: 'offerDecisionController.upsert',
-            },
-            {
-              previousStatus: `${app.currentQueue ?? ''} / ${app.currentState ?? ''}`.trim(),
-              metadata: {
-                contractId: existingContract.id,
-                priorOffer: priorOfferDecision?.offer ?? null,
-                newOffer: result.offer ?? null,
-                priorRate: priorOfferDecision?.rate ?? null,
-                newRate: result.rate ?? null,
-                priorTotalRemit: priorOfferDecision?.totalRemit ?? null,
-                newTotalRemit: result.totalRemit ?? null,
-              },
-            },
-          );
-        }
-      } catch (reinitErr) {
-        console.error(
-          'OfferDecision upsert: failed to flag contract reinitiation',
-          reinitErr,
-        );
+          isQueueEligibleForContractReinitiation(queueAfterSave),
+      );
+
+      const applicationPatch: Record<string, unknown> = {
+        commissionAmount: newCommissionAmount,
+      };
+      if (movedToContractPending) {
+        Object.assign(applicationPatch, contractPendingApplicationUpdateData());
+      }
+      if (needsContractReinitiation) {
+        applicationPatch.needsContractReinitiation = true;
+        applicationPatch.isoUpdatedOfferApproved = false;
       }
 
-      return res.status(200).json({
+      const sideEffects: Promise<unknown>[] = [
+        prisma.application.update({
+          where: { id: app.id },
+          data: applicationPatch,
+        }).catch((commissionErr) => {
+          console.error(
+            'OfferDecision upsert: failed to update Application after offer save',
+            commissionErr,
+          );
+        }),
+      ];
+
+      if (isApprovedDecision) {
+        sideEffects.push(
+          syncTermsOfferFromOfferDecision(app.id, authUserFromReq(req)?.id ?? null, {
+            offerDecision: result,
+            application: app,
+          }).catch((termsSyncErr) => {
+            console.error(
+              'OfferDecision upsert: failed to sync TermsOffer from OfferDecision',
+              termsSyncErr,
+            );
+          }),
+        );
+
+        if (existingContract && existingContract.status === 'DRAFT') {
+          const offerAmt =
+            result.offer != null && Number.isFinite(Number(result.offer))
+              ? Number(result.offer)
+              : null;
+          const totalAmt =
+            result.totalRemit != null && Number.isFinite(Number(result.totalRemit))
+              ? Number(result.totalRemit)
+              : null;
+          const moneyPatch: Record<string, unknown> = {};
+          if (offerAmt != null) {
+            moneyPatch.approvedAmount = offerAmt;
+            moneyPatch.purchaseAmount = String(offerAmt);
+          }
+          if (totalAmt != null) {
+            moneyPatch.totalAmount = totalAmt;
+            moneyPatch.purchasePrice = String(totalAmt);
+          }
+          if (result.id && existingContract.offerId !== result.id) {
+            moneyPatch.offerId = result.id;
+          }
+          if (Object.keys(moneyPatch).length > 0) {
+            sideEffects.push(
+              prisma.contract.update({
+                where: { id: existingContract.id },
+                data: moneyPatch,
+              }).catch((contractSyncErr) => {
+                console.error(
+                  'OfferDecision upsert: failed to sync draft Contract amounts from OfferDecision',
+                  contractSyncErr,
+                );
+              }),
+            );
+          }
+        }
+      }
+
+      await Promise.all(sideEffects);
+
+      const previousStatus =
+        `${app.currentQueue ?? ''} / ${app.currentState ?? ''}`.trim();
+      const authUser = authUserFromReq(req);
+      const actorName = String((req as any).user?.name || '').trim();
+
+      const currentQueue = movedToContractPending
+        ? APPLICATION_QUEUE_CONTRACT_PENDING
+        : app.currentQueue ?? null;
+      const currentState = movedToContractPending
+        ? APPLICATION_STATE_CONTRACT_PENDING
+        : app.currentState ?? null;
+
+      res.status(200).json({
         success: true,
         message: 'Offer decision saved successfully',
         data: mapOfferDecisionToApi(result),
+        meta: {
+          movedToContractPending,
+          application: {
+            id: app.id,
+            _id: app.id,
+            applicationId: app.applicationId,
+            currentQueue,
+            currentState,
+            needsContractReinitiation:
+              needsContractReinitiation || Boolean(app.needsContractReinitiation),
+            commissionAmount: newCommissionAmount,
+            updatedAt: new Date().toISOString(),
+          },
+        },
       });
+
+      // Activity logs are not required for the save response; keep them off the critical path.
+      if (movedToContractPending) {
+        const actorPrefix = actorName || authUser?.role || 'User';
+        void createApplicationActivityLog({
+          applicationId: app.id,
+          user: authUser,
+          req,
+          actionType: 'QUEUE_CHANGED',
+          actionDescription: `${actorPrefix} saved offer and moved deal to Contract Pending.`,
+          previousStatus,
+          currentStatus: 'Contract Pending / CONTRACT_PENDING',
+          metadata: {
+            source: 'offerDecisionController.upsert',
+            offer: result.offer ?? null,
+          },
+        }).catch((queueErr) => {
+          console.error(
+            'OfferDecision upsert: failed to log Contract Pending queue change',
+            queueErr,
+          );
+        });
+      }
+
+      if (needsContractReinitiation && existingContract) {
+        void recordContractWorkflowActivityLog(
+          app.id,
+          'REINITIATION_REQUIRED',
+          {
+            user: authUser,
+            req,
+            actorName,
+            source: 'offerDecisionController.upsert',
+          },
+          {
+            previousStatus,
+            metadata: {
+              contractId: existingContract.id,
+              priorOffer: priorOfferDecision?.offer ?? null,
+              newOffer: result.offer ?? null,
+              priorRate: priorOfferDecision?.rate ?? null,
+              newRate: result.rate ?? null,
+              priorTotalRemit: priorOfferDecision?.totalRemit ?? null,
+              newTotalRemit: result.totalRemit ?? null,
+            },
+          },
+        ).catch((reinitErr) => {
+          console.error(
+            'OfferDecision upsert: failed to log contract reinitiation',
+            reinitErr,
+          );
+        });
+      }
+
+      return;
     } catch (error) {
       console.error('OfferDecision upsert error:', error);
       return res.status(500).json({

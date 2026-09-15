@@ -108,6 +108,10 @@ router.get(
     '/operations-dashboard-recent-cases',
     applicationController.getOperationsDashboardRecentCases.bind(applicationController),
 );
+router.get(
+    '/operations-dashboard-payment-performance',
+    applicationController.getOperationsDashboardPaymentPerformance.bind(applicationController),
+);
 
 // Get monthly trend stats (approved & funded amounts per month)
 router.get('/stats/trend', applicationController.getMonthlyTrend.bind(applicationController));
@@ -245,11 +249,11 @@ router.post('/:id/payment-mail-logs', applicationController.createPaymentMailLog
 // Duplicate applications (dedupes) - UW/Admin only
 router.get('/:id/duplicates', applicationController.getDuplicates.bind(applicationController));
 
-// Recently Deleted: restore to scrubber (Super Admin / Operations)
+// Recently Deleted: restore to previous queue/state (Super Admin / Operations)
 router.post(
-    '/:id/restore-to-scrubber',
+    '/:id/restore',
     requireRoles('SUPER_ADMIN', 'OPERATIONS'),
-    applicationController.restoreApplicationToScrubber.bind(applicationController),
+    applicationController.restoreApplication.bind(applicationController),
 );
 
 // Recently Deleted: permanent removal (Super Admin / Operations)

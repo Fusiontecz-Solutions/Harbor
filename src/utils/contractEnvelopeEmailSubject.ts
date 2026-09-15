@@ -6,39 +6,16 @@ export const CONTRACT_ENVELOPE_LENDER_NAME = String(
   process.env.DOCUSIGN_EMAIL_LENDER_NAME || EMAIL_BRAND_DISPLAY_NAME,
 ).trim();
 
-function parseContractOfferAmount(value: unknown): number | null {
-  if (value == null || value === '') return null;
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-  const cleaned = String(value).replace(/[$,\s]/g, '').trim();
-  if (!cleaned) return null;
-  const n = Number(cleaned);
-  return Number.isFinite(n) ? n : null;
-}
-
-export function formatContractOfferAmountForSubject(
-  value?: number | string | null,
-): string {
-  const amount = parseContractOfferAmount(value);
-  if (amount == null) return '$0.00';
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(amount);
-}
-
-/** Contract envelope subject / PDF name: {FunderName}: BusinessName $12,345.67 */
+/** Contract envelope subject / PDF name: {FunderName}: BusinessName */
 export function buildContractEnvelopeEmailSubject(
   businessName: string,
-  offerAmount?: number | string | null,
+  _offerAmount?: number | string | null,
   funderName?: string | null,
 ): string {
   const business = String(businessName || '').trim() || 'Business';
-  const amount = formatContractOfferAmountForSubject(offerAmount);
   const lender =
     String(funderName || '').trim() || CONTRACT_ENVELOPE_LENDER_NAME;
-  return `${lender}: ${business} ${amount}`;
+  return `${lender}: ${business}`;
 }
 
 /** ACH / standalone subject / PDF name: {FunderName}: BusinessName - ACH */

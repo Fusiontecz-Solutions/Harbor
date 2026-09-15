@@ -55,8 +55,11 @@ export function isAllianceBridgeFunder(funderName?: string | null): boolean {
 }
 
 /**
- * Coordinate layout for main contract PDF.
- * Only the Harbor `contract` layout ships; funder-scoped PDFs still use `funder_<uuid>` storage keys.
+ * Coordinate layout for the main contract PDF.
+ * Harbor View Capital and Clear Capital both start from `contract.layout.json`.
+ * Clear Capital's uploaded PDF gets measured page-1 / page-13 / page-20 offsets
+ * in `applyClearCapitalMainContractLayout` (taller header, shorter funder name wrap).
+ * Funder-scoped PDFs still use `funder_<uuid>` storage keys.
  */
 export function resolveMainContractCoordinateLayoutKey(_options?: {
   funderName?: string | null;
