@@ -95,6 +95,8 @@ export async function sendTrackedPaymentTemplateMail(
   }
 
   try {
+    // Skip the stub outbound row — recordCommunicationAudit creates the tracked
+    // ocid row that SendGrid webhooks update (avoids a duplicate stuck on "sent").
     paymentLog = await insertPaymentMailLogRecord(
       access.application.id,
       authUser,
@@ -108,6 +110,7 @@ export async function sendTrackedPaymentTemplateMail(
         status: 'sent',
       },
       req,
+      { createOutbound: false },
     );
 
     const summary = `Sent ${input.category} "${input.templateName}" to ${input.to}`;

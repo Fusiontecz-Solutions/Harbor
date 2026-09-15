@@ -253,6 +253,7 @@ model Application {
   ApplicationActivityLog          ApplicationActivityLog[]
   files                           ApplicationFile[]
   questionResponses               ApplicationQuestionResponse[]
+  backgroundCheck                 BackgroundCheck?
   BankAnalysis                    BankAnalysis[]
   bankDetails                     BankDetail[]
   businessInfo                    BusinessInfo?

@@ -6,6 +6,7 @@ import { resolveAuditLogUserId } from '../middleware/authMiddleware';
 import type { AuthenticatedUser } from './applicationService';
 import { createApplicationActivityLog } from './applicationActivityLogService';
 import { inferRecipientTypeFromCategory } from './outboundCommunicationService';
+import { isPayoffOrZeroBalanceLetterTemplate } from '../utils/payoffOrZeroBalanceLetter';
 
 /** Local stand-in after PaymentMailLog Prisma model removal (contract-workflow cleanup). */
 export type PaymentMailLogStatus = 'QUEUED' | 'SENT' | 'FAILED';
@@ -324,6 +325,13 @@ export async function insertPaymentMailLogRecord(
   user: AuthenticatedUser | null,
   input: CreatePaymentMailLogInput,
   req?: Request | null,
+  options?: {
+    /**
+     * When false, only allocate the paymentMailLogId (no outbound row).
+     * Use with {@link recordCommunicationAudit}, which creates the tracked ocid row.
+     */
+    createOutbound?: boolean;
+  },
 ) {
   const prismaStatus = toPrismaMailLogStatus(input.status);
   if (!prismaStatus) {
@@ -345,25 +353,27 @@ export async function insertPaymentMailLogRecord(
     createdById,
     createdAt: new Date(),
   };
-  await prisma.outbound_communications.create({
-    data: {
-      applicationId,
-      channel: 'TEMPLATE',
-      recipientType: inferRecipientTypeFromCategory(input.category),
-      recipient: input.recipient,
-      subject: input.subject,
-      body: input.body?.trim() ? input.body : null,
-      templateName: input.templateName,
-      status: input.status,
-      createdById,
-      metadata: {
-        paymentMailLogId: log.id,
-        dealKey: input.dealKey,
-        category: input.category,
-        viewType: 'payment_mail',
+  if (options?.createOutbound !== false) {
+    await prisma.outbound_communications.create({
+      data: {
+        applicationId,
+        channel: 'TEMPLATE',
+        recipientType: inferRecipientTypeFromCategory(input.category),
+        recipient: input.recipient,
+        subject: input.subject,
+        body: input.body?.trim() ? input.body : null,
+        templateName: input.templateName,
+        status: input.status,
+        createdById,
+        metadata: {
+          paymentMailLogId: log.id,
+          dealKey: input.dealKey,
+          category: input.category,
+          viewType: 'payment_mail',
+        },
       },
-    },
-  });
+    });
+  }
   return log;
 }
 
@@ -598,4 +608,192 @@ export async function listPaymentMailLogs(applicationId: string, user: Authentic
   });
 
   return { forbidden: false, notFound: false, logs };
+}
+
+/** Latest Payoff / Zero Balance letter delivery status for Letters list. */
+export type ApplicationLetterStatus = {
+  status: PaymentMailLogApiStatus;
+  templateName: string;
+  letterType: 'payoff' | 'zero_balance';
+  recipient: string | null;
+  sentAt: string | null;
+};
+
+function resolveLetterTypeFromTemplateName(
+  templateName: string,
+): 'payoff' | 'zero_balance' {
+  const n = String(templateName || '').trim().toLowerCase();
+  if (n.includes('zero balance')) return 'zero_balance';
+  return 'payoff';
+}
+
+function resolveOutboundLetterDisplayStatus(
+  status: string | null | undefined,
+  metadata: unknown,
+): PaymentMailLogApiStatus {
+  const delivery = deliveryMetaFromOutboundMetadata(metadata);
+  if (delivery) {
+    const fromTimeline = statusFromDeliveryTimeline(delivery);
+    if (fromTimeline) return fromTimeline as PaymentMailLogApiStatus;
+  }
+
+  // Column status is updated by the SendGrid webhook; prefer it over stale
+  // metadata.status left at "sent" from the initial send audit.
+  const raw = String(status || '').trim().toLowerCase();
+  if (raw === 'processed') return 'sent';
+  if (raw && raw !== 'queued') {
+    return raw as PaymentMailLogApiStatus;
+  }
+
+  const metaStatus =
+    metadata &&
+    typeof metadata === 'object' &&
+    !Array.isArray(metadata) &&
+    typeof (metadata as Record<string, unknown>).status === 'string'
+      ? String((metadata as Record<string, unknown>).status).trim().toLowerCase()
+      : '';
+  if (metaStatus) return metaStatus as PaymentMailLogApiStatus;
+  if (raw === 'processed') return 'sent';
+  return (raw || 'queued') as PaymentMailLogApiStatus;
+}
+
+function letterStatusRank(status: PaymentMailLogApiStatus): number {
+  switch (status) {
+    case 'spam':
+      return 60;
+    case 'bounced':
+    case 'dropped':
+    case 'failed':
+      return 50;
+    case 'clicked':
+      return 40;
+    case 'opened':
+      return 30;
+    case 'delivered':
+      return 20;
+    case 'deferred':
+      return 15;
+    case 'sent':
+      return 10;
+    case 'queued':
+      return 5;
+    default:
+      return 0;
+  }
+}
+
+/**
+ * Batch-load the latest Payoff and Zero Balance letter statuses per application
+ * (SendGrid webhook updates live on `outbound_communications`).
+ *
+ * Returns up to one status per letter type so the Letters list can show both
+ * when both were sent. Within a type, prefer strongest delivery timeline (and
+ * newest createdAt on ties) — a send may create stub + tracked ocid rows.
+ */
+export async function getLatestLetterStatusesByApplicationIds(
+  applicationIds: string[],
+): Promise<Map<string, ApplicationLetterStatus[]>> {
+  const result = new Map<string, ApplicationLetterStatus[]>();
+  const uniqueIds = [...new Set(applicationIds.map((id) => String(id || '').trim()).filter(Boolean))];
+  if (!uniqueIds.length) return result;
+
+  const rows = await prisma.outbound_communications.findMany({
+    where: {
+      applicationId: { in: uniqueIds },
+      channel: 'TEMPLATE',
+      OR: [
+        { templateName: { contains: 'payoff', mode: 'insensitive' } },
+        { templateName: { contains: 'pay off', mode: 'insensitive' } },
+        { templateName: { contains: 'zero balance', mode: 'insensitive' } },
+      ],
+    },
+    orderBy: { createdAt: 'desc' },
+    select: {
+      applicationId: true,
+      templateName: true,
+      status: true,
+      metadata: true,
+      recipient: true,
+      createdAt: true,
+    },
+  });
+
+  type Candidate = {
+    applicationId: string;
+    templateName: string;
+    letterType: 'payoff' | 'zero_balance';
+    status: PaymentMailLogApiStatus;
+    recipient: string | null;
+    sentAt: string | null;
+    rank: number;
+    createdAtMs: number;
+  };
+
+  /** Key: `${applicationId}::${letterType}` */
+  const bestByAppType = new Map<string, Candidate>();
+
+  for (const row of rows) {
+    const applicationId = row.applicationId;
+    if (!applicationId) continue;
+    const templateName = String(row.templateName || '').trim();
+    if (!isPayoffOrZeroBalanceLetterTemplate(templateName)) continue;
+
+    const letterType = resolveLetterTypeFromTemplateName(templateName);
+    const delivery = deliveryMetaFromOutboundMetadata(row.metadata);
+    const status = resolveOutboundLetterDisplayStatus(row.status, row.metadata);
+    const timelineRank = delivery ? deliveryTimelineRank(delivery) : 0;
+    const rank = Math.max(letterStatusRank(status) * 10, timelineRank * 10) + letterStatusRank(status);
+    const createdAtMs = row.createdAt ? row.createdAt.getTime() : 0;
+    const candidate: Candidate = {
+      applicationId,
+      templateName,
+      letterType,
+      status,
+      recipient: row.recipient?.trim() ? row.recipient.trim() : null,
+      sentAt:
+        delivery?.sentAt ||
+        delivery?.deliveredAt ||
+        (row.createdAt ? row.createdAt.toISOString() : null),
+      rank,
+      createdAtMs,
+    };
+
+    const key = `${applicationId}::${letterType}`;
+    const prior = bestByAppType.get(key);
+    if (
+      !prior ||
+      candidate.rank > prior.rank ||
+      (candidate.rank === prior.rank && candidate.createdAtMs > prior.createdAtMs)
+    ) {
+      bestByAppType.set(key, candidate);
+    }
+  }
+
+  for (const candidate of bestByAppType.values()) {
+    const entry: ApplicationLetterStatus = {
+      status: candidate.status,
+      templateName: candidate.templateName,
+      letterType: candidate.letterType,
+      recipient: candidate.recipient,
+      sentAt: candidate.sentAt,
+    };
+    const list = result.get(candidate.applicationId) ?? [];
+    list.push(entry);
+    result.set(candidate.applicationId, list);
+  }
+
+  // Stable UI order: Payoff then ZBL; within that, newest sentAt first.
+  for (const [applicationId, list] of result) {
+    list.sort((a, b) => {
+      const typeOrder =
+        (a.letterType === 'payoff' ? 0 : 1) - (b.letterType === 'payoff' ? 0 : 1);
+      if (typeOrder !== 0) return typeOrder;
+      const aAt = a.sentAt ? Date.parse(a.sentAt) : 0;
+      const bAt = b.sentAt ? Date.parse(b.sentAt) : 0;
+      return bAt - aAt;
+    });
+    result.set(applicationId, list);
+  }
+
+  return result;
 }
