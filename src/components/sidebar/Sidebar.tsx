@@ -11,6 +11,7 @@ import Mail from "@mui/icons-material/Mail";
 import Forum from "@mui/icons-material/Forum";
 import Campaign from "@mui/icons-material/Campaign";
 import ContactPhone from "@mui/icons-material/ContactPhone";
+import Dialpad from "@mui/icons-material/Dialpad";
 import {
   Sidebar as UISidebar,
   SidebarHeader,
@@ -65,6 +66,9 @@ type SidebarNavItem = {
   icon: SidebarNavIcon;
   operationsStatus?: string;
   children?: SidebarNavChildItem[];
+  /** Hidden from everyone but admins — e.g. assigning sending numbers, which
+   *  also controls which conversations a user can see. */
+  adminOnly?: boolean;
 };
 
 type SidebarNavSection = {
@@ -109,6 +113,7 @@ const sidebarSections: SidebarNavSection[] = [
       { label: "Inbox", url: "/inbox", icon: Forum },
       { label: "Broadcasts", url: "/broadcasts", icon: Campaign },
       { label: "Contacts & DNC", url: "/messaging-contacts", icon: ContactPhone },
+      { label: "Sending Numbers", url: "/messaging-senders", icon: Dialpad, adminOnly: true },
     ],
   },
   {
@@ -290,6 +295,18 @@ const Sidebar = () => {
   const dispatch: AppDispatch = useDispatch();
   const navigate = useNavigate();
 
+  const userRole = useSelector(
+    (state: RootState) =>
+      state.login?.data?.user?.role ||
+      (typeof window !== "undefined" ? localStorage.getItem("role") : "") ||
+      ""
+  );
+  // Admin-only nav items. The server enforces this too — hiding the link is a
+  // convenience, not the access control.
+  const isAdmin = ["ADMIN", "SUPER_ADMIN"].includes(
+    String(userRole || "").replace(/-/g, "_").toUpperCase()
+  );
+
   const { data: notifications } = useSelector(
     (state: RootState) => state.notifications,
   );
@@ -395,7 +412,9 @@ const Sidebar = () => {
                   <p className={sectionHeadingClass}>{section.title}</p>
                 ) : null}
                 <SidebarMenu className="flex flex-col items-stretch gap-0.5 group-data-[collapsible=icon]:items-center">
-                  {section.items.map((item) => {
+                  {section.items
+                    .filter((item) => !item.adminOnly || isAdmin)
+                    .map((item) => {
                     const childItems = item.children ?? [];
                     const hasChildren = childItems.length > 0;
                     const to = buildNavHref(item);

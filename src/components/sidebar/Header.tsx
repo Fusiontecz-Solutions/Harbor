@@ -1,13 +1,26 @@
 import type { RootState } from "@/redux/store"
-import { PanelLeftClose, PanelLeftOpen } from "lucide-react"
+import { PanelLeftClose, PanelLeftOpen, Phone } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useSelector } from "react-redux"
 import type { user } from "../../redux/slices/authSlice";
 import { useSidebar } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
+import { fetchMessagingConfig, type MessagingConfig } from "@/services/messaging/messagingApi";
 
 import { useLocation, useNavigate } from "react-router";
+
+/** NANP display format; anything else is left as provided. */
+const formatSenderNumber = (value: string): string => {
+    const digits = String(value || "").replace(/\D/g, "");
+    if (digits.length === 11 && digits.startsWith("1")) {
+        return `(${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`;
+    }
+    if (digits.length === 10) {
+        return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+    }
+    return value;
+};
 
 // Map routes to page titles
 const getPageTitle = (pathname: string): string => {
@@ -31,6 +44,30 @@ const Header = () => {
 
     // Get page title based on current route
     const pageTitle = getPageTitle(pathname);
+
+    /**
+     * The number this user sends SMS and broadcasts from.
+     *
+     * Users can be assigned different senders, and their inbox only shows the
+     * conversations on their own number — so which number they are is no longer
+     * something they can assume, and it belongs somewhere always visible rather
+     * than only inside the inbox.
+     *
+     * Failures are swallowed: messaging being unreachable must never break the
+     * header on every other page.
+     */
+    const [messagingConfig, setMessagingConfig] = useState<MessagingConfig | null>(null);
+    useEffect(() => {
+        let cancelled = false;
+        fetchMessagingConfig()
+            .then((cfg) => {
+                if (!cancelled) setMessagingConfig(cfg);
+            })
+            .catch(() => undefined);
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     useEffect(() => {
         setUser(data?.user)
@@ -65,6 +102,26 @@ const Header = () => {
                         </h1>
                     </div>
                     <div className="flex items-center gap-3">
+                        {messagingConfig?.defaultSender && (
+                            <span
+                                className="hidden items-center gap-1.5 rounded-full border border-border bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground md:inline-flex"
+                                title={
+                                    messagingConfig.senderAssigned
+                                        ? "Your assigned sending number — messages and broadcasts you send go out from this number"
+                                        : "You have no number assigned, so you send from the company default"
+                                }
+                            >
+                                <Phone className="h-3.5 w-3.5 shrink-0" />
+                                <span className="font-medium text-foreground">
+                                    {formatSenderNumber(messagingConfig.defaultSender)}
+                                </span>
+                                {messagingConfig.defaultSenderLabel ? (
+                                    <span className="hidden lg:inline">· {messagingConfig.defaultSenderLabel}</span>
+                                ) : !messagingConfig.senderAssigned ? (
+                                    <span className="hidden lg:inline">· default</span>
+                                ) : null}
+                            </span>
+                        )}
                         <ThemeToggle />
                         <button
                             type="button"

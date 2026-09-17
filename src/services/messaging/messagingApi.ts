@@ -61,7 +61,12 @@ export interface Paginated<T> {
 export interface MessagingConfig {
     provider: string;
     configured: boolean;
+    /** The number THIS user sends from — their assignment, or the server default. */
     defaultSender: string | null;
+    /** Label of the assigned sender; null when falling back to the server default. */
+    defaultSenderLabel?: string | null;
+    /** False when nobody has assigned this user a number yet. */
+    senderAssigned?: boolean;
     voiceEnabled: boolean;
 }
 
@@ -494,3 +499,67 @@ export async function fetchCallHistory(params: { page?: number; phoneNumber?: st
 }
 
 export { axiosDelete };
+
+/* -------------------------------------------------------------------- */
+/* Sender registry (admin)                                               */
+/* -------------------------------------------------------------------- */
+
+/**
+ * A number messages go out from. Admins curate these and assign one per user;
+ * an unassigned user falls back to the server's INFOBIP_SENDER.
+ */
+export interface MessagingSender {
+    id: string;
+    phoneNumber: string;
+    label: string | null;
+    isActive: boolean;
+    createdAt: string;
+    /** How many users currently send from this number. */
+    _count?: { users: number };
+}
+
+export interface SenderAssignment {
+    id: string;
+    email: string;
+    firstName: string | null;
+    lastName: string | null;
+    role: string;
+    messagingSender: Pick<MessagingSender, 'id' | 'phoneNumber' | 'label' | 'isActive'> | null;
+}
+
+export async function fetchSenders(): Promise<MessagingSender[]> {
+    const response = await axiosGet(`${BASE}/senders`);
+    return response.data.data ?? [];
+}
+
+export async function createSender(input: {
+    phoneNumber: string;
+    label?: string | null;
+    isActive?: boolean;
+}): Promise<MessagingSender> {
+    const response = await axiosPost(`${BASE}/senders`, input);
+    return response.data.data;
+}
+
+export async function updateSender(
+    id: string,
+    input: { phoneNumber: string; label?: string | null; isActive?: boolean },
+): Promise<MessagingSender> {
+    const response = await axiosPatch(`${BASE}/senders/${id}`, input);
+    return response.data.data;
+}
+
+export async function deleteSender(id: string): Promise<void> {
+    await axiosDelete(`${BASE}/senders/${id}`);
+}
+
+export async function fetchSenderAssignments(): Promise<SenderAssignment[]> {
+    const response = await axiosGet(`${BASE}/senders/assignments`);
+    return response.data.data ?? [];
+}
+
+/** Pass null to clear the assignment, returning the user to the env default. */
+export async function assignSender(userId: string, senderId: string | null): Promise<SenderAssignment> {
+    const response = await axiosPatch(`${BASE}/senders/assignments/${userId}`, { senderId });
+    return response.data.data;
+}

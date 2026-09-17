@@ -457,6 +457,24 @@ export default function Inbox() {
                         </span>
                     </div>
 
+                    {/* Users can be assigned different sending numbers, and the
+                        inbox only shows threads on their own. Stating the number
+                        up front means it is knowable before the first
+                        conversation exists, rather than only inferable from a
+                        thread header afterwards. */}
+                    {config?.defaultSender && (
+                        <p
+                            className="flex items-center gap-1.5 text-[11px] text-muted-foreground"
+                            title="Messages and broadcasts you send go out from this number"
+                        >
+                            <Phone className="h-3 w-3 shrink-0" />
+                            Sending from{' '}
+                            <span className="font-medium text-foreground">
+                                {formatPhone(config.defaultSender)}
+                            </span>
+                        </p>
+                    )}
+
                     <div className="relative">
                         <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                         <Input
