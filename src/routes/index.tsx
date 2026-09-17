@@ -23,6 +23,7 @@ import Broadcasts from '../pages/messaging/Broadcasts';
 import BroadcastDetail from '../pages/messaging/BroadcastDetail';
 import MessagingContacts from '../pages/messaging/MessagingContacts';
 import MessagingSenders from '../pages/messaging/MessagingSenders';
+import LeadDistribution from '../pages/messaging/LeadDistribution';
 import { applicationsPageLoader } from './applicationsLoader';
 
 /** Remount when `?query` changes so list state matches URL + route loader. */
@@ -120,6 +121,7 @@ const Routes: RouteObject[] = [
             { path: 'broadcasts/:broadcastId', element: <BroadcastDetail /> },
             { path: 'messaging-contacts', element: <MessagingContacts /> },
             { path: 'messaging-senders', element: <MessagingSenders /> },
+            { path: 'lead-distribution', element: <LeadDistribution /> },
             { path: 'create-clients', element: <CreateClient /> },
             { path: 'create-clients/:clientId', element: <CreateClient /> },
             {

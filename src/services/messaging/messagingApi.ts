@@ -133,6 +133,8 @@ export interface ImportSummary {
     skippedDuplicate: number;
     columnMapping: Record<string, string>;
     sampleErrors: Array<{ row: number; reason: string }>;
+    /** How many leads each user received, when the sheet was distributed. */
+    assigned?: Array<{ userId: string; count: number }>;
 }
 
 /** One of the clickable stat tiles on a broadcast's detail page. */
@@ -295,12 +297,50 @@ export async function createContact(payload: Partial<MessagingContact> & { phone
  * Upload a spreadsheet. Sent as multipart rather than parsed in the browser so
  * a 50k-row sheet does not become a multi-megabyte JSON body.
  */
-export async function importContacts(file: File, tags?: string[]): Promise<ImportSummary> {
+/**
+ * Upload a lead sheet.
+ *
+ * `assigneeUserIds` deals the rows out across those users round-robin; admins
+ * only. Omit it and the whole sheet stays with the importer, as before.
+ */
+export async function importContacts(
+    file: File,
+    tags?: string[],
+    assigneeUserIds?: string[],
+): Promise<ImportSummary> {
     const formData = new FormData();
     formData.append('file', file);
     if (tags?.length) formData.append('tags', tags.join(','));
+    if (assigneeUserIds?.length) formData.append('assigneeUserIds', assigneeUserIds.join(','));
 
     const response = await axiosPostFormData(`${BASE}/contacts/import`, formData);
+    return response.data.data;
+}
+
+/** Lead counts per owner, for the distribution screen. */
+export interface LeadDistributionRow {
+    userId: string | null;
+    user: {
+        id: string;
+        firstName: string | null;
+        lastName: string | null;
+        email: string;
+        role: string;
+    } | null;
+    count: number;
+}
+
+export async function fetchLeadDistribution(): Promise<LeadDistributionRow[]> {
+    const response = await axiosGet(`${BASE}/contacts/distribution`);
+    return response.data.data ?? [];
+}
+
+/** Re-deal existing leads across users, round-robin. */
+export async function distributeLeads(input: {
+    contactIds: string[];
+    assigneeUserIds: string[];
+}): Promise<{ moved: number; skipped: number }> {
+    const response = await axiosPost(`${BASE}/contacts/distribute`, input);
     return response.data.data;
 }
 
