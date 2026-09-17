@@ -38,6 +38,8 @@ export interface ImportSummary {
   columnMapping: Record<string, string>;
   /** First few rejected rows, so a bad file is diagnosable without a re-run. */
   sampleErrors: Array<{ row: number; reason: string }>;
+  /** How many leads each user received, when the sheet was distributed. */
+  assigned?: Array<{ userId: string; count: number }>;
 }
 
 /**
@@ -162,6 +164,11 @@ export async function importContacts(input: {
   buffer: Buffer;
   ownerUserId?: string | null;
   defaultTags?: string[];
+  /**
+   * Users to deal the leads out to, round-robin. Empty/omitted keeps the old
+   * behaviour of assigning the whole sheet to the importer.
+   */
+  assigneeUserIds?: string[];
 }): Promise<ImportSummary> {
   const { rows, columnMapping } = parseContactSheet(input.buffer);
 
@@ -208,25 +215,42 @@ export async function importContacts(input: {
     valid.push(row);
   });
 
+  /**
+   * Who each row belongs to.
+   *
+   * Dealing round-robin rather than slicing the sheet into blocks means an
+   * even split even when the row count does not divide evenly, and it spreads
+   * any ordering in the source file (sorted by state, say) across everyone
+   * instead of giving one rep every lead from one region.
+   */
+  const assignees = (input.assigneeUserIds ?? []).filter(Boolean);
+  const ownerForIndex = (index: number): string | null =>
+    assignees.length > 0 ? assignees[index % assignees.length] : (input.ownerUserId ?? null);
+
+  const owners = assignees.length > 0 ? assignees : [input.ownerUserId ?? null];
   const existing = await prisma.messagingContact.findMany({
     where: {
       phoneNumber: { in: valid.map((row) => row.phoneNumber) },
-      ownerUserId: input.ownerUserId ?? null,
+      ownerUserId: { in: owners as string[] },
     },
-    select: { phoneNumber: true },
+    select: { phoneNumber: true, ownerUserId: true },
   });
-  const existingNumbers = new Set(existing.map((row) => row.phoneNumber));
+  // Keyed per owner: the same number may legitimately sit in two reps' lists.
+  const existingKeys = new Set(existing.map((row) => `${row.ownerUserId ?? ''}:${row.phoneNumber}`));
+  const assignedCounts = new Map<string, number>();
 
   const BATCH = 500;
   for (let i = 0; i < valid.length; i += BATCH) {
     const slice = valid.slice(i, i + BATCH);
 
     await prisma.$transaction(
-      slice.map((row) =>
-        prisma.messagingContact.upsert({
+      slice.map((row, offset) => {
+        const owner = ownerForIndex(i + offset);
+        if (owner) assignedCounts.set(owner, (assignedCounts.get(owner) ?? 0) + 1);
+        return prisma.messagingContact.upsert({
           where: {
             ownerUserId_phoneNumber: {
-              ownerUserId: input.ownerUserId ?? null,
+              ownerUserId: owner,
               phoneNumber: row.phoneNumber,
             } as never,
           },
@@ -242,7 +266,7 @@ export async function importContacts(input: {
             zip: row.zip,
             tags: [...new Set([...(row.tags ?? []), ...(input.defaultTags ?? [])])],
             source: 'import',
-            ownerUserId: input.ownerUserId ?? null,
+            ownerUserId: owner,
           },
           update: {
             // Only overwrite fields the sheet actually supplied — a partial
@@ -257,12 +281,14 @@ export async function importContacts(input: {
             ...(row.zip ? { zip: row.zip } : {}),
             ...(row.tags?.length ? { tags: row.tags } : {}),
           },
-        }),
-      ),
+        });
+      }),
     );
   }
 
-  const updated = valid.filter((row) => existingNumbers.has(row.phoneNumber)).length;
+  const updated = valid.filter((row, index) =>
+    existingKeys.has(`${ownerForIndex(index) ?? ''}:${row.phoneNumber}`),
+  ).length;
 
   return {
     totalRows: rows.length,
@@ -272,6 +298,7 @@ export async function importContacts(input: {
     skippedDuplicate,
     columnMapping,
     sampleErrors,
+    assigned: [...assignedCounts.entries()].map(([userId, count]) => ({ userId, count })),
   };
 }
 
@@ -280,6 +307,11 @@ export async function listContacts(params: {
   pageSize?: number;
   search?: string;
   status?: 'ACTIVE' | 'BLOCKED';
+  /**
+   * Restrict to leads owned by these users. `null`/omitted means no
+   * restriction (admins); an array scopes a rep to their own leads.
+   */
+  ownerUserIds?: string[] | null;
 }) {
   const page = Math.max(1, Number(params.page) || 1);
   const pageSize = Math.min(200, Math.max(1, Number(params.pageSize) || 50));
@@ -287,6 +319,13 @@ export async function listContacts(params: {
 
   const where: Record<string, unknown> = {};
   if (params.status) where.status = params.status;
+
+  // Scope to the caller's own leads. An empty array means they own none, so
+  // they see none — failing closed, since the alternative shows them someone
+  // else's list.
+  if (Array.isArray(params.ownerUserIds)) {
+    where.ownerUserId = { in: params.ownerUserIds };
+  }
 
   if (search) {
     const normalized = normalizePhoneNumber(search);
@@ -333,4 +372,81 @@ export async function createContact(input: ImportedRow & { ownerUserId?: string 
       clientId: input.clientId ?? null,
     },
   });
+}
+
+/**
+ * Deal a set of leads out across users, round-robin.
+ *
+ * Used to hand out an unassigned batch, or to rebalance when someone leaves.
+ * Ownership is part of the contact's unique key, so moving a lead to a user who
+ * already has that number would collide — those are skipped and reported
+ * rather than failing the whole batch.
+ */
+export async function distributeLeads(input: {
+  contactIds: string[];
+  assigneeUserIds: string[];
+}): Promise<{ moved: number; skipped: number }> {
+  const assignees = input.assigneeUserIds.filter(Boolean);
+  if (assignees.length === 0) throw new Error('Pick at least one user to distribute to');
+  if (input.contactIds.length === 0) return { moved: 0, skipped: 0 };
+
+  const contacts = await prisma.messagingContact.findMany({
+    where: { id: { in: input.contactIds } },
+    select: { id: true, phoneNumber: true, ownerUserId: true },
+  });
+
+  const clashes = await prisma.messagingContact.findMany({
+    where: {
+      phoneNumber: { in: contacts.map((c) => c.phoneNumber) },
+      ownerUserId: { in: assignees },
+    },
+    select: { id: true, phoneNumber: true, ownerUserId: true },
+  });
+  const taken = new Set(clashes.map((c) => `${c.ownerUserId}:${c.phoneNumber}`));
+
+  let moved = 0;
+  let skipped = 0;
+
+  for (let index = 0; index < contacts.length; index += 1) {
+    const contact = contacts[index];
+    const owner = assignees[index % assignees.length];
+
+    if (contact.ownerUserId === owner) continue;
+    if (taken.has(`${owner}:${contact.phoneNumber}`)) {
+      skipped += 1;
+      continue;
+    }
+
+    await prisma.messagingContact.update({
+      where: { id: contact.id },
+      data: { ownerUserId: owner },
+    });
+    taken.add(`${owner}:${contact.phoneNumber}`);
+    moved += 1;
+  }
+
+  return { moved, skipped };
+}
+
+/** Lead counts per owner, for the distribution screen. */
+export async function leadDistributionSummary() {
+  const grouped = await prisma.messagingContact.groupBy({
+    by: ['ownerUserId'],
+    _count: { _all: true },
+  });
+
+  const userIds = grouped.map((g) => g.ownerUserId).filter(Boolean) as string[];
+  const users = await prisma.user.findMany({
+    where: { id: { in: userIds } },
+    select: { id: true, firstName: true, lastName: true, email: true, role: true },
+  });
+  const byId = new Map(users.map((u) => [u.id, u]));
+
+  return grouped
+    .map((row) => ({
+      userId: row.ownerUserId,
+      user: row.ownerUserId ? byId.get(row.ownerUserId) ?? null : null,
+      count: row._count._all,
+    }))
+    .sort((a, b) => b.count - a.count);
 }

@@ -51,6 +51,9 @@ router.delete('/senders/:id', messagingSenderController.remove.bind(messagingSen
 router.get('/contacts', messagingContactController.list.bind(messagingContactController));
 router.get('/contacts/status', messagingContactController.status.bind(messagingContactController));
 router.get('/contacts/profile', messagingContactController.profile.bind(messagingContactController));
+/* Lead distribution (admin). Declared before `/contacts/:id`. */
+router.get('/contacts/distribution', messagingContactController.distribution.bind(messagingContactController));
+router.post('/contacts/distribute', messagingContactController.distribute.bind(messagingContactController));
 router.post('/contacts', messagingContactController.create.bind(messagingContactController));
 router.post('/contacts/import', messagingContactController.import.bind(messagingContactController));
 router.post('/contacts/block', messagingContactController.block.bind(messagingContactController));

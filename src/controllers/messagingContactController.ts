@@ -6,9 +6,12 @@ import type { Request, Response } from 'express';
 import prisma from '../config/prismaClient';
 import {
   createContact,
+  distributeLeads,
   importContacts,
+  leadDistributionSummary,
   listContacts,
 } from '../services/messaging/contact.service';
+import { isPrivilegedMessagingRole } from '../services/messaging/sender.service';
 import { findClientByPhone, listClientRecipients } from '../services/messaging/clientRecipients.service';
 import { normalizePhoneNumber } from '../services/messaging/phone';
 import {
@@ -26,7 +29,13 @@ class MessagingContactController {
   async list(req: Request, res: Response): Promise<void> {
     try {
       const status = req.query.status ? String(req.query.status).toUpperCase() : undefined;
+      // A rep sees only the leads assigned to them; admins see everything.
+      const ownerUserIds = isPrivilegedMessagingRole(req.user?.role)
+        ? null
+        : [actorId(req) ?? ''];
+
       const result = await listContacts({
+        ownerUserIds,
         page: Number(req.query.page) || 1,
         pageSize: Number(req.query.pageSize) || 50,
         search: String(req.query.search ?? ''),
@@ -89,9 +98,26 @@ class MessagingContactController {
         return;
       }
 
+      // Distributing across other people is an admin action; a non-admin
+      // importing a sheet still gets the old behaviour of keeping it.
+      const rawAssignees = req.body?.assigneeUserIds;
+      const assigneeUserIds = (
+        Array.isArray(rawAssignees)
+          ? rawAssignees.map(String)
+          : String(rawAssignees ?? '')
+              .split(',')
+              .map((id) => id.trim())
+      ).filter(Boolean);
+
+      if (assigneeUserIds.length > 0 && !isPrivilegedMessagingRole(req.user?.role)) {
+        res.status(403).json({ success: false, message: 'Only admins can distribute leads' });
+        return;
+      }
+
       const summary = await importContacts({
         buffer: upload.buffer,
         ownerUserId: actorId(req),
+        assigneeUserIds,
         defaultTags: Array.isArray(req.body?.tags)
           ? req.body.tags.map(String)
           : String(req.body?.tags ?? '')
@@ -218,6 +244,44 @@ class MessagingContactController {
     } catch (err) {
       console.error('[messaging:contacts] client list failed:', err);
       res.status(500).json({ success: false, message: 'Failed to load clients' });
+    }
+  }
+
+  /** GET /messaging/contacts/distribution — lead counts per user (admin). */
+  async distribution(req: Request, res: Response): Promise<void> {
+    try {
+      if (!isPrivilegedMessagingRole(req.user?.role)) {
+        res.status(403).json({ success: false, message: 'Forbidden: admins only' });
+        return;
+      }
+      res.json({ success: true, data: await leadDistributionSummary() });
+    } catch (err) {
+      console.error('[messaging:contacts] distribution failed:', err);
+      res.status(500).json({ success: false, message: (err as Error)?.message || 'Failed to load distribution' });
+    }
+  }
+
+  /**
+   * POST /messaging/contacts/distribute — deal existing leads out across users.
+   * Body: { contactIds: string[], assigneeUserIds: string[] }
+   */
+  async distribute(req: Request, res: Response): Promise<void> {
+    try {
+      if (!isPrivilegedMessagingRole(req.user?.role)) {
+        res.status(403).json({ success: false, message: 'Forbidden: admins only' });
+        return;
+      }
+
+      const contactIds = Array.isArray(req.body?.contactIds) ? req.body.contactIds.map(String) : [];
+      const assigneeUserIds = Array.isArray(req.body?.assigneeUserIds)
+        ? req.body.assigneeUserIds.map(String)
+        : [];
+
+      const result = await distributeLeads({ contactIds, assigneeUserIds });
+      res.json({ success: true, data: result });
+    } catch (err) {
+      console.error('[messaging:contacts] distribute failed:', err);
+      res.status(400).json({ success: false, message: (err as Error)?.message || 'Failed to distribute leads' });
     }
   }
 
