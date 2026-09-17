@@ -418,7 +418,7 @@ export default function ContractTab({
     const [achTemplateMappings, setAchTemplateMappings] = useState<AchDocumentTemplateMappingRow[]>([]);
     const [loadingAchMappings, setLoadingAchMappings] = useState(false);
     const [achViewerOpen, setAchViewerOpen] = useState(false);
-    const [_preparingAchViewer, setPreparingAchViewer] = useState(false);
+    const [preparingAchViewer, setPreparingAchViewer] = useState(false);
     /** Which Info Required ACH row feeds the ACH Form modal (first / last picked). */
     const [selectedAchRecordId, setSelectedAchRecordId] = useState<string | null>(null);
     const [pdfUrl, setPdfUrl] = useState<string | null>(null);
@@ -3969,7 +3969,19 @@ export default function ContractTab({
 
                     </div>
                     <div className="flex items-center gap-3">
-                        {/* Send ACH Form button — hidden for now */}
+                        {!isReadOnly ? (
+                            <Button
+                                type="button"
+                                onClick={() => void openAchViewer()}
+                                loading={preparingAchViewer}
+                                disabled={preparingAchViewer || creatingEnvelope}
+                                variant="outline"
+                                className="rounded-md border-[var(--brand)] text-[var(--brand)] hover:bg-[var(--brand)]/10 cursor-pointer px-6 py-2 h-10 font-medium disabled:opacity-70 disabled:cursor-not-allowed"
+                            >
+                                <Landmark className="h-4 w-4 mr-2" />
+                                {preparingAchViewer ? "Opening ACH form..." : "Send ACH Form"}
+                            </Button>
+                        ) : null}
                         {!isReadOnly && hasGeneratedContract ? (
                             <Button
                                 type="button"
