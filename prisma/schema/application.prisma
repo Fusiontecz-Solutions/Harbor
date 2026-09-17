@@ -48,6 +48,9 @@ model User {
   termsOffers                TermsOffer[]
   verificationTokens         VerificationToken[]
   outbound_communications    outbound_communications[]
+  /// Number this user sends from. Null falls back to INFOBIP_SENDER.
+  messagingSenderId          String?                       @db.Uuid
+  messagingSender            MessagingSender?              @relation("UserMessagingSender", fields: [messagingSenderId], references: [id], onDelete: SetNull)
   messagingContacts          MessagingContact[]            @relation("MessagingContactOwner")
   messagingConversations     MessagingConversation[]       @relation("MessagingConversationOwner")
   messagingMessagesSent      MessagingMessage[]            @relation("MessagingMessageSentBy")

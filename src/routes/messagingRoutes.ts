@@ -5,6 +5,7 @@ import messagingContactController from '../controllers/messagingContactControlle
 import messagingDncController from '../controllers/messagingDncController';
 import messagingVoiceController from '../controllers/messagingVoiceController';
 import messagingWebhookController from '../controllers/messagingWebhookController';
+import messagingSenderController from '../controllers/messagingSenderController';
 import { authenticateToken } from '../middleware/authMiddleware';
 
 const router = express.Router();
@@ -34,6 +35,16 @@ router.patch('/conversations/:id/archive', messagingController.setArchived.bind(
 router.delete('/conversations/:id', messagingController.deleteConversation.bind(messagingController));
 router.post('/send', messagingController.sendMessage.bind(messagingController));
 router.get('/unread-count', messagingController.getUnreadCount.bind(messagingController));
+
+/* Sender registry (admin only). Assigning a sender also decides which
+ * conversations a user can see, so these are gated in the controller.
+ * `assignments` is declared before `/:id` so it is not swallowed by it. */
+router.get('/senders/assignments', messagingSenderController.assignments.bind(messagingSenderController));
+router.patch('/senders/assignments/:userId', messagingSenderController.assign.bind(messagingSenderController));
+router.get('/senders', messagingSenderController.list.bind(messagingSenderController));
+router.post('/senders', messagingSenderController.create.bind(messagingSenderController));
+router.patch('/senders/:id', messagingSenderController.update.bind(messagingSenderController));
+router.delete('/senders/:id', messagingSenderController.remove.bind(messagingSenderController));
 
 /* Contacts + spreadsheet import + block controls.
  * `status` is declared before `:id` so it is not swallowed by the param route. */

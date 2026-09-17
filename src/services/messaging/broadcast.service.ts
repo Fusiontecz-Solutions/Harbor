@@ -25,6 +25,7 @@ import {
 } from '../../queues/smsBroadcastQueue';
 import { cacheDel, cacheKeys } from './cache.service';
 import { getDefaultSender } from './infobip.service';
+import { resolveSenderForUser } from './sender.service';
 import { normalizePhoneNumber, normalizeSender } from './phone';
 import { checkSuppressionBulk } from './suppression.service';
 
@@ -71,7 +72,11 @@ export async function createBroadcast(input: CreateBroadcastInput): Promise<{
   const body = String(input.body || '').trim();
   if (!body) throw new Error('Broadcast message body is required');
 
-  const fromNumber = normalizeSender(input.fromNumber?.trim() || getDefaultSender());
+  // A campaign goes out as whoever created it, so recipients replying land in
+  // that user's inbox rather than a shared one.
+  const fromNumber = normalizeSender(
+    input.fromNumber?.trim() || (await resolveSenderForUser(input.createdById)) || getDefaultSender(),
+  );
   if (!fromNumber) throw new Error('No sender configured — set INFOBIP_SENDER or pass fromNumber');
 
   if (!Array.isArray(input.recipients) || input.recipients.length === 0) {

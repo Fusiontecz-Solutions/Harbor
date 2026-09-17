@@ -52,6 +52,31 @@ enum MessagingSuppressionReason {
 
 /// An SMS counterparty. Deduplicated per owning user on the E.164 phone number
 /// so two agents can each hold their own record for the same merchant.
+/// A number messages can be sent FROM.
+///
+/// Senders used to come from INFOBIP_SENDER alone, so every user shared one
+/// number. They are now rows an admin curates and assigns, which lets separate
+/// desks run their own number while the env value stays the fallback for
+/// anyone unassigned.
+///
+/// Kept as a registry rather than a free-text field on the user: a mistyped
+/// number is accepted by us and only fails later at Infobip, with nothing in
+/// the UI explaining why that user's messages stopped going out.
+model MessagingSender {
+  id          String   @id @default(uuid()) @db.Uuid
+  /// E.164 (+19176150642) — normalized on write so it matches inbound `to`.
+  phoneNumber String   @unique
+  /// Human label for the picker ("Sales desk", "Collections").
+  label       String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users User[] @relation("UserMessagingSender")
+
+  @@index([isActive])
+}
+
 model MessagingContact {
   id           String                 @id @default(uuid()) @db.Uuid
   /// E.164 (+15551234567). Always written through normalizePhoneNumber().
