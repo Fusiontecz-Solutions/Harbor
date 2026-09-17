@@ -24,6 +24,11 @@ import {
   upsertContactFromClient,
 } from '../services/messaging/clientRecipients.service';
 import { getDefaultSender, isInfobipConfigured } from '../services/messaging/infobip.service';
+import {
+  resolveSenderDetailForUser,
+  resolveSenderForUser,
+  visibleSendersForUser,
+} from '../services/messaging/sender.service';
 import { normalizePhoneNumber } from '../services/messaging/phone';
 import { dispatchOutboundMessage } from '../services/messaging/sms.service';
 
@@ -44,6 +49,7 @@ class MessagingController {
         page: Number(req.query.page) || 1,
         search: String(req.query.search ?? ''),
         filter: String(req.query.filter ?? 'all'),
+        senderNumbers: await visibleSendersForUser(userId, req.user?.role),
       });
 
       res.json({
@@ -63,10 +69,17 @@ class MessagingController {
       const conversationId = String(req.params.id);
       const conversation = await prisma.messagingConversation.findUnique({
         where: { id: conversationId },
-        select: { id: true },
+        select: { id: true, businessNumber: true },
       });
 
       if (!conversation) {
+        res.status(404).json({ success: false, message: 'Conversation not found' });
+        return;
+      }
+
+      // Scoping the list alone would still leave the thread readable by id.
+      const allowed = await visibleSendersForUser(actorId(req), req.user?.role);
+      if (allowed && !allowed.includes(conversation.businessNumber)) {
         res.status(404).json({ success: false, message: 'Conversation not found' });
         return;
       }
@@ -97,7 +110,9 @@ class MessagingController {
         return;
       }
 
-      const businessNumber = String(req.body?.fromNumber ?? '').trim() || getDefaultSender();
+      // The acting user's assigned sender, falling back to INFOBIP_SENDER.
+      const businessNumber =
+        String(req.body?.fromNumber ?? '').trim() || (await resolveSenderForUser(actorId(req)));
       if (!businessNumber) {
         res.status(400).json({ success: false, message: 'No sender configured — set INFOBIP_SENDER' });
         return;
@@ -264,7 +279,8 @@ class MessagingController {
   /** GET /messaging/unread-count */
   async getUnreadCount(_req: Request, res: Response): Promise<void> {
     try {
-      res.json({ success: true, data: { unreadCount: await getTotalUnread() } });
+      const scope = await visibleSendersForUser(actorId(_req), _req.user?.role);
+      res.json({ success: true, data: { unreadCount: await getTotalUnread(scope) } });
     } catch (err) {
       console.error('[messaging] getUnreadCount failed:', err);
       res.status(500).json({ success: false, message: 'Failed to load unread count' });
@@ -273,12 +289,18 @@ class MessagingController {
 
   /** GET /messaging/config — what the FE needs to render the composer. */
   async getConfig(_req: Request, res: Response): Promise<void> {
+    const sender = await resolveSenderDetailForUser(actorId(_req));
     res.json({
       success: true,
       data: {
         provider: 'infobip',
         configured: isInfobipConfigured(),
-        defaultSender: getDefaultSender() || null,
+        // What THIS user will send as, not the global env value.
+        defaultSender: sender.phoneNumber || getDefaultSender() || null,
+        /** Label of the assigned sender, null when falling back to the env default. */
+        defaultSenderLabel: sender.label,
+        /** False when nobody has assigned this user a number yet. */
+        senderAssigned: sender.assigned,
         voiceEnabled: Boolean(String(process.env.INFOBIP_APPLICATION_ID || '').trim()),
       },
     });

@@ -126,6 +126,8 @@ import {
     enrichPaymentMailLogsForApi,
     createPaymentMailLog as persistPaymentMailLog,
     fromPrismaMailLogStatus,
+    getLatestLetterStatusesByApplicationIds,
+    type ApplicationLetterStatus,
 } from '../services/paymentMailLogService';
 import { extractPdfPlainTextForParsing } from '../services/pdfIngestionService';
 import { normalizeOcrTextForParsing } from '../services/ocrFieldExtraction';
@@ -2004,6 +2006,7 @@ class ApplicationController {
                 sortBy = 'createdAt',
                 sortOrder = 'desc',
                 lite,
+                includeLetterStatus,
             } = req.query;
 
             const authUser = getAuthenticatedUser(req);
@@ -2026,6 +2029,9 @@ class ApplicationController {
             const limitNum = Math.min(Math.max(1, Number(limit) || 10), 500);
             const skip = (pageNum - 1) * limitNum;
             const useLitePayload = String(lite ?? '').trim() === '1';
+            const withLetterStatus =
+                String(includeLetterStatus ?? '').trim() === '1' ||
+                String(includeLetterStatus ?? '').trim().toLowerCase() === 'true';
 
             let where: Prisma.ApplicationWhereInput = {};
 
@@ -2516,6 +2522,13 @@ class ApplicationController {
                 collectionBalanceByApplicationId = new Map();
             }
 
+            let letterStatusesByApplicationId = new Map<string, ApplicationLetterStatus[]>();
+            if (withLetterStatus && apps.length > 0) {
+                letterStatusesByApplicationId = await getLatestLetterStatusesByApplicationIds(
+                    apps.map((app) => app.id),
+                );
+            }
+
             const applications = apps.map((app) => {
                 const dto = mapApplicationToApi(app) as Record<string, unknown>;
                 const bal = collectionBalanceByApplicationId.get(app.id);
@@ -2524,6 +2537,12 @@ class ApplicationController {
                     dto.collectionSumOfRepaid = bal.sumOfRepaid;
                     dto.collectionPaybackAmount = bal.paybackAmount;
                     dto.collectionGrossRepaidDealEconomics = bal.grossRepaidDealEconomics;
+                }
+                if (withLetterStatus) {
+                    const letterStatuses = letterStatusesByApplicationId.get(app.id) ?? [];
+                    // Full list (Payoff + ZBL when both sent) + primary for older clients.
+                    dto.letterStatuses = letterStatuses;
+                    dto.letterStatus = letterStatuses[0] ?? null;
                 }
                 return dto;
             });

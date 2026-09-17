@@ -3,6 +3,11 @@ import {
   isSendGridClickTrackingEnabled,
   isSendGridOpenPixelTrackingEnabled,
 } from '../config/nodemailer';
+import {
+  emitLetterDeliveryStatusRealtime,
+  letterTypeFromTemplateName,
+  shouldBroadcastLetterStatus,
+} from './letterDeliveryStatusRealtime';
 
 /**
  * SendGrid Event Webhook integration
@@ -368,20 +373,110 @@ async function applyEventsToOutbound(ocid: string, events: SendGridEvent[]): Pro
     return true;
   }
 
+  const displayStatus = resolveMailLogDisplayStatus(meta);
+  const priorMeta = asObject(outbound.metadata);
   const mergedMetadata = pruneUndefined({
-    ...asObject(outbound.metadata),
+    ...priorMeta,
+    // Keep top-level metadata.status in sync — list UIs may read it when
+    // tracking is missing on a duplicate stub row from the same send.
+    status: displayStatus,
+    delivery: {
+      ...asObject(priorMeta.delivery),
+      status: displayStatus,
+      sentAt: meta.sentAt,
+      deliveredAt: meta.deliveredAt,
+      openedAt: meta.openedAt,
+      clickedAt: meta.clickedAt,
+      bouncedAt: meta.bouncedAt,
+      openCount: meta.openCount,
+      clickCount: meta.clickCount,
+      lastEvent: meta.lastEvent,
+      lastEventAt: meta.lastEventAt,
+      lastClickedUrl: meta.lastClickedUrl,
+    },
     tracking: trackingMetaToPlain(meta),
   });
 
   await prisma.outbound_communications.update({
     where: { id: ocid },
     data: {
-      status: resolveMailLogDisplayStatus(meta),
+      status: displayStatus,
       metadata: mergedMetadata as object,
     },
   });
 
+  // Same send can also create an untracked stub outbound (payment mail log).
+  // Mirror status onto those siblings so the Letters list never sticks on "sent".
+  const paymentMailLogId =
+    typeof priorMeta.paymentMailLogId === 'string'
+      ? priorMeta.paymentMailLogId.trim()
+      : '';
+  if (paymentMailLogId) {
+    try {
+      const siblings = await prisma.outbound_communications.findMany({
+        where: {
+          id: { not: ocid },
+          metadata: { path: ['paymentMailLogId'], equals: paymentMailLogId },
+        },
+        select: { id: true, metadata: true },
+        take: 10,
+      });
+      for (const sibling of siblings) {
+        const siblingMeta = asObject(sibling.metadata);
+        await prisma.outbound_communications.update({
+          where: { id: sibling.id },
+          data: {
+            status: displayStatus,
+            metadata: pruneUndefined({
+              ...siblingMeta,
+              status: displayStatus,
+              delivery: {
+                ...asObject(siblingMeta.delivery),
+                status: displayStatus,
+                sentAt: meta.sentAt,
+                deliveredAt: meta.deliveredAt,
+                openedAt: meta.openedAt,
+                clickedAt: meta.clickedAt,
+                bouncedAt: meta.bouncedAt,
+                openCount: meta.openCount,
+                clickCount: meta.clickCount,
+                lastEvent: meta.lastEvent,
+                lastEventAt: meta.lastEventAt,
+              },
+              tracking: trackingMetaToPlain(meta),
+            }) as object,
+          },
+        });
+      }
+    } catch (err) {
+      console.warn('[sendgridWebhook] sibling outbound sync failed:', { ocid, err });
+    }
+  }
+
   await propagateToActivityLog(ocid, meta);
+
+  if (
+    outbound.applicationId &&
+    shouldBroadcastLetterStatus(outbound.templateName)
+  ) {
+    emitLetterDeliveryStatusRealtime({
+      applicationId: outbound.applicationId,
+      status: displayStatus,
+      templateName: String(outbound.templateName || '').trim(),
+      letterType: letterTypeFromTemplateName(String(outbound.templateName || '')),
+      recipient: outbound.recipient?.trim() ? outbound.recipient.trim() : null,
+      sentAt: meta.sentAt ?? meta.deliveredAt ?? null,
+      ocid,
+    });
+    console.info('[sendgridWebhook] letter status updated', {
+      ocid,
+      applicationId: outbound.applicationId,
+      status: displayStatus,
+      lastEvent: meta.lastEvent,
+      openCount: meta.openCount,
+    });
+  }
+
   return true;
 }
 

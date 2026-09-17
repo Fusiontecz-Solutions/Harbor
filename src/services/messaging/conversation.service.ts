@@ -34,6 +34,12 @@ export interface ConversationListParams {
   search?: string;
   /** all | unread | broadcast | opted-out */
   filter?: string;
+  /**
+   * Senders whose threads this caller may see. `null` means no restriction
+   * (admins and super admins); an array scopes the inbox to those numbers, so
+   * a rep sees only conversations on the sender assigned to them.
+   */
+  senderNumbers?: string[] | null;
 }
 
 /**
@@ -344,11 +350,21 @@ export async function listConversations(params: ConversationListParams): Promise
   const search = String(params.search ?? '').trim();
   const filter = String(params.filter ?? 'all');
 
-  const cacheKey = cacheKeys.conversationList(params.userId, page, search, filter);
+  const scopeKey = Array.isArray(params.senderNumbers)
+    ? params.senderNumbers.slice().sort().join(',')
+    : 'all';
+  const cacheKey = cacheKeys.conversationList(params.userId, page, search, `${filter}:${scopeKey}`);
   const cached = await cacheGet<{ items: ConversationListItem[]; page: number; hasMore: boolean }>(cacheKey);
   if (cached) return cached;
 
   const where: Prisma.MessagingConversationWhereInput = { isArchived: false };
+
+  // Scope to the caller's sender(s). An empty array means the user has no
+  // usable sender, so they see nothing rather than everything — failing closed
+  // matters here, since the alternative leaks another desk's conversations.
+  if (Array.isArray(params.senderNumbers)) {
+    where.businessNumber = { in: params.senderNumbers };
+  }
 
   if (filter === 'unread') where.unreadCount = { gt: 0 };
   if (filter === 'broadcast') where.hasBroadcastMessage = true;
@@ -458,10 +474,15 @@ export async function markConversationRead(conversationId: string): Promise<void
   await invalidateConversationCaches(conversationId);
 }
 
-export async function getTotalUnread(): Promise<number> {
+export async function getTotalUnread(senderNumbers?: string[] | null): Promise<number> {
   const result = await prisma.messagingConversation.aggregate({
     _sum: { unreadCount: true },
-    where: { isArchived: false },
+    where: {
+      isArchived: false,
+      // Same scoping as the list: the badge must not count threads the user
+      // cannot open.
+      ...(Array.isArray(senderNumbers) ? { businessNumber: { in: senderNumbers } } : {}),
+    },
   });
   return result._sum.unreadCount ?? 0;
 }

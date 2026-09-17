@@ -11,6 +11,7 @@ import { initializeSocketIO } from './socket/index';
 import { testRedisConnection } from './config/redis';
 import { startApplicationApprovalWorker } from './workers/applicationApprovalWorker';
 import { startSmsBroadcastWorker } from './workers/smsBroadcastWorker';
+import { startDeliveryReconciler } from './services/messaging/deliveryReconciler';
 import { verifySuperAdminProxy } from './middleware/verifySuperAdminProxy';
 import { activityLogger } from './middleware/activityLogger';
 import { getDefaultMailFrom, isSendGridConfigured } from './config/nodemailer';
@@ -95,6 +96,9 @@ void testRedisConnection()
     // buckets in services/messaging/tokenBucket.ts, so raising it cannot breach
     // the provider limit.
     startSmsBroadcastWorker();
+    // Pull-side backstop for delivery status: a missed Infobip callback would
+    // otherwise leave a rejected message showing as sent forever.
+    startDeliveryReconciler();
   });
 
 // Initialize Socket.IO

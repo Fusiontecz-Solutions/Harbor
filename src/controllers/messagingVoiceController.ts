@@ -12,9 +12,9 @@ import prisma from '../config/prismaClient';
 import {
   createOutboundCall,
   createWebRtcToken,
-  getDefaultSender,
   toInfobipError,
 } from '../services/messaging/infobip.service';
+import { resolveSenderForUser } from '../services/messaging/sender.service';
 import { normalizePhoneNumber } from '../services/messaging/phone';
 import { checkSuppression } from '../services/messaging/suppression.service';
 
@@ -73,7 +73,8 @@ class MessagingVoiceController {
         return;
       }
 
-      const fromNumber = String(req.body?.fromNumber ?? '').trim() || getDefaultSender();
+      const fromNumber =
+        String(req.body?.fromNumber ?? '').trim() || (await resolveSenderForUser(req.user?.id ?? null));
       const result = await createOutboundCall({ to: toNumber, from: fromNumber });
 
       const call = await prisma.messagingCall.create({
@@ -136,7 +137,8 @@ class MessagingVoiceController {
   async log(req: Request, res: Response): Promise<void> {
     try {
       const toNumber = normalizePhoneNumber(req.body?.toNumber);
-      const fromNumber = String(req.body?.fromNumber ?? '').trim() || getDefaultSender();
+      const fromNumber =
+        String(req.body?.fromNumber ?? '').trim() || (await resolveSenderForUser(req.user?.id ?? null));
       if (!toNumber) {
         res.status(400).json({ success: false, message: 'A valid toNumber is required' });
         return;

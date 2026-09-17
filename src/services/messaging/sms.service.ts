@@ -31,6 +31,7 @@ import {
   toInfobipError,
 } from './infobip.service';
 import { normalizePhoneNumber } from './phone';
+import { resolveSenderForUser } from './sender.service';
 import { checkSuppression } from './suppression.service';
 import { getAccountBucket, getBroadcastBucket } from './tokenBucket';
 
@@ -99,7 +100,10 @@ export async function dispatchOutboundMessage(input: DispatchInput): Promise<Dis
     };
   }
 
-  const fromNumber = input.fromNumber?.trim() || getDefaultSender();
+  // Falls back through the sender assigned to whoever is sending, then the
+  // env default. Broadcasts pass fromNumber explicitly and skip both.
+  const fromNumber =
+    input.fromNumber?.trim() || (await resolveSenderForUser(input.sentById)) || getDefaultSender();
   if (!fromNumber) {
     return {
       status: 'failed',
