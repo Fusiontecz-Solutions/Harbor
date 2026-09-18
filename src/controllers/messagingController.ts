@@ -25,10 +25,12 @@ import {
 } from '../services/messaging/clientRecipients.service';
 import { getDefaultSender, isInfobipConfigured } from '../services/messaging/infobip.service';
 import {
+  isPrivilegedMessagingRole,
   resolveSenderDetailForUser,
   resolveSenderForUser,
   visibleSendersForUser,
 } from '../services/messaging/sender.service';
+import { messagingPerformance } from '../services/messaging/performance.service';
 import { normalizePhoneNumber } from '../services/messaging/phone';
 import { dispatchOutboundMessage } from '../services/messaging/sms.service';
 
@@ -273,6 +275,31 @@ class MessagingController {
     } catch (err) {
       console.error('[messaging] deleteConversation failed:', err);
       res.status(500).json({ success: false, message: (err as Error)?.message || 'Failed to delete conversation' });
+    }
+  }
+
+  /**
+   * GET /messaging/stats/performance?from=&to=
+   *
+   * Per-user messaging performance for the range. Admin-only: it reports on
+   * other people's activity, not the caller's own.
+   */
+  async performance(req: Request, res: Response): Promise<void> {
+    try {
+      if (!isPrivilegedMessagingRole(req.user?.role)) {
+        res.status(403).json({ success: false, message: 'Forbidden: admins only' });
+        return;
+      }
+
+      const data = await messagingPerformance({
+        from: req.query.from ? String(req.query.from) : undefined,
+        to: req.query.to ? String(req.query.to) : undefined,
+      });
+
+      res.json({ success: true, data });
+    } catch (err) {
+      console.error('[messaging] performance failed:', err);
+      res.status(400).json({ success: false, message: (err as Error)?.message || 'Failed to load performance' });
     }
   }
 

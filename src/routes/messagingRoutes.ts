@@ -36,6 +36,9 @@ router.delete('/conversations/:id', messagingController.deleteConversation.bind(
 router.post('/send', messagingController.sendMessage.bind(messagingController));
 router.get('/unread-count', messagingController.getUnreadCount.bind(messagingController));
 
+/* Per-user performance (admin only; gated in the controller). */
+router.get('/stats/performance', messagingController.performance.bind(messagingController));
+
 /* Sender registry (admin only). Assigning a sender also decides which
  * conversations a user can see, so these are gated in the controller.
  * `assignments` is declared before `/:id` so it is not swallowed by it. */
