@@ -603,3 +603,56 @@ export async function assignSender(userId: string, senderId: string | null): Pro
     const response = await axiosPatch(`${BASE}/senders/assignments/${userId}`, { senderId });
     return response.data.data;
 }
+
+/* -------------------------------------------------------------------- */
+/* Performance (admin)                                                   */
+/* -------------------------------------------------------------------- */
+
+export interface PerformanceUserRow {
+    userId: string | null;
+    name: string | null;
+    email: string | null;
+    role: string | null;
+    /** The number this user's inbound traffic is attributed through. */
+    senderNumber: string | null;
+    messagesSent: number;
+    delivered: number;
+    failed: number;
+    campaigns: number;
+    replies: number;
+    optOuts: number;
+}
+
+export interface PerformanceDayRow {
+    day: string;
+    userId: string | null;
+    messagesSent: number;
+    replies: number;
+    optOuts: number;
+}
+
+export interface PerformanceResult {
+    from: string;
+    to: string;
+    totals: {
+        messagesSent: number;
+        delivered: number;
+        failed: number;
+        campaigns: number;
+        replies: number;
+        optOuts: number;
+    };
+    users: PerformanceUserRow[];
+    daily: PerformanceDayRow[];
+    /** Inbound on numbers no user owns — usually the shared default. */
+    unattributedReplies: number;
+    unattributedOptOuts: number;
+}
+
+export async function fetchMessagingPerformance(params: {
+    from?: string;
+    to?: string;
+}): Promise<PerformanceResult> {
+    const response = await axiosGet(`${BASE}/stats/performance`, { params });
+    return response.data.data;
+}

@@ -13,6 +13,7 @@ import Campaign from "@mui/icons-material/Campaign";
 import ContactPhone from "@mui/icons-material/ContactPhone";
 import Dialpad from "@mui/icons-material/Dialpad";
 import GroupAdd from "@mui/icons-material/GroupAdd";
+import Insights from "@mui/icons-material/Insights";
 import {
   Sidebar as UISidebar,
   SidebarHeader,
@@ -109,16 +110,6 @@ const sidebarSections: SidebarNavSection[] = [
     ],
   },
   {
-    title: "COMMUNICATION",
-    items: [
-      { label: "Inbox", url: "/inbox", icon: Forum },
-      { label: "Broadcasts", url: "/broadcasts", icon: Campaign },
-      { label: "Contacts & DNC", url: "/messaging-contacts", icon: ContactPhone },
-      { label: "Sending Numbers", url: "/messaging-senders", icon: Dialpad, adminOnly: true },
-      { label: "Lead Distribution", url: "/lead-distribution", icon: GroupAdd, adminOnly: true },
-    ],
-  },
-  {
     title: "DEAL PIPELINE",
     items: [
       { label: "Applications", url: "/applications", icon: InsertDriveFileIcon },
@@ -148,6 +139,17 @@ const sidebarSections: SidebarNavSection[] = [
         operationsStatus: "Recently_Deleted",
         icon: DeleteOutline,
       },
+    ],
+  },
+  {
+    title: "COMMUNICATION",
+    items: [
+      { label: "Inbox", url: "/inbox", icon: Forum },
+      { label: "Broadcasts", url: "/broadcasts", icon: Campaign },
+      { label: "Contacts & DNC", url: "/messaging-contacts", icon: ContactPhone },
+      { label: "Sending Numbers", url: "/messaging-senders", icon: Dialpad, adminOnly: true },
+      { label: "Lead Distribution", url: "/lead-distribution", icon: GroupAdd, adminOnly: true },
+      { label: "Performance", url: "/messaging-performance", icon: Insights, adminOnly: true },
     ],
   },
   {
