@@ -7,6 +7,7 @@ import {
 } from '../platform-document-registry';
 import type { DocumentLayout } from './convert-docusign-template-export';
 import {
+  DOCUMENT_LAYOUT_KEYS,
   getDocumentLayout,
   resolveLayoutKeyFromBoldSignType,
   type DocumentLayoutKey,
@@ -51,6 +52,13 @@ export function resolveCoordinateLayoutKeyForTemplate(options: {
     const storageType = resolveFunderSupplementalStorageType(
       parsed.supplementalType,
     );
+    // Funder ACH uploads are stored under the `ach_authorization` type, but this CRM
+    // only ever sends the ACH form on its own (ContractTab rejects ACH inside a
+    // contract package). The standalone layout has identical placements plus
+    // `skipOwner2InitialMirror`, so a solo ACH does not get owner-2 initials.
+    if (storageType === DOCUMENT_LAYOUT_KEYS.ach_authorization) {
+      return DOCUMENT_LAYOUT_KEYS.ach_authorization_standalone;
+    }
     if (isDocumentLayoutKey(storageType)) return storageType;
   }
 

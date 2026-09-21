@@ -52,6 +52,19 @@ export const PLATFORM_DOCUMENTS: Record<DocumentLayoutKey, PlatformDocumentDefin
     name: 'EPA Addendum',
     type: 'addendum_epa',
   },
+  // ACH is intentionally absent from SUPPLEMENTAL_PLATFORM_DOCUMENTS below: the ACH
+  // form is sent on its own (ContractTab rejects it inside a contract package), so it
+  // must not appear in the addendum picker or the package merge order.
+  [DOCUMENT_LAYOUT_KEYS.ach_authorization]: {
+    layoutKey: DOCUMENT_LAYOUT_KEYS.ach_authorization,
+    name: 'ACH Authorization',
+    type: 'ach_authorization',
+  },
+  [DOCUMENT_LAYOUT_KEYS.ach_authorization_standalone]: {
+    layoutKey: DOCUMENT_LAYOUT_KEYS.ach_authorization_standalone,
+    name: 'ACH Authorization',
+    type: 'ach_authorization',
+  },
 };
 
 /** Supplemental documents available in the addendum picker (excludes main contract). */
