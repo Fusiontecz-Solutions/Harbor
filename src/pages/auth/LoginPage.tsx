@@ -25,6 +25,7 @@ import { toast } from 'react-toastify';
 
 import LoginImg from "../../assets/imageLogin.webp"
 import { resolveAppLogoSrc } from '@/constants/appLogo';
+import { AGENT_HOME_PATH, isAgentAllowedPath } from '@/lib/agentAccess';
 import { normalizeRoleKey } from '@/lib/sessionRole';
 import { useTheme } from '@/context/ThemeContext';
 
@@ -47,8 +48,12 @@ export default function LoginPage() {
     try {
       const result = await dispatch(login({ email, password, rememberMe })).unwrap();
       if (result.success) {
+        // Super Admins get the whole application; agents are admitted for the
+        // communication side only (see lib/agentAccess). Every other role is
+        // still refused.
         const roleKey = normalizeRoleKey(result.user.role ?? '');
-        if (roleKey !== 'SUPER_ADMIN') {
+        const isAgent = roleKey === 'AGENT';
+        if (roleKey !== 'SUPER_ADMIN' && !isAgent) {
           toast.error('Only Super Admin can access this application.');
           return;
         }
@@ -62,7 +67,14 @@ export default function LoginPage() {
         void dispatch(fetchOperationsDashboardRecentCases());
 
         const afterLogin = safeAppReturnPath(searchParams.get('returnUrl'));
-        if (afterLogin) {
+        if (isAgent) {
+          // The dashboard is not theirs to see, and a returnUrl could point
+          // anywhere, so agents always land on their inbox unless the return
+          // path is somewhere they are allowed.
+          navigate(afterLogin && isAgentAllowedPath(afterLogin) ? afterLogin : AGENT_HOME_PATH, {
+            replace: true,
+          });
+        } else if (afterLogin) {
           navigate(afterLogin, { replace: true });
         } else {
           navigate('/', { replace: true });

@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/sidebar";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router";
 import { useDispatch, useSelector } from "react-redux";
+import { isAgentAllowedPath, isAgentRole } from "@/lib/agentAccess";
 import type { AppDispatch, RootState } from "@/redux/store";
 import { logout } from "@/redux/actions/authActions";
 import { clearApplicationStats, clearApplicationDetail } from "@/redux/slices/applicationSlice";
@@ -310,6 +311,9 @@ const Sidebar = () => {
   const isAdmin = ["ADMIN", "SUPER_ADMIN"].includes(
     String(userRole || "").replace(/-/g, "_").toUpperCase()
   );
+  // Agents are admitted for the communication side only, so the rest of the
+  // navigation is not theirs to see. RootLayout blocks the paths regardless.
+  const isAgent = isAgentRole(userRole);
 
   const { data: notifications } = useSelector(
     (state: RootState) => state.notifications,
@@ -407,7 +411,15 @@ const Sidebar = () => {
         </SidebarHeader>
         <SidebarContent className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto px-2 pb-2 pt-0 group-data-[collapsible=icon]:overflow-auto group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:px-0">
           <div className="w-full space-y-5 group-data-[collapsible=icon]:mx-auto group-data-[collapsible=icon]:w-auto">
-            {sidebarSections.map((section, sectionIndex) => (
+            {(isAgent
+              ? sidebarSections
+                  .filter((section) => section.title === "COMMUNICATION")
+                  .map((section) => ({
+                    ...section,
+                    items: section.items.filter((item) => isAgentAllowedPath(item.url)),
+                  }))
+              : sidebarSections
+            ).map((section, sectionIndex) => (
               <div
                 key={`${section.title || "section"}-${sectionIndex}`}
                 className="w-full"
