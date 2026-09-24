@@ -5,6 +5,8 @@ import type {
 } from "./Contract";
 import {
     buildContractPrefillFieldsFromApplication,
+    EXHIBIT_A_VALUE_FIELD_KEYS,
+    exhibitValuesToPrefillPartial,
     getApplicationPrimaryRecipientName,
     getContractPrefillEditDefaultsFromApplication,
     resolveBalanceTransferMerchantContext,
@@ -57,6 +59,16 @@ import {
     buildAddendumEpaContractPrefillFields,
     type AddendumEpaContractPrefillFields,
 } from "./ADDENDUM_EPA";
+import {
+    ADDENDUM_EPD_TIER_COUNT,
+    buildAddendumEpdContractPrefillFields,
+    type AddendumEpdContractPrefillFields,
+} from "./ADDENDUM_EPD";
+import {
+    buildExhibitAContractPrefillFields,
+    EXHIBIT_A_COMPANY_ROW_COUNT,
+    type ExhibitAContractPrefillFields,
+} from "./EXHIBIT_A";
 import { resolveRefiLabelName } from "./refinanceDealCalculations";
 import {
     buildStateDisclosurePrefillContextFromContract,
@@ -551,6 +563,22 @@ function buildEffectiveContractForTemplatePrefill(options: {
     };
 }
 
+/** Consecutive editor rows sharing `section` render under one heading (e.g. Exhibit A "Company 2"). */
+export function groupPrefillFieldsBySection<T extends ContractPrefillField>(
+    rows: readonly T[],
+): Array<{ section?: string; rows: T[] }> {
+    const groups: Array<{ section?: string; rows: T[] }> = [];
+    for (const r of rows) {
+        const last = groups[groups.length - 1];
+        if (last && last.section === r.section) {
+            last.rows.push(r);
+        } else {
+            groups.push({ section: r.section, rows: [r] });
+        }
+    }
+    return groups;
+}
+
 function mergeFieldRows(
     allDefs: ContractPrefillField[],
     computed: ContractPrefillField[],
@@ -559,6 +587,8 @@ function mergeFieldRows(
     const computedById = new Map(computed.map((f) => [f.id, f]));
     const saved = savedForRow ?? {};
     return allDefs.map((def) => {
+        // Editor section heading (e.g. Exhibit A "Company 2") travels with the def.
+        const section = def.section ? { section: def.section } : {};
         const fromSaved = saved[def.id];
         const fromSavedTrim =
             fromSaved !== undefined ? String(fromSaved).trim() : "";
@@ -571,14 +601,15 @@ function mergeFieldRows(
                 computedNum !== undefined &&
                 computedNum > 0
             ) {
-                return { id: def.id, label: def.label, value: computedVal };
+                return { id: def.id, label: def.label, value: computedVal, ...section };
             }
-            return { id: def.id, label: def.label, value: fromSavedTrim };
+            return { id: def.id, label: def.label, value: fromSavedTrim, ...section };
         }
         return {
             id: def.id,
             label: def.label,
             value: computedVal,
+            ...section,
         };
     });
 }
@@ -902,6 +933,53 @@ function buildAddendumEpaComputed(
     });
 }
 
+/**
+ * EPD — funder and "Title: OWNER" are printed on the PDF. Tier terms vary per
+ * deal, so they start blank and are typed in the prefill editor.
+ */
+function buildAddendumEpdComputed(
+    contract: Record<string, unknown> | null,
+    sctx: StateDisclosureContext,
+): ContractPrefillField[] {
+    const c = contract ?? {};
+    const today = todayUsDate();
+    return buildAddendumEpdContractPrefillFields({
+        agreementDated: today,
+        printName: sctx.merchantName || str(c.clientName) || sctx.recipientName,
+        signatureDate: today,
+    });
+}
+
+function sameEntityName(a: string, b: string): boolean {
+    const norm = (v: string) => v.toLowerCase().replace(/[^a-z0-9]+/g, "");
+    return !!a && !!b && norm(a) === norm(b);
+}
+
+/**
+ * Exhibit A — company names come from the contract's shared Exhibit A list
+ * (Deal Review). Entity type / EIN default from the business profile only on
+ * the row naming the merchant business itself; other entities are typed in.
+ */
+function buildExhibitAComputed(contract: Record<string, unknown> | null): ContractPrefillField[] {
+    const c = contract ?? {};
+    const fromRecord = exhibitValuesToPrefillPartial(c) as Record<string, unknown>;
+    const businessLegalName = resolveContractBusinessLegalNameForPrefill(c);
+    const businessEntityType = str(c.entityType) || str(c.businessEntityType);
+    const businessEin = str(c.federalTaxIdEin) || str(c.businessEinNumber) || str(c.ein);
+    const companies = EXHIBIT_A_VALUE_FIELD_KEYS.map((key) => {
+        const legalName = str(c[key]) || str(fromRecord[key]);
+        const isBusiness = sameEntityName(legalName, businessLegalName);
+        return {
+            legalName,
+            entityType: isBusiness ? businessEntityType : "",
+            ein: isBusiness ? businessEin : "",
+        };
+    });
+    return buildExhibitAContractPrefillFields({
+        companies,
+    });
+}
+
 function dotAddendumP(): AddendumPContractPrefillFields {
     return {
         addendumDated: DUMMY,
@@ -965,6 +1043,28 @@ function dotAddendumEpa(): AddendumEpaContractPrefillFields {
     };
 }
 
+function dotAddendumEpd(): AddendumEpdContractPrefillFields {
+    return {
+        agreementDated: DUMMY,
+        tiers: Array.from({ length: ADDENDUM_EPD_TIER_COUNT }, () => ({
+            paidWithin: DUMMY,
+            discountRate: DUMMY,
+        })),
+        printName: DUMMY,
+        signatureDate: DUMMY,
+    };
+}
+
+function dotExhibitA(): ExhibitAContractPrefillFields {
+    return {
+        companies: Array.from({ length: EXHIBIT_A_COMPANY_ROW_COUNT }, () => ({
+            legalName: DUMMY,
+            entityType: DUMMY,
+            ein: DUMMY,
+        })),
+    };
+}
+
 function dotDiscoverRefi(): DiscoverRefiBalanceTransferAddendumContractPrefillFields {
     return {
         loanAgreementDated: DUMMY,
@@ -1004,7 +1104,9 @@ type AddendumKind =
     | "addendum_ca"
     | "addendum_ny"
     | "addendum_va"
-    | "addendum_epa";
+    | "addendum_epa"
+    | "addendum_epd"
+    | "exhibit_a";
 
 const ADDENDUM_GUID = Object.fromEntries(
     Object.entries(DOCUSIGN_ADDENDUM_TEMPLATE_IDS).map(([k, v]) => [k, String(v).trim().toLowerCase()]),
@@ -1018,6 +1120,11 @@ function resolveAddendumKind(
     const tid = String(templateId ?? "").trim().toLowerCase();
     const lk = String(layoutKey ?? "").trim().toLowerCase();
     const key = lk || tid;
+    // Named funder upload stores `funder_<id>_addendum_exhibit_a` — check before
+    // the `addendum_*` matchers below.
+    if (key === DOCUSIGN_ADDENDUM_LAYOUT_KEYS.EXHIBIT_A || key.includes("exhibit_a")) {
+        return "exhibit_a";
+    }
     if (
         key === DOCUSIGN_ADDENDUM_LAYOUT_KEYS.PRE_PAYMENT_ADDENDUM ||
         key.endsWith("_pre_payment_addendum")
@@ -1038,6 +1145,13 @@ function resolveAddendumKind(
         key.endsWith("_balance_transfer")
     ) {
         return "balance_transfer_sheet";
+    }
+    if (
+        key === DOCUSIGN_ADDENDUM_LAYOUT_KEYS.ADDENDUM_EPD ||
+        key.endsWith("_addendum_epd") ||
+        key.includes("addendum_epd_")
+    ) {
+        return "addendum_epd";
     }
     if (
         key === DOCUSIGN_ADDENDUM_LAYOUT_KEYS.ADDENDUM_EPA ||
@@ -1076,6 +1190,7 @@ function resolveAddendumKind(
         return "addendum_va";
     }
     if (tid === ADDENDUM_GUID.WOODMERE_BALANCE_TRANSFER_SHEET) return "balance_transfer_sheet";
+    if (/(?:^|_)exhibit_a(?:_|$)/.test(normName)) return "exhibit_a";
     if (matches(normName, "case", "takeover")) return "case_takeover_addendum";
     if (matches(normName, "balance", "transfer") && !normName.includes("discover") && !normName.includes("refi"))
         return "balance_transfer_sheet";
@@ -1097,6 +1212,8 @@ function resolveAddendumKind(
         return "addendum_va";
     if (normName.includes("addendum") && (normName.includes(" epa") || normName.endsWith("_epa") || /\bepa\b/.test(normName)))
         return "addendum_epa";
+    if (normName.includes("addendum") && (normName.includes(" epd") || normName.endsWith("_epd") || /(?:^|_)epd(?:_|$)/.test(normName)))
+        return "addendum_epd";
     return null;
 }
 
@@ -1191,6 +1308,10 @@ function addendumAllDefs(kind: AddendumKind): ContractPrefillField[] {
             return buildAddendumVaContractPrefillFields(dotAddendumVa());
         case "addendum_epa":
             return buildAddendumEpaContractPrefillFields(dotAddendumEpa());
+        case "addendum_epd":
+            return buildAddendumEpdContractPrefillFields(dotAddendumEpd());
+        case "exhibit_a":
+            return buildExhibitAContractPrefillFields(dotExhibitA());
         default:
             return [];
     }
@@ -1223,6 +1344,10 @@ function addendumComputed(
             return buildAddendumVaComputed(contract, sctx);
         case "addendum_epa":
             return buildAddendumEpaComputed(contract, sctx);
+        case "addendum_epd":
+            return buildAddendumEpdComputed(contract, sctx);
+        case "exhibit_a":
+            return buildExhibitAComputed(contract);
         default:
             return [];
     }

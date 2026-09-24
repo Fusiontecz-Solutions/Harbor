@@ -193,7 +193,7 @@ export const ACH_FORM_FLAT_FIELDS: AchFormEditField[] = [
     },
     {
         key: "achAuthorizationConcentAccountHolderName",
-        label: "Business name",
+        label: "Name/Title of account holder (Owner 1)",
         tabLabel: "ach_authorization_concent_account_holder_name",
     },
 ];

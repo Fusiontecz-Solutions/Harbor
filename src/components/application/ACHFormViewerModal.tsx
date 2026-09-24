@@ -554,6 +554,8 @@ export default function ACHFormViewerModal({
     const [achCoordinateLayout, setAchCoordinateLayout] =
         useState<AchCoordinateLayoutChoice>("woodmere");
     const templateBlobUrlRef = useRef<string | null>(null);
+    /** Monotonic id so superseded template requests cannot toast errors or clobber the preview. */
+    const templatePdfRequestIdRef = useRef(0);
     const docuSignBlobUrlRef = useRef<string | null>(null);
     const achCcEmailDeliveredRef = useRef(false);
     const lastAchStatusSyncAtRef = useRef(0);
@@ -576,6 +578,7 @@ export default function ACHFormViewerModal({
         findFunder,
         findFunderById,
         resolveDefaultFunder,
+        loading: funderProfilesLoading,
     } = useFunderProfiles(null);
 
     const boldSignTemplatesState = useSelector((state: RootState) => state.boldSignTemplates);
@@ -1260,6 +1263,8 @@ export default function ACHFormViewerModal({
             boldSignTemplates,
         );
         const layoutKey = achLayoutKeyForCoordinateChoice(layoutChoice);
+        const requestId = ++templatePdfRequestIdRef.current;
+        const isStale = () => requestId !== templatePdfRequestIdRef.current;
         setTemplatePdfLoading(true);
         try {
             const response = await axiosGet(
@@ -1279,6 +1284,7 @@ export default function ACHFormViewerModal({
                 response?.data instanceof Blob
                     ? response.data
                     : new Blob([response?.data], { type: "application/pdf" });
+            if (isStale()) return;
             if (!blob.size) {
                 toast.error("ACH template PDF is empty.");
                 revokeTemplatePdfUrl();
@@ -1291,15 +1297,26 @@ export default function ACHFormViewerModal({
             templateBlobUrlRef.current = url;
             setTemplatePdfUrl(url);
         } catch (err: unknown) {
-            const msg =
-                (err as { response?: { data?: { message?: string } }; message?: string })
-                    ?.response?.data?.message ||
-                (err as { message?: string })?.message ||
-                "Failed to load ACH template PDF.";
+            if (isStale()) return;
+            // responseType "blob" means the JSON error body arrives as a Blob — read it.
+            let serverMsg: string | undefined;
+            const errData = (err as { response?: { data?: unknown } })?.response?.data;
+            if (errData instanceof Blob) {
+                try {
+                    serverMsg = (JSON.parse(await errData.text()) as { message?: string })
+                        ?.message;
+                } catch {
+                    /* non-JSON body */
+                }
+            } else {
+                serverMsg = (errData as { message?: string } | undefined)?.message;
+            }
+            if (isStale()) return;
+            const msg = serverMsg || "Failed to load ACH template PDF.";
             toast.error(String(msg));
             revokeTemplatePdfUrl();
         } finally {
-            setTemplatePdfLoading(false);
+            if (!isStale()) setTemplatePdfLoading(false);
         }
     }, [
         selectedFunder,
@@ -1513,10 +1530,27 @@ export default function ACHFormViewerModal({
         setResolvedContract(contract);
     }, [isOpen, contract]);
 
+    // Wait for funder profiles and the default funder pick before fetching; otherwise the
+    // first request goes out with an unresolved layout/funder and the API returns 400.
+    const templatePdfInputsReady =
+        !funderProfilesLoading &&
+        (Boolean(selectedFunderProfile) || achCapableFunderEntries.length === 0);
+
     useEffect(() => {
-        if (!isOpen) return;
-        void loadTemplatePdf();
-    }, [isOpen, loadTemplatePdf]);
+        if (!isOpen) {
+            templatePdfRequestIdRef.current += 1;
+            return;
+        }
+        if (!templatePdfInputsReady) {
+            setTemplatePdfLoading(true);
+            return;
+        }
+        // Debounce so funder/template/state settling on open collapses into one request.
+        const t = window.setTimeout(() => {
+            void loadTemplatePdf();
+        }, 150);
+        return () => window.clearTimeout(t);
+    }, [isOpen, templatePdfInputsReady, loadTemplatePdf]);
 
     /**
      * Push platform values once when an ACH draft/record is opened. Keep the latest sync

@@ -65,6 +65,7 @@ import {
     DOCUMENT_TEMPLATE_ENVELOPE_BY_MAPPING_ID_KEY,
     DOCUMENT_SEND_HISTORY_KEY,
     getDocumentTemplatePrefillFieldRowsForEditor,
+    groupPrefillFieldsBySection,
     hasStateDisclosurePrefillFieldMap,
     LINKED_DOCUSIGN_ADDENDUM_SECTION_ID,
     LINKED_DOCUSIGN_DISCLOSURE_SECTION_ID,
@@ -2320,24 +2321,35 @@ export function ContractPrefillEditForm({
                                     ) : null}
                                 </div>
                                 {isLinkedAddendumSection ? (
-                                    <div className="grid gap-4 sm:grid-cols-2">
-                                        {addendumEditorRows.map((row) => (
-                                            <div key={row.id} className="space-y-1.5">
-                                                <Label htmlFor={`addendum-prefill-${row.id}`} className="text-xs font-medium">
-                                                    {row.label}
-                                                </Label>
-                                                <Input
-                                                    id={`addendum-prefill-${row.id}`}
-                                                    value={addendumFieldValues[row.id] ?? ""}
-                                                    onChange={(e) =>
-                                                        setAddendumFieldValues((prev) => ({
-                                                            ...prev,
-                                                            [row.id]: e.target.value,
-                                                        }))
-                                                    }
-                                                    disabled={readOnly}
-                                                    className="h-9 text-sm"
-                                                />
+                                    <div className="space-y-5">
+                                        {groupPrefillFieldsBySection(addendumEditorRows).map((group, gi) => (
+                                            <div key={`${group.section ?? "fields"}-${gi}`} className="space-y-3">
+                                                {group.section ? (
+                                                    <h4 className="text-muted-foreground text-xs font-semibold uppercase tracking-wide">
+                                                        {group.section}
+                                                    </h4>
+                                                ) : null}
+                                                <div className="grid gap-4 sm:grid-cols-2">
+                                                    {group.rows.map((row) => (
+                                                        <div key={row.id} className="space-y-1.5">
+                                                            <Label htmlFor={`addendum-prefill-${row.id}`} className="text-xs font-medium">
+                                                                {row.label}
+                                                            </Label>
+                                                            <Input
+                                                                id={`addendum-prefill-${row.id}`}
+                                                                value={addendumFieldValues[row.id] ?? ""}
+                                                                onChange={(e) =>
+                                                                    setAddendumFieldValues((prev) => ({
+                                                                        ...prev,
+                                                                        [row.id]: e.target.value,
+                                                                    }))
+                                                                }
+                                                                disabled={readOnly}
+                                                                className="h-9 text-sm"
+                                                            />
+                                                        </div>
+                                                    ))}
+                                                </div>
                                             </div>
                                         ))}
                                     </div>

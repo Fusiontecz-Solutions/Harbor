@@ -108,6 +108,8 @@ const ADDENDUM_PRESETS = [
   { name: "Addendum NY", type: "addendum_ny" },
   { name: "Addendum VA", type: "addendum_va" },
   { name: "EPA Addendum", type: "addendum_epa" },
+  { name: "EPD Addendum", type: "addendum_epd" },
+  { name: "Exhibit A", type: "exhibit_a" },
   { name: "ACH Authorization", type: "ach_authorization" },
 ] as const;
 
@@ -1227,7 +1229,7 @@ export default function FunderProfileModal({
               <>
             <UploadCard
               title="Addendum PDFs"
-              description="Upload Addendum P (REFI), state addendums (CA / NY / VA), EPA, or ACH. Contract tab auto-selects by refinance and state."
+              description="Upload Addendum P (REFI), state addendums (CA / NY / VA), EPA, EPD, Exhibit A, or ACH. Contract tab auto-selects by refinance and state."
             >
               <div className="flex flex-wrap gap-2">
                 {ADDENDUM_PRESETS.map((preset) => (

@@ -29,6 +29,8 @@ export interface ContractPrefillField {
     id: string;
     label: string;
     value: string;
+    /** Optional heading the template-mapping editor groups consecutive fields under. */
+    section?: string;
 }
 
 export interface BuildContractPrefillFieldsArgs {
@@ -2426,8 +2428,8 @@ const DEAL_REVIEW_CANONICAL_LABEL_BY_ID: Record<string, string> = {
     ach_authorization_account_holder_bank_transaction_fee: "Transaction fee",
     ach_authorization_account_holder_bank_number_of_transactions: "NO. of transaction",
     ach_authorization_account_holder_date: "Date",
-    ach_authorization_concent_account_holder_name: "Business name",
-    ach_authorization_concent_account_holder_name_2: "Business name (page 15)",
+    ach_authorization_concent_account_holder_name: "Name/Title of account holder (Owner 1)",
+    ach_authorization_concent_account_holder_name_2: "Name/Title of account holder (page 15)",
     ach_authorization_concent_account_holder_date: "Date",
     guarantor_address: "Street",
     guarantor_address_city: "City",
