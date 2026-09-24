@@ -66,6 +66,8 @@ export const DOCUMENT_LAYOUT_KEYS = {
   addendum_ny: 'addendum_ny',
   addendum_va: 'addendum_va',
   addendum_epa: 'addendum_epa',
+  addendum_epd: 'addendum_epd',
+  exhibit_a: 'exhibit_a',
   ach_authorization: 'ach_authorization',
   ach_authorization_standalone: 'ach_authorization_standalone',
 } as const;
@@ -81,6 +83,8 @@ export const BOLD_SIGN_TYPE_TO_LAYOUT_KEY: Record<string, DocumentLayoutKey> = {
   addendum_ny: DOCUMENT_LAYOUT_KEYS.addendum_ny,
   addendum_va: DOCUMENT_LAYOUT_KEYS.addendum_va,
   addendum_epa: DOCUMENT_LAYOUT_KEYS.addendum_epa,
+  addendum_epd: DOCUMENT_LAYOUT_KEYS.addendum_epd,
+  exhibit_a: DOCUMENT_LAYOUT_KEYS.exhibit_a,
   ach_authorization: DOCUMENT_LAYOUT_KEYS.ach_authorization,
   ach_authorization_standalone: DOCUMENT_LAYOUT_KEYS.ach_authorization_standalone,
 };
@@ -105,6 +109,10 @@ const REGISTRY: Record<DocumentLayoutKey, () => DocumentLayout> = {
     requireAddendumLayout(DOCUMENT_LAYOUT_KEYS.addendum_va),
   [DOCUMENT_LAYOUT_KEYS.addendum_epa]: () =>
     requireAddendumLayout(DOCUMENT_LAYOUT_KEYS.addendum_epa),
+  [DOCUMENT_LAYOUT_KEYS.addendum_epd]: () =>
+    requireAddendumLayout(DOCUMENT_LAYOUT_KEYS.addendum_epd),
+  [DOCUMENT_LAYOUT_KEYS.exhibit_a]: () =>
+    requireAddendumLayout(DOCUMENT_LAYOUT_KEYS.exhibit_a),
   [DOCUMENT_LAYOUT_KEYS.ach_authorization]: loadAchLayoutFromDisk(
     'ach_authorization.layout.json',
     DOCUMENT_LAYOUT_KEYS.ach_authorization,

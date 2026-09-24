@@ -582,6 +582,8 @@ async function upsertFunderSupplementalBoldSignTemplate(
             ? 'Addendum VA'
             : supplementalType === 'addendum_epa'
               ? 'EPA Addendum'
+              : supplementalType === 'addendum_epd'
+                ? 'EPD Addendum'
               : supplementalType === 'ach_authorization' ||
                   supplementalType === 'ach_authorization_texas'
                 ? 'ACH Authorization'

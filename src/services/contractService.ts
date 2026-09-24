@@ -1070,7 +1070,8 @@ class ContractService {
       authorizationApplication: firstNonEmptyString(legalName, customerName) || null,
       authorizationClientDate: derivedAgreementDate.toISOString().slice(0, 10),
       authorizationClientName: legalName || null,
-      authorizationClientNamePrint: legalName || null,
+      /** ACH page-1 printed name — Owner 1 person (business legal name only as fallback). */
+      authorizationClientNamePrint: customerName || legalName || null,
       authorizationClientTaxId: taxEin || null,
       authorizationClientBankName: bankName || null,
       authorizationClientBankAccount: bankAccount || null,

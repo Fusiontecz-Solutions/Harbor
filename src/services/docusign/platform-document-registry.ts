@@ -52,6 +52,16 @@ export const PLATFORM_DOCUMENTS: Record<DocumentLayoutKey, PlatformDocumentDefin
     name: 'EPA Addendum',
     type: 'addendum_epa',
   },
+  [DOCUMENT_LAYOUT_KEYS.addendum_epd]: {
+    layoutKey: DOCUMENT_LAYOUT_KEYS.addendum_epd,
+    name: 'EPD Addendum',
+    type: 'addendum_epd',
+  },
+  [DOCUMENT_LAYOUT_KEYS.exhibit_a]: {
+    layoutKey: DOCUMENT_LAYOUT_KEYS.exhibit_a,
+    name: 'Exhibit A',
+    type: 'exhibit_a',
+  },
   // ACH is intentionally absent from SUPPLEMENTAL_PLATFORM_DOCUMENTS below: the ACH
   // form is sent on its own (ContractTab rejects it inside a contract package), so it
   // must not appear in the addendum picker or the package merge order.
@@ -74,6 +84,8 @@ export const SUPPLEMENTAL_PLATFORM_DOCUMENTS: PlatformDocumentDefinition[] = [
   PLATFORM_DOCUMENTS[DOCUMENT_LAYOUT_KEYS.addendum_ny],
   PLATFORM_DOCUMENTS[DOCUMENT_LAYOUT_KEYS.addendum_va],
   PLATFORM_DOCUMENTS[DOCUMENT_LAYOUT_KEYS.addendum_epa],
+  PLATFORM_DOCUMENTS[DOCUMENT_LAYOUT_KEYS.addendum_epd],
+  PLATFORM_DOCUMENTS[DOCUMENT_LAYOUT_KEYS.exhibit_a],
 ];
 
 const LAYOUT_KEY_SET = new Set<string>(Object.values(DOCUMENT_LAYOUT_KEYS));

@@ -23,6 +23,7 @@ import {
   getTemplateRecipients,
   createDraftEnvelope,
   getSenderView,
+  openSenderView,
   sendEnvelope,
   syncEnvelopeCc,
   getSignedPdf,
@@ -68,6 +69,9 @@ router.post('/sync-envelope-status', authenticateToken, syncDocusignEnvelopeStat
 /** Legacy aliases */
 router.post('/create-draft-envelope', authenticateToken, createDraftEnvelope);
 router.post('/sender-view', authenticateToken, getSenderView);
+// Browser navigation target — the signed token in the path is the credential,
+// so this one cannot go through authenticateToken.
+router.get('/open-sender-view/:token', openSenderView);
 router.post('/send-envelope', authenticateToken, sendEnvelope);
 router.post('/sync-envelope-cc', authenticateToken, syncEnvelopeCc);
 

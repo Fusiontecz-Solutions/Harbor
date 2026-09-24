@@ -88,6 +88,7 @@ import {
   resolveDocusignWebhookEnvelopeStatus,
 } from './utils/docusign-webhook';
 import { decryptField, isEncrypted } from '../../utils/fieldEncryption';
+import { normalizeAchAuthorizationPrefillFields } from './utils/build-envelope-from-layout';
 import {
   buildPlatformLayoutEnvelopeDefinition,
   filterSupplementalRefs,
@@ -1084,7 +1085,7 @@ export class DocusignService {
 
   /** Decrypt CRM `enc:v1:` values and drop empty fields before sending to DocuSign. */
   private sanitizePrefillFieldsForDocuSign(prefillFields?: PrefillField[]): PrefillField[] {
-    return (prefillFields || [])
+    const sanitized = (prefillFields || [])
       .map((f) => {
         const id = String(f?.id ?? '').trim();
         let value = String(f?.value ?? '').trim();
@@ -1101,6 +1102,11 @@ export class DocusignService {
         return { id, value: value.toUpperCase() };
       })
       .filter((f): f is PrefillField => f != null);
+    // ACH consent / printed name: Owner 1 person, never business legal name.
+    return normalizeAchAuthorizationPrefillFields(sanitized).map((f) => ({
+      ...f,
+      value: f.value.toUpperCase(),
+    }));
   }
 
   /**
@@ -5626,6 +5632,36 @@ export class DocusignService {
       authHints,
     );
     const { client, accountId } = await this.getAuthContextForEnvelope(userId, eid, authHints);
+    const url = await this.createSenderViewUrl(client, accountId, eid, returnUrl);
+    return { url };
+  }
+
+  /**
+   * Fresh sender-view URL for an envelope whose recipients/CC are already in sync.
+   *
+   * Backs `GET /docusign/open-sender-view/:token`. DocuSign sender-view codes are
+   * single use, so the redirect mints a new one on every navigation — that must stay
+   * cheap, hence no `syncEnvelopeCcEmails` round trip here (the handoff token is only
+   * issued right after a path that already synced).
+   */
+  async openSenderViewUrl(
+    userId: string,
+    envelopeId: string,
+    returnUrl: string,
+    hints?: {
+      applicationId?: string;
+      contractId?: number;
+      funderName?: string | null;
+      contractState?: string | null;
+    },
+  ) {
+    const eid = String(envelopeId || '').trim();
+    const { client, accountId } = await this.getAuthContextForEnvelope(userId, eid, {
+      applicationId: hints?.applicationId,
+      contractId: hints?.contractId,
+      funderName: hints?.funderName,
+      contractState: hints?.contractState,
+    });
     const url = await this.createSenderViewUrl(client, accountId, eid, returnUrl);
     return { url };
   }

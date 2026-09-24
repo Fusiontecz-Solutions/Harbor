@@ -12,6 +12,8 @@ export const LAYOUT_CRM_PREFIX: Record<string, string> = {
   addendum_ny: 'addendum_ny_',
   addendum_va: 'addendum_va_',
   addendum_epa: 'addendum_epa_',
+  addendum_epd: 'addendum_epd_',
+  exhibit_a: 'exhibit_a_',
   ach_authorization: 'ach_form_',
   ach_authorization_standalone: 'ach_form_',
   ach_authorization_texas: 'ach_form_texas_',
@@ -158,6 +160,15 @@ export function resolveCanonicalSupplementalLayoutKey(layoutKey: string): string
     return 'case_takeover_addendum';
   }
   if (k === 'balance_transfer' || k.endsWith('_balance_transfer')) return 'balance_transfer';
+  // Before addendum_p — named uploads are `funder_<id>_addendum_exhibit_a`.
+  if (k === 'exhibit_a' || k.includes('exhibit_a')) return 'exhibit_a';
+  if (
+    k === 'addendum_epd' ||
+    k.endsWith('_addendum_epd') ||
+    k.includes('addendum_epd_')
+  ) {
+    return 'addendum_epd';
+  }
   if (
     k === 'addendum_epa' ||
     k.endsWith('_addendum_epa') ||
@@ -206,7 +217,7 @@ export function isMainContractLayoutKey(layoutKey: string): boolean {
     return true;
   }
   if (!k.startsWith('funder_')) return false;
-  return !/_flex_addendum|_pre_payment_addendum|_case_takeover_addendum|_case_takeover_balance_transfer|_balance_transfer|_ach_|_disclosure|_addendum_/.test(k);
+  return !/_flex_addendum|_pre_payment_addendum|_case_takeover_addendum|_case_takeover_balance_transfer|_balance_transfer|_ach_|_disclosure|_addendum_|_exhibit_a/.test(k);
 }
 
 export function resolveCrmKeyForLayoutVariable(layoutKey: string, pdfVariable: string): string {
@@ -221,6 +232,69 @@ export function resolveCrmKeyForLayoutVariable(layoutKey: string, pdfVariable: s
 
 export function isStateDisclosureTextPlacement(placement?: DocumentLayoutPlacement): boolean {
   return Boolean(String(placement?.id || '').startsWith('sd_text_'));
+}
+
+function sameEntityName(a: string, b: string): boolean {
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  return !!a && !!b && norm(a) === norm(b);
+}
+
+function exhibitABusinessLegalName(values: Record<string, string>): string {
+  return (
+    String(values.exhibit_a_business_legal_name ?? '').trim() ||
+    pickPrefillValue(values, [
+      'client_legal_name',
+      'legal_name',
+      'business_legal_name',
+      'security_business_name',
+    ])
+  );
+}
+
+/**
+ * Exhibit A tab value: per-document value (already resolved into `current`),
+ * else the contract's shared data, then print labels the PDF does not have.
+ * - company_name_N → shared Exhibit A company list (Deal Review)
+ * - company_entity_type_N / company_ein_N → business entity type / EIN when
+ *   that row's company is the merchant business itself
+ * - dba → "D/B/A …", omitted when it just repeats the legal name
+ * - agreement_date → "DATE: …"
+ */
+function resolveExhibitAValue(
+  pdfVar: string,
+  current: string,
+  values: Record<string, string>,
+): string {
+  let val = current;
+  const row = /^company_(?:name|entity_type|ein)_(\d+)$/.exec(pdfVar)?.[1];
+  if (!val && row) {
+    if (pdfVar.startsWith('company_name_')) {
+      val = pickPrefillValue(values, [`exhibit_a_value_${row}`, `exhibit_company_name_${row}`]);
+    } else {
+      const company = pickPrefillValue(values, [
+        `exhibit_a_company_name_${row}`,
+        `exhibit_a_value_${row}`,
+        `exhibit_company_name_${row}`,
+      ]);
+      if (sameEntityName(company, exhibitABusinessLegalName(values))) {
+        val = pdfVar.startsWith('company_ein_')
+          ? pickPrefillValue(values, ['federal_tax_id_EIN', 'federal_tax_id_ein', 'ein'])
+          : pickPrefillValue(values, ['entity_type', 'business_entity_type']);
+      }
+    }
+  }
+  if (!val && pdfVar === 'business_legal_name') {
+    val = exhibitABusinessLegalName(values);
+  }
+  if (pdfVar === 'dba') {
+    if (!val) val = pickPrefillValue(values, ['doing_business_as']);
+    if (!val || sameEntityName(val, exhibitABusinessLegalName(values))) return '';
+    return /^d\/?b\/?a\b/i.test(val) ? val : `D/B/A ${val}`;
+  }
+  if (pdfVar === 'agreement_date' && val) {
+    return /^date\b/i.test(val) ? val : `DATE: ${val}`;
+  }
+  return val;
 }
 
 /** Build values for one layout only — prevents cross-document tab bleed. */
@@ -316,6 +390,9 @@ export function buildScopedValuesForLayout(
             break;
           }
         }
+      }
+      if (canonicalKey === 'exhibit_a') {
+        val = resolveExhibitAValue(pdfVar, val, globalValues);
       }
       if (val) out[pdfVar] = val;
       continue;
