@@ -56,6 +56,10 @@ router.get('/contacts/status', messagingContactController.status.bind(messagingC
 router.get('/contacts/profile', messagingContactController.profile.bind(messagingContactController));
 /* Lead distribution (admin). Declared before `/contacts/:id`. */
 router.get('/contacts/distribution', messagingContactController.distribution.bind(messagingContactController));
+/* Lead uploads as selectable audiences. Declared before `/contacts/:id`. */
+router.get('/contacts/batches', messagingContactController.batches.bind(messagingContactController));
+/* Interested / Not Interested, set from the inbox. */
+router.patch('/contacts/disposition', messagingContactController.disposition.bind(messagingContactController));
 router.post('/contacts/distribute', messagingContactController.distribute.bind(messagingContactController));
 router.post('/contacts', messagingContactController.create.bind(messagingContactController));
 router.post('/contacts/import', messagingContactController.import.bind(messagingContactController));
@@ -65,6 +69,14 @@ router.patch('/contacts/:id', messagingContactController.update.bind(messagingCo
 
 /* CRM clients as a messaging audience (recipient picker). */
 router.get('/clients', messagingContactController.clients.bind(messagingContactController));
+
+/* Configurable daily send windows (10:00 / 13:30 / 16:30 ET by default).
+ * Declared before the `/broadcasts/:id` routes so neither swallows the other. */
+router.get('/send-windows', messagingBroadcastController.sendWindows.bind(messagingBroadcastController));
+router.get('/send-windows/upcoming', messagingBroadcastController.upcomingSendWindows.bind(messagingBroadcastController));
+router.post('/send-windows', messagingBroadcastController.saveSendWindow.bind(messagingBroadcastController));
+router.patch('/send-windows/:id', messagingBroadcastController.saveSendWindow.bind(messagingBroadcastController));
+router.delete('/send-windows/:id', messagingBroadcastController.removeSendWindow.bind(messagingBroadcastController));
 
 /* Broadcasts */
 router.get('/broadcasts', messagingBroadcastController.list.bind(messagingBroadcastController));
@@ -79,6 +91,14 @@ router.get('/broadcasts/:id/export', messagingBroadcastController.exportRecipien
 router.post('/broadcasts/:id/start', messagingBroadcastController.start.bind(messagingBroadcastController));
 router.post('/broadcasts/:id/pause', messagingBroadcastController.pause.bind(messagingBroadcastController));
 router.post('/broadcasts/:id/cancel', messagingBroadcastController.cancel.bind(messagingBroadcastController));
+
+/* Approval gate: agents build campaigns, Super Admins release them. */
+router.post('/broadcasts/:id/approve', messagingBroadcastController.approve.bind(messagingBroadcastController));
+router.post('/broadcasts/:id/reject', messagingBroadcastController.reject.bind(messagingBroadcastController));
+
+/* Follow-up: chase the non-responders, at least an hour later. */
+router.get('/broadcasts/:id/follow-up', messagingBroadcastController.followUpPreview.bind(messagingBroadcastController));
+router.post('/broadcasts/:id/follow-up', messagingBroadcastController.followUp.bind(messagingBroadcastController));
 
 /* Do Not Call */
 router.get('/dnc/check', messagingDncController.check.bind(messagingDncController));

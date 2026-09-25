@@ -40,6 +40,8 @@ export interface ImportSummary {
   sampleErrors: Array<{ row: number; reason: string }>;
   /** How many leads each user received, when the sheet was distributed. */
   assigned?: Array<{ userId: string; count: number }>;
+  /** The batch these rows were filed under, when one was named. */
+  batch?: { id: string; name: string } | null;
 }
 
 /**
@@ -169,6 +171,10 @@ export async function importContacts(input: {
    * behaviour of assigning the whole sheet to the importer.
    */
   assigneeUserIds?: string[];
+  /** Names the batch these rows belong to. Omitted means no batch is created. */
+  batchName?: string | null;
+  fileName?: string | null;
+  createdById?: string | null;
 }): Promise<ImportSummary> {
   const { rows, columnMapping } = parseContactSheet(input.buffer);
 
@@ -239,6 +245,26 @@ export async function importContacts(input: {
   const existingKeys = new Set(existing.map((row) => `${row.ownerUserId ?? ''}:${row.phoneNumber}`));
   const assignedCounts = new Map<string, number>();
 
+  /**
+   * The batch these rows belong to.
+   *
+   * Created only once there is something to file under it, so a sheet that
+   * turns out to be entirely unparseable does not leave an empty batch in the
+   * picker.
+   */
+  const batch = input.batchName?.trim()
+    ? await prisma.messagingLeadBatch.create({
+        data: {
+          name: input.batchName.trim(),
+          fileName: input.fileName ?? null,
+          totalRows: rows.length,
+          importedCount: valid.length,
+          createdById: input.createdById ?? null,
+        },
+        select: { id: true, name: true },
+      })
+    : null;
+
   const BATCH = 500;
   for (let i = 0; i < valid.length; i += BATCH) {
     const slice = valid.slice(i, i + BATCH);
@@ -267,6 +293,7 @@ export async function importContacts(input: {
             tags: [...new Set([...(row.tags ?? []), ...(input.defaultTags ?? [])])],
             source: 'import',
             ownerUserId: owner,
+            batchId: batch?.id ?? null,
           },
           update: {
             // Only overwrite fields the sheet actually supplied — a partial
@@ -280,6 +307,9 @@ export async function importContacts(input: {
             ...(row.state ? { state: row.state } : {}),
             ...(row.zip ? { zip: row.zip } : {}),
             ...(row.tags?.length ? { tags: row.tags } : {}),
+            // Re-uploading a lead moves it into the newer batch: the most
+            // recent list is the one an agent will be asked to work.
+            ...(batch ? { batchId: batch.id } : {}),
           },
         });
       }),
@@ -299,14 +329,27 @@ export async function importContacts(input: {
     columnMapping,
     sampleErrors,
     assigned: [...assignedCounts.entries()].map(([userId, count]) => ({ userId, count })),
+    batch,
   };
 }
+
+export type ContactDisposition = 'NEW' | 'INTERESTED' | 'NOT_INTERESTED';
 
 export async function listContacts(params: {
   page?: number;
   pageSize?: number;
   search?: string;
   status?: 'ACTIVE' | 'BLOCKED';
+  /** Agent's manual qualification. */
+  disposition?: ContactDisposition;
+  /** Restrict to one lead upload. */
+  batchId?: string;
+  /**
+   * Blocked or opted-out only. Opt-out lives on the conversation, not the
+   * contact, so it is resolved through a suppression lookup rather than a
+   * column on this table.
+   */
+  suppressedOnly?: boolean;
   /**
    * Restrict to leads owned by these users. `null`/omitted means no
    * restriction (admins); an array scopes a rep to their own leads.
@@ -319,6 +362,23 @@ export async function listContacts(params: {
 
   const where: Record<string, unknown> = {};
   if (params.status) where.status = params.status;
+  if (params.disposition) where.disposition = params.disposition;
+  if (params.batchId) where.batchId = params.batchId;
+
+  /**
+   * "Blocked / opted out" is one filter to an operator but two facts to us: a
+   * manually blocked contact carries status BLOCKED, while an opt-out is a
+   * suppression row keyed on the phone number. Both are resolved here so the
+   * filter means what the label says.
+   */
+  if (params.suppressedOnly) {
+    const suppressed = await prisma.messagingSuppression.findMany({
+      where: { active: true },
+      select: { phoneNumber: true },
+    });
+    const numbers = [...new Set(suppressed.map((row) => row.phoneNumber))];
+    where.OR = [{ status: 'BLOCKED' }, ...(numbers.length ? [{ phoneNumber: { in: numbers } }] : [])];
+  }
 
   // Scope to the caller's own leads. An empty array means they own none, so
   // they see none — failing closed, since the alternative shows them someone
@@ -329,13 +389,22 @@ export async function listContacts(params: {
 
   if (search) {
     const normalized = normalizePhoneNumber(search);
-    where.OR = [
+    const searchOr = [
       { phoneNumber: { contains: normalized ?? search } },
       { firstName: { contains: search, mode: 'insensitive' } },
       { lastName: { contains: search, mode: 'insensitive' } },
       { company: { contains: search, mode: 'insensitive' } },
       { emailAddress: { contains: search, mode: 'insensitive' } },
     ];
+
+    // The suppression filter already claimed `OR`. Assigning over it would
+    // silently drop that filter, so the two are combined with AND instead.
+    if (where.OR) {
+      where.AND = [{ OR: where.OR }, { OR: searchOr }];
+      delete where.OR;
+    } else {
+      where.OR = searchOr;
+    }
   }
 
   const [items, total] = await Promise.all([
@@ -344,6 +413,7 @@ export async function listContacts(params: {
       orderBy: { createdAt: 'desc' },
       skip: (page - 1) * pageSize,
       take: pageSize,
+      include: { batch: { select: { id: true, name: true } } },
     }),
     prisma.messagingContact.count({ where }),
   ]);
@@ -449,4 +519,102 @@ export async function leadDistributionSummary() {
       count: row._count._all,
     }))
     .sort((a, b) => b.count - a.count);
+}
+
+/* ============================================================================
+ * Disposition — the agent's manual read on a lead
+ * ==========================================================================*/
+
+const DISPOSITIONS = new Set<ContactDisposition>(['NEW', 'INTERESTED', 'NOT_INTERESTED']);
+
+/**
+ * Record how an agent has qualified a contact.
+ *
+ * Set from the conversation, so `contactId` is often not to hand — the phone
+ * number is. Both are accepted, and the number resolves against the caller's
+ * own contact row where ownership is scoped, so one agent's judgement never
+ * overwrites another's on the same number.
+ */
+export async function setDisposition(input: {
+  contactId?: string | null;
+  phoneNumber?: string | null;
+  disposition: ContactDisposition;
+  actorUserId?: string | null;
+  /** Scope for a phone-number lookup; null means unrestricted (admin). */
+  ownerUserIds?: string[] | null;
+}): Promise<{ updated: number; disposition: ContactDisposition }> {
+  const disposition = String(input.disposition || '').toUpperCase() as ContactDisposition;
+  if (!DISPOSITIONS.has(disposition)) {
+    throw new Error(`"${input.disposition}" is not a disposition (NEW, INTERESTED or NOT_INTERESTED)`);
+  }
+
+  const data = {
+    disposition,
+    // NEW is "un-mark this", so it clears the audit fields rather than
+    // recording who decided the lead was undecided.
+    dispositionAt: disposition === 'NEW' ? null : new Date(),
+    dispositionById: disposition === 'NEW' ? null : input.actorUserId ?? null,
+  };
+
+  if (input.contactId) {
+    const where: Record<string, unknown> = { id: input.contactId };
+    if (Array.isArray(input.ownerUserIds)) where.ownerUserId = { in: input.ownerUserIds };
+    const result = await prisma.messagingContact.updateMany({ where, data });
+    return { updated: result.count, disposition };
+  }
+
+  const phoneNumber = normalizePhoneNumber(input.phoneNumber);
+  if (!phoneNumber) throw new Error('A contact id or a valid phone number is required');
+
+  const where: Record<string, unknown> = { phoneNumber };
+  if (Array.isArray(input.ownerUserIds)) where.ownerUserId = { in: input.ownerUserIds };
+
+  const result = await prisma.messagingContact.updateMany({ where, data });
+  return { updated: result.count, disposition };
+}
+
+/* ============================================================================
+ * Lead batches
+ * ==========================================================================*/
+
+/**
+ * Lead uploads, with how many of their rows this caller owns.
+ *
+ * `ownerUserIds` is what makes a batch mean different things to different
+ * people: an admin sees the whole upload, an agent sees only their share — and
+ * a batch none of their leads came from is left out entirely, so the broadcast
+ * picker never offers an audience that would resolve to nobody.
+ */
+export async function listLeadBatches(params: { ownerUserIds?: string[] | null } = {}) {
+  const contactWhere: Record<string, unknown> = { batchId: { not: null } };
+  if (Array.isArray(params.ownerUserIds)) {
+    contactWhere.ownerUserId = { in: params.ownerUserIds };
+  }
+
+  const grouped = await prisma.messagingContact.groupBy({
+    by: ['batchId'],
+    where: contactWhere as never,
+    _count: { _all: true },
+  });
+
+  const counts = new Map(grouped.map((row) => [row.batchId as string, row._count._all]));
+  if (counts.size === 0) return [];
+
+  const batches = await prisma.messagingLeadBatch.findMany({
+    where: { id: { in: [...counts.keys()] } },
+    orderBy: { createdAt: 'desc' },
+    include: { createdBy: { select: { id: true, firstName: true, lastName: true, email: true } } },
+  });
+
+  return batches.map((batch) => ({
+    id: batch.id,
+    name: batch.name,
+    fileName: batch.fileName,
+    totalRows: batch.totalRows,
+    importedCount: batch.importedCount,
+    createdAt: batch.createdAt,
+    createdBy: batch.createdBy,
+    /** How many of this batch's leads the caller can actually message. */
+    myLeadCount: counts.get(batch.id) ?? 0,
+  }));
 }

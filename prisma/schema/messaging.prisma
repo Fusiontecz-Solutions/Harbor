@@ -14,6 +14,18 @@ enum MessagingContactStatus {
   BLOCKED
 }
 
+/// How an agent has qualified a contact, set by hand from the conversation.
+///
+/// Deliberately NOT inferred from reply keywords: a mislabelled lead is
+/// silently dropped from every follow-up, which is worse than an unlabelled
+/// one. NEW means "nobody has judged this yet" and is the only state that
+/// stays in the follow-up audience.
+enum MessagingDisposition {
+  NEW
+  INTERESTED
+  NOT_INTERESTED
+}
+
 enum MessagingDirection {
   INBOUND
   OUTBOUND
@@ -33,6 +45,9 @@ enum MessagingMessageStatus {
 
 enum SmsBroadcastStatus {
   DRAFT
+  /// Built by an agent and waiting for a Super Admin to approve it. Agents
+  /// prepare campaigns against their own leads but never send unsupervised.
+  PENDING_APPROVAL
   QUEUED
   RUNNING
   PAUSED
@@ -91,6 +106,13 @@ model MessagingContact {
   zip          String?
   tags         String[]               @default([])
   status       MessagingContactStatus @default(ACTIVE)
+  /// Agent's manual qualification. Anything other than NEW leaves the
+  /// follow-up audience.
+  disposition  MessagingDisposition   @default(NEW)
+  dispositionAt   DateTime?
+  dispositionById String?             @db.Uuid
+  /// The upload this lead arrived in, so a broadcast can target one batch.
+  batchId      String?                @db.Uuid
   /// Where the row came from: manual | import | inbound | broadcast.
   source       String                 @default("manual")
   /// Optional link to the CRM client this number belongs to.
@@ -101,6 +123,8 @@ model MessagingContact {
 
   client        Client?                 @relation(fields: [clientId], references: [id], onDelete: SetNull)
   owner         User?                   @relation("MessagingContactOwner", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  dispositionBy User?                   @relation("MessagingContactDispositionBy", fields: [dispositionById], references: [id], onDelete: SetNull)
+  batch         MessagingLeadBatch?     @relation(fields: [batchId], references: [id], onDelete: SetNull)
   conversations MessagingConversation[]
   recipients    SmsBroadcastRecipient[]
 
@@ -109,6 +133,52 @@ model MessagingContact {
   @@index([status])
   @@index([clientId])
   @@index([createdAt])
+  @@index([disposition])
+  @@index([batchId, ownerUserId])
+}
+
+/// One lead upload.
+///
+/// Distribution already spreads a sheet's rows across agents, but until now
+/// nothing remembered that they arrived together — so an agent could not say
+/// "message the list you gave me on Tuesday". A batch is that identity: each
+/// agent sees their own slice of it as a selectable broadcast audience.
+model MessagingLeadBatch {
+  id            String   @id @default(uuid()) @db.Uuid
+  name          String
+  /// Original upload filename, for recognising a batch months later.
+  fileName      String?
+  totalRows     Int      @default(0)
+  importedCount Int      @default(0)
+  createdById   String?  @db.Uuid
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  createdBy User?              @relation("MessagingLeadBatchCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  contacts  MessagingContact[]
+
+  @@index([createdAt])
+}
+
+/// A recurring time of day that broadcasts may be scheduled into.
+///
+/// Seeded with 10:00, 13:30 and 16:30 America/New_York. Stored as rows rather
+/// than constants so the times can move without a deploy, and stored as a
+/// local time plus a zone rather than a UTC offset so they stay correct across
+/// daylight saving.
+model MessagingSendWindow {
+  id        String   @id @default(uuid()) @db.Uuid
+  label     String?
+  /// 24-hour local time, "HH:MM".
+  timeOfDay String
+  timezone  String   @default("America/New_York")
+  isActive  Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([timeOfDay, timezone])
+  @@index([isActive])
 }
 
 /// Denormalized inbox row — one per (business number, contact number) pair.
@@ -220,16 +290,29 @@ model SmsBroadcast {
   startedAt         DateTime?
   finishedAt        DateTime?
   createdById       String?   @db.Uuid
+  /// Set when a Super Admin released this campaign to send. A broadcast in
+  /// PENDING_APPROVAL never reaches the queue without it.
+  approvedById      String?   @db.Uuid
+  approvedAt        DateTime?
+  /// The campaign this one chases. Null for an original send.
+  parentBroadcastId String?   @db.Uuid
+  /// The lead upload this audience was drawn from, when one was picked.
+  leadBatchId       String?   @db.Uuid
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
   createdBy  User?                   @relation("SmsBroadcastCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  approvedBy User?                   @relation("SmsBroadcastApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+  parent     SmsBroadcast?           @relation("SmsBroadcastFollowUp", fields: [parentBroadcastId], references: [id], onDelete: SetNull)
+  followUps  SmsBroadcast[]          @relation("SmsBroadcastFollowUp")
   recipients SmsBroadcastRecipient[]
   messages   MessagingMessage[]
 
   @@index([status])
   @@index([createdAt])
   @@index([createdById])
+  @@index([parentBroadcastId])
+  @@index([status, scheduledAt])
 }
 
 /// Pre-stored recipient rows. Written as QUEUED up front (Fivra's

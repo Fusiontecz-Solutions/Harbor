@@ -12,6 +12,8 @@ import { testRedisConnection } from './config/redis';
 import { startApplicationApprovalWorker } from './workers/applicationApprovalWorker';
 import { startSmsBroadcastWorker } from './workers/smsBroadcastWorker';
 import { startDeliveryReconciler } from './services/messaging/deliveryReconciler';
+import { startBroadcastScheduler } from './services/messaging/broadcastScheduler';
+import { ensureDefaultSendWindows } from './services/messaging/sendWindow.service';
 import { verifySuperAdminProxy } from './middleware/verifySuperAdminProxy';
 import { activityLogger } from './middleware/activityLogger';
 import { getDefaultMailFrom, isSendGridConfigured } from './config/nodemailer';
@@ -99,7 +101,18 @@ void testRedisConnection()
     // Pull-side backstop for delivery status: a missed Infobip callback would
     // otherwise leave a rejected message showing as sent forever.
     startDeliveryReconciler();
+    // Starts campaigns whose scheduled window has arrived. Without this,
+    // `scheduledAt` is written and never read, and a scheduled blast never
+    // sends.
+    startBroadcastScheduler();
   });
+
+// Seed the three default send windows on a fresh install. Failing this must
+// not stop the server: the windows are editable, and an admin can add them by
+// hand if the seed could not run.
+void ensureDefaultSendWindows().catch((err) =>
+  console.error('[messaging:windows] seed failed:', (err as Error)?.message),
+);
 
 // Initialize Socket.IO
 initializeSocketIO(httpServer);
