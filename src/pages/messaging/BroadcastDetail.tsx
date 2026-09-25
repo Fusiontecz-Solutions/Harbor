@@ -22,6 +22,7 @@ import {
     MessageSquare,
     Pause,
     Play,
+    Repeat2,
     Send,
     ShieldOff,
     X,
@@ -31,6 +32,7 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import FollowUpModal from '@/components/messaging/FollowUpModal';
 import {
     Table,
     TableBody,
@@ -101,6 +103,7 @@ export default function BroadcastDetail() {
 
     const [errorBreakdown, setErrorBreakdown] = useState<ErrorBreakdownRow[]>([]);
     const [isExporting, setIsExporting] = useState(false);
+    const [showFollowUp, setShowFollowUp] = useState(false);
 
     const loadBroadcast = useCallback(async () => {
         try {
@@ -247,6 +250,13 @@ export default function BroadcastDetail() {
                     {broadcast.status !== 'COMPLETED' && broadcast.status !== 'CANCELLED' && (
                         <Button size="sm" variant="ghost" onClick={() => act('cancel')}>
                             <X className="mr-1 h-4 w-4" /> Cancel
+                        </Button>
+                    )}
+                    {/* Only worth offering once the campaign has finished: until
+                        then "never replied" is just "has not replied yet". */}
+                    {broadcast.status === 'COMPLETED' && (
+                        <Button size="sm" variant="secondary" onClick={() => setShowFollowUp(true)}>
+                            <Repeat2 className="mr-1 h-4 w-4" /> Follow up
                         </Button>
                     )}
                 </div>
@@ -427,6 +437,13 @@ export default function BroadcastDetail() {
                     )}
                 </CardContent>
             </Card>
+
+            <FollowUpModal
+                broadcastId={broadcast.id}
+                open={showFollowUp}
+                onOpenChange={setShowFollowUp}
+                onCreated={() => navigate('/broadcasts')}
+            />
         </div>
     );
 }

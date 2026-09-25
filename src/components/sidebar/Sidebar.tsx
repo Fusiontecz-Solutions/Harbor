@@ -14,6 +14,7 @@ import ContactPhone from "@mui/icons-material/ContactPhone";
 import Dialpad from "@mui/icons-material/Dialpad";
 import GroupAdd from "@mui/icons-material/GroupAdd";
 import Insights from "@mui/icons-material/Insights";
+import Schedule from "@mui/icons-material/Schedule";
 import {
   Sidebar as UISidebar,
   SidebarHeader,
@@ -150,6 +151,7 @@ const sidebarSections: SidebarNavSection[] = [
       { label: "Contacts & DNC", url: "/messaging-contacts", icon: ContactPhone },
       { label: "Sending Numbers", url: "/messaging-senders", icon: Dialpad, adminOnly: true },
       { label: "Lead Distribution", url: "/lead-distribution", icon: GroupAdd, adminOnly: true },
+      { label: "Send Windows", url: "/send-windows", icon: Schedule, adminOnly: true },
       { label: "Performance", url: "/messaging-performance", icon: Insights, adminOnly: true },
     ],
   },

@@ -15,6 +15,8 @@ import { toast } from 'react-toastify';
 import {
     AlertCircle,
     Ban,
+    ThumbsDown,
+    ThumbsUp,
     Check,
     CheckCheck,
     ChevronRight,
@@ -50,6 +52,7 @@ import { ClientPicker } from '@/components/messaging/ClientPicker';
 import { MessagingAvatar } from '@/components/messaging/MessagingAvatar';
 import {
     blockContact,
+    setContactDisposition,
     deleteConversation as deleteConversationRequest,
     fetchContactProfile,
     fetchMessagingConfig,
@@ -57,6 +60,7 @@ import {
     unblockContact,
     type ClientRecipient,
     type ContactProfile,
+    type ContactDisposition,
     type Conversation,
     type Message,
     type MessagingConfig,
@@ -391,6 +395,37 @@ export default function Inbox() {
         }
     }, [activeConversation, reloadConversations]);
 
+    /**
+     * Mark the lead Interested / Not Interested.
+     *
+     * Clicking the marker that is already set clears it back to NEW, so an
+     * agent can undo a misclick without hunting for a third button — and
+     * clearing it puts the lead back into the follow-up audience, which is the
+     * only way to reverse that exclusion.
+     */
+    const handleDisposition = useCallback(
+        async (next: ContactDisposition) => {
+            if (!activeConversation) return;
+            const current = contactDetail?.disposition ?? 'NEW';
+            const value: ContactDisposition = current === next ? 'NEW' : next;
+
+            // Optimistic: the marker is the agent's own click, and a failure
+            // re-reads the real value below.
+            setContactDetail((previous) => (previous ? { ...previous, disposition: value } : previous));
+
+            try {
+                await setContactDisposition({
+                    phoneNumber: activeConversation.contactNumber,
+                    disposition: value,
+                });
+            } catch (error) {
+                setContactDetail((previous) => (previous ? { ...previous, disposition: current } : previous));
+                console.error('[inbox] failed to set disposition:', error);
+            }
+        },
+        [activeConversation, contactDetail?.disposition],
+    );
+
     const canSend = Boolean(
         activeConversation && !activeConversation.isBlocked && !activeConversation.isOptedOut && config?.configured,
     );
@@ -608,6 +643,43 @@ export default function Inbox() {
                                     </Badge>
                                 )}
                                 {activeConversation.isOptedOut && <Badge variant="destructive">Opted out</Badge>}
+
+                                {/* Interested / Not Interested. Either marker takes the lead
+                                    out of follow-up broadcasts; clicking the active one
+                                    clears it back to unmarked. */}
+                                <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className={cn(
+                                        'h-8 w-8',
+                                        contactDetail?.disposition === 'INTERESTED' && 'text-emerald-600',
+                                    )}
+                                    onClick={() => void handleDisposition('INTERESTED')}
+                                    title={
+                                        contactDetail?.disposition === 'INTERESTED'
+                                            ? 'Interested — click to clear'
+                                            : 'Mark as interested (removes from follow-up)'
+                                    }
+                                >
+                                    <ThumbsUp className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className={cn(
+                                        'h-8 w-8',
+                                        contactDetail?.disposition === 'NOT_INTERESTED' && 'text-amber-600',
+                                    )}
+                                    onClick={() => void handleDisposition('NOT_INTERESTED')}
+                                    title={
+                                        contactDetail?.disposition === 'NOT_INTERESTED'
+                                            ? 'Not interested — click to clear'
+                                            : 'Mark as not interested (removes from follow-up)'
+                                    }
+                                >
+                                    <ThumbsDown className="h-4 w-4" />
+                                </Button>
+
                                 {config?.voiceEnabled && (
                                     <Button size="icon" variant="ghost" className="h-8 w-8" title="Call this contact">
                                         <Phone className="h-4 w-4" />

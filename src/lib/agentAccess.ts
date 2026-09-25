@@ -38,6 +38,7 @@ const AGENT_BLOCKED_PATH_SNIPPETS = [
   "/messaging-senders",
   "/lead-distribution",
   "/messaging-performance",
+  "/send-windows",
 ] as const;
 
 export function isAgentAllowedPath(pathname: string): boolean {
