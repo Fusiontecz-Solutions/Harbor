@@ -110,6 +110,10 @@ export const impersonateUserService = async (
     throw new Error("User not found");
   }
 
+  if (!user.isActive) {
+    throw new Error("Cannot switch to an inactive user");
+  }
+
   if (user.role === "ADMIN" || user.role === "SUPER_ADMIN") {
     throw new Error("Cannot impersonate another admin");
   }

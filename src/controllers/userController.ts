@@ -362,6 +362,9 @@ class UserController {
 
             const adminId = (req as any).user.id;
             const { userId } = req.body;
+            if (!userId) {
+                return res.status(400).json({ success: false, message: 'userId is required' });
+            }
 
             const result = await userService.impersonateUserService(adminId, userId);
 
@@ -379,9 +382,17 @@ class UserController {
                 });
 
         } catch (error: any) {
-            return res.status(500).json({
+            const message = String(error?.message || 'Failed to switch user');
+            const status = message.startsWith('Only admin')
+                ? 403
+                : message === 'User not found'
+                    ? 404
+                    : message.startsWith('Cannot')
+                        ? 400
+                        : 500;
+            return res.status(status).json({
                 success: false,
-                message: error.message
+                message
             });
         }
     };

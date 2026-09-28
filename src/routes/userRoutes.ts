@@ -29,7 +29,7 @@ router.patch('/:id/toggle-active', userController.toggleActive.bind(userControll
 router.delete('/:id', requireAdmin, userController.delete.bind(userController));
 
 // Impersonate user
-router.post('/impersonate', userController.impersonateUser.bind(userController));
+router.post('/impersonate', requireAdmin, userController.impersonateUser.bind(userController));
 
 export default router;
 
