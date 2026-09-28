@@ -32,6 +32,8 @@ import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import { useSocket } from '@/context/SocketContext';
 import { CreateBroadcastModal } from '@/components/messaging/CreateBroadcastModal';
+import { isAgentRole } from '@/lib/agentAccess';
+import { resolveEffectiveRole } from '@/lib/sessionRole';
 import {
     cancelBroadcast,
     fetchBroadcasts,
@@ -73,6 +75,8 @@ const STATUS_FILTER_LABELS: Record<string, string> = {
 export default function Broadcasts() {
     const { socket } = useSocket();
     const navigate = useNavigate();
+    // Agents prepare campaigns; releasing one (approve, reject, start) is an admin call.
+    const canRelease = !isAgentRole(resolveEffectiveRole(undefined));
 
     const [broadcasts, setBroadcasts] = useState<BroadcastSummary[]>([]);
     const [isLoading, setIsLoading] = useState(true);
@@ -229,6 +233,7 @@ export default function Broadcasts() {
                                 <BroadcastRow
                                     key={broadcast.id}
                                     broadcast={broadcast}
+                                    canRelease={canRelease}
                                     onAction={act}
                                     onOpen={() => navigate(`/broadcasts/${broadcast.id}`)}
                                 />
@@ -267,10 +272,12 @@ function SummaryTile({
 
 function BroadcastRow({
     broadcast,
+    canRelease,
     onAction,
     onOpen,
 }: {
     broadcast: BroadcastSummary;
+    canRelease: boolean;
     onAction: (id: string, action: 'start' | 'pause' | 'cancel' | 'approve' | 'reject') => void;
     onOpen: () => void;
 }) {
@@ -325,7 +332,7 @@ function BroadcastRow({
 
             <div className="flex shrink-0 items-center gap-1">
                 {/* An agent built this and it will not send until someone releases it. */}
-                {broadcast.status === 'PENDING_APPROVAL' && (
+                {canRelease && broadcast.status === 'PENDING_APPROVAL' && (
                     <>
                         <Button
                             size="icon"
@@ -347,7 +354,7 @@ function BroadcastRow({
                         </Button>
                     </>
                 )}
-                {(broadcast.status === 'DRAFT' || broadcast.status === 'PAUSED' || broadcast.status === 'QUEUED') && (
+                {canRelease && (broadcast.status === 'DRAFT' || broadcast.status === 'PAUSED' || broadcast.status === 'QUEUED') && (
                     <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => onAction(broadcast.id, 'start')} title="Start">
                         <Play className="h-4 w-4" />
                     </Button>

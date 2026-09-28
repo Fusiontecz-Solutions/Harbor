@@ -42,6 +42,8 @@ import {
     TableRow,
 } from '@/components/ui/table';
 import { cn } from '@/lib/utils';
+import { isAgentRole } from '@/lib/agentAccess';
+import { resolveEffectiveRole } from '@/lib/sessionRole';
 import { useSocket } from '@/context/SocketContext';
 import {
     cancelBroadcast,
@@ -91,6 +93,8 @@ export default function BroadcastDetail() {
     const { broadcastId = '' } = useParams();
     const navigate = useNavigate();
     const { socket } = useSocket();
+    // Starting is sending; agents prepare and an admin releases.
+    const canRelease = !isAgentRole(resolveEffectiveRole(undefined));
 
     const [broadcast, setBroadcast] = useState<BroadcastSummary | null>(null);
     const [isLoading, setIsLoading] = useState(true);
@@ -237,7 +241,7 @@ export default function BroadcastDetail() {
 
                 <div className="flex items-center gap-2">
                     <Badge>{broadcast.status}</Badge>
-                    {(broadcast.status === 'DRAFT' || broadcast.status === 'PAUSED' || broadcast.status === 'QUEUED') && (
+                    {canRelease && (broadcast.status === 'DRAFT' || broadcast.status === 'PAUSED' || broadcast.status === 'QUEUED') && (
                         <Button size="sm" onClick={() => act('start')}>
                             <Play className="mr-1 h-4 w-4" /> Start
                         </Button>

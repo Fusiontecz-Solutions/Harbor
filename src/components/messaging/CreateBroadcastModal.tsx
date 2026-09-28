@@ -42,6 +42,8 @@ import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
+import { isAgentRole } from '@/lib/agentAccess';
+import { resolveEffectiveRole } from '@/lib/sessionRole';
 import { ClientPicker } from '@/components/messaging/ClientPicker';
 import {
     createBroadcastFromFile,
@@ -67,6 +69,10 @@ const TOTAL_STEPS = 3;
 const SEGMENT_CHARS = 160;
 
 export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBroadcastModalProps) {
+    // The CRM client book is admin-only; agents broadcast to the leads distributed to them.
+    const canUseClients = !isAgentRole(resolveEffectiveRole(undefined));
+    const defaultSource: AudienceSource = canUseClients ? 'clients' : 'batch';
+
     const [step, setStep] = useState(1);
     const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -75,7 +81,7 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
     const [body, setBody] = useState('');
 
     // Step 2
-    const [source, setSource] = useState<AudienceSource>('clients');
+    const [source, setSource] = useState<AudienceSource>(defaultSource);
     const [clientIds, setClientIds] = useState<string[]>([]);
     const [leadBatchId, setLeadBatchId] = useState<string>('');
     const [batches, setBatches] = useState<LeadBatch[]>([]);
@@ -94,15 +100,16 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
         setStep(1);
         setName('');
         setBody('');
-        setSource('clients');
+        setSource(defaultSource);
         setClientIds([]);
+        setLeadBatchId('');
         setFile(null);
         setManualNumbers('');
         setThrottle('10');
         setScheduledAt('');
         setAckCompliance(false);
         setAckIrreversible(false);
-    }, []);
+    }, [defaultSource]);
 
     const close = useCallback(
         (nextOpen: boolean) => {
@@ -310,10 +317,12 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
 
                     {step === 2 && (
                         <Tabs value={source} onValueChange={(value: string) => setSource(value as AudienceSource)}>
-                            <TabsList className="grid w-full grid-cols-4">
-                                <TabsTrigger value="clients">
-                                    <Users className="mr-1 h-4 w-4" /> CRM clients
-                                </TabsTrigger>
+                            <TabsList className={cn('grid w-full', canUseClients ? 'grid-cols-4' : 'grid-cols-3')}>
+                                {canUseClients && (
+                                    <TabsTrigger value="clients">
+                                        <Users className="mr-1 h-4 w-4" /> CRM clients
+                                    </TabsTrigger>
+                                )}
                                 <TabsTrigger value="batch">
                                     <Layers className="mr-1 h-4 w-4" /> Leads
                                 </TabsTrigger>
@@ -323,9 +332,11 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
                                 <TabsTrigger value="manual">Numbers</TabsTrigger>
                             </TabsList>
 
-                            <TabsContent value="clients" className="pt-3">
-                                <ClientPicker selectedIds={clientIds} onChange={setClientIds} />
-                            </TabsContent>
+                            {canUseClients && (
+                                <TabsContent value="clients" className="pt-3">
+                                    <ClientPicker selectedIds={clientIds} onChange={setClientIds} />
+                                </TabsContent>
+                            )}
 
                             <TabsContent value="batch" className="space-y-2 pt-3">
                                 <Label htmlFor="bc-batch">Lead upload</Label>
@@ -401,9 +412,13 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
                                         value={
                                             source === 'clients'
                                                 ? `${clientIds.length} CRM client${clientIds.length === 1 ? '' : 's'}`
-                                                : source === 'manual'
-                                                  ? `${manualList.length} number${manualList.length === 1 ? '' : 's'}`
-                                                  : (file?.name ?? 'spreadsheet')
+                                                : source === 'batch'
+                                                  ? selectedBatch
+                                                      ? `${selectedBatch.name} (${selectedBatch.myLeadCount.toLocaleString()} leads)`
+                                                      : 'No lead upload chosen'
+                                                  : source === 'manual'
+                                                    ? `${manualList.length} number${manualList.length === 1 ? '' : 's'}`
+                                                    : (file?.name ?? 'spreadsheet')
                                         }
                                     />
                                     <Row label="Segments per message" value={String(segments)} />

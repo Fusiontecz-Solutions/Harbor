@@ -32,6 +32,14 @@ const getPageTitle = (pathname: string): string => {
     if (pathname.startsWith('/notifications')) return 'Notifications';
     if (pathname.startsWith('/user-setting') || pathname.startsWith('/settings')) return 'Settings';
     if (pathname.includes('terms-offer')) return 'Create Offer';
+    if (pathname.startsWith('/letter-generator')) return 'Letters';
+    if (pathname.startsWith('/inbox')) return 'Inbox';
+    if (pathname.startsWith('/broadcasts')) return 'Broadcasts';
+    if (pathname.startsWith('/messaging-contacts')) return 'Contacts & DNC';
+    if (pathname.startsWith('/messaging-senders')) return 'Sending Numbers';
+    if (pathname.startsWith('/lead-distribution')) return 'Lead Distribution';
+    if (pathname.startsWith('/send-windows')) return 'Send Windows';
+    if (pathname.startsWith('/messaging-performance')) return 'Performance';
     return 'Contract Workflow';
 };
 

@@ -47,6 +47,8 @@ import {
     DialogTitle,
 } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
+import { isAgentRole } from '@/lib/agentAccess';
+import { resolveEffectiveRole } from '@/lib/sessionRole';
 import { useInbox } from '@/hooks/useInbox';
 import { ClientPicker } from '@/components/messaging/ClientPicker';
 import { MessagingAvatar } from '@/components/messaging/MessagingAvatar';
@@ -197,6 +199,8 @@ export default function Inbox() {
     const [isSending, setIsSending] = useState(false);
     const [newNumber, setNewNumber] = useState('');
     const [isClientPickerOpen, setIsClientPickerOpen] = useState(false);
+    // The CRM client book is admin-only; agents message their own leads.
+    const canUseClients = !isAgentRole(resolveEffectiveRole(undefined));
     const [showDetails, setShowDetails] = useState(true);
     const [contactDetail, setContactDetail] = useState<ContactProfile | null>(null);
     /** A chat the agent has opened but not yet sent on — never persisted. */
@@ -549,15 +553,17 @@ export default function Inbox() {
                         <Button size="sm" variant="secondary" className="h-8 px-2" onClick={handleStartConversation}>
                             <MessageSquarePlus className="h-4 w-4" />
                         </Button>
-                        <Button
-                            size="sm"
-                            variant="outline"
-                            className="h-8 px-2"
-                            onClick={() => setIsClientPickerOpen(true)}
-                            title="Message a CRM client"
-                        >
-                            <Users className="h-4 w-4" />
-                        </Button>
+                        {canUseClients && (
+                            <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-8 px-2"
+                                onClick={() => setIsClientPickerOpen(true)}
+                                title="Message a CRM client"
+                            >
+                                <Users className="h-4 w-4" />
+                            </Button>
+                        )}
                     </div>
                 </div>
 
