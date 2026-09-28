@@ -30,7 +30,7 @@ import {
   rejectBroadcast,
   resolveBatchAudience,
 } from '../services/messaging/followUp.service';
-import { isPrivilegedMessagingRole } from '../services/messaging/sender.service';
+import { isPrivilegedMessagingRole, resolveSenderForActor } from '../services/messaging/sender.service';
 import {
   deleteSendWindow,
   listSendWindows,
@@ -69,6 +69,23 @@ const ownerScope = (req: Request): string[] | null => (isAdmin(req) ? null : [ac
 /** 403 body shared by every admin-only handler here. */
 const adminOnly = (res: Response, what: string): void => {
   res.status(403).json({ success: false, message: `Only admins can ${what}` });
+};
+
+/**
+ * Gate for every /broadcasts/:id route: an admin may act on any broadcast, an
+ * agent only on the ones they created. Anything else answers 404 so ids of
+ * other people's campaigns aren't confirmed. Returns false once it has replied.
+ */
+const ensureBroadcastAccess = async (req: Request, res: Response): Promise<boolean> => {
+  const broadcast = await prisma.smsBroadcast.findUnique({
+    where: { id: String(req.params.id) },
+    select: { createdById: true },
+  });
+  if (!broadcast || (!isAdmin(req) && broadcast.createdById !== actorId(req))) {
+    res.status(404).json({ success: false, message: 'Broadcast not found' });
+    return false;
+  }
+  return true;
 };
 
 class MessagingBroadcastController {
@@ -163,6 +180,7 @@ class MessagingBroadcastController {
       // reported back so the operator sees who was skipped and why.
       let skippedClients: Array<{ clientId: string; businessName: string; reason: string }> = [];
       if (Array.isArray(req.body?.clientIds) && req.body.clientIds.length > 0) {
+        if (!isAdmin(req)) return adminOnly(res, 'message CRM clients');
         const resolved = await resolveClientsAsRecipients(
           req.body.clientIds.map(String),
           actorId(req),
@@ -190,7 +208,10 @@ class MessagingBroadcastController {
       // Saved messaging contacts, by id.
       if (Array.isArray(req.body?.contactIds) && req.body.contactIds.length > 0) {
         const contacts = await prisma.messagingContact.findMany({
-          where: { id: { in: req.body.contactIds.map(String) } },
+          where: {
+            id: { in: req.body.contactIds.map(String) },
+            ...(isAdmin(req) ? {} : { ownerUserId: actorId(req) }),
+          },
           select: { phoneNumber: true, firstName: true, lastName: true, company: true, city: true, state: true },
         });
         recipients = [
@@ -234,10 +255,12 @@ class MessagingBroadcastController {
         scheduledAt = new Date(req.body.scheduledAt);
       }
 
+      const fromNumber = await resolveSenderForActor(actorId(req), req.user?.role, req.body?.fromNumber);
+
       const result = await createBroadcast({
         name: String(req.body?.name ?? ''),
         body: String(req.body?.body ?? req.body?.message ?? ''),
-        fromNumber: req.body?.fromNumber,
+        fromNumber,
         mediaUrls: Array.isArray(req.body?.mediaUrls) ? req.body.mediaUrls.map(String) : undefined,
         recipients,
         throttlePerSecond: req.body?.throttlePerSecond ? Number(req.body.throttlePerSecond) : null,
@@ -269,7 +292,7 @@ class MessagingBroadcastController {
       });
     } catch (err) {
       console.error('[messaging:broadcast] create failed:', err);
-      res.status(400).json({ success: false, message: (err as Error)?.message || 'Failed to create broadcast' });
+      res.status(Number((err as { statusCode?: number })?.statusCode) || 400).json({ success: false, message: (err as Error)?.message || 'Failed to create broadcast' });
     } finally {
       cleanupUploadedTempFiles(req);
     }
@@ -291,6 +314,7 @@ class MessagingBroadcastController {
   /** POST /messaging/broadcasts/:id/pause */
   async pause(req: Request, res: Response): Promise<void> {
     try {
+      if (!(await ensureBroadcastAccess(req, res))) return;
       await pauseBroadcast(String(req.params.id));
       res.json({ success: true, data: { id: req.params.id, status: 'PAUSED' } });
     } catch (err) {
@@ -302,6 +326,7 @@ class MessagingBroadcastController {
   /** POST /messaging/broadcasts/:id/cancel */
   async cancel(req: Request, res: Response): Promise<void> {
     try {
+      if (!(await ensureBroadcastAccess(req, res))) return;
       await cancelBroadcast(String(req.params.id));
       res.json({ success: true, data: { id: req.params.id, status: 'CANCELLED' } });
     } catch (err) {
@@ -350,6 +375,7 @@ class MessagingBroadcastController {
    */
   async followUpPreview(req: Request, res: Response): Promise<void> {
     try {
+      if (!(await ensureBroadcastAccess(req, res))) return;
       res.json({ success: true, data: await previewFollowUpAudience(String(req.params.id)) });
     } catch (err) {
       console.error('[messaging:broadcast] follow-up preview failed:', err);
@@ -360,6 +386,7 @@ class MessagingBroadcastController {
   /** POST /messaging/broadcasts/:id/follow-up — chase the non-responders. */
   async followUp(req: Request, res: Response): Promise<void> {
     try {
+      if (!(await ensureBroadcastAccess(req, res))) return;
       let scheduledAt: Date;
       if (req.body?.sendWindowId) {
         scheduledAt = await resolveWindowToInstant(String(req.body.sendWindowId));
@@ -450,6 +477,7 @@ class MessagingBroadcastController {
   /** GET /messaging/broadcasts/:id */
   async stats(req: Request, res: Response): Promise<void> {
     try {
+      if (!(await ensureBroadcastAccess(req, res))) return;
       const broadcast = await getBroadcastStats(String(req.params.id));
       if (!broadcast) {
         res.status(404).json({ success: false, message: 'Broadcast not found' });
@@ -471,6 +499,7 @@ class MessagingBroadcastController {
    */
   async recipients(req: Request, res: Response): Promise<void> {
     try {
+      if (!(await ensureBroadcastAccess(req, res))) return;
       const bucket = parseBucket(req.query.bucket ?? req.query.status);
       const result = await getBroadcastAudience(
         String(req.params.id),
@@ -499,6 +528,7 @@ class MessagingBroadcastController {
   /** GET /messaging/broadcasts/:id/error-breakdown — failures grouped by reason. */
   async errorBreakdown(req: Request, res: Response): Promise<void> {
     try {
+      if (!(await ensureBroadcastAccess(req, res))) return;
       const data = await getErrorBreakdown(String(req.params.id));
       res.json({ success: true, data });
     } catch (err) {
@@ -510,6 +540,7 @@ class MessagingBroadcastController {
   /** GET /messaging/broadcasts/:id/export?bucket= — CSV download of one bucket. */
   async exportRecipients(req: Request, res: Response): Promise<void> {
     try {
+      if (!(await ensureBroadcastAccess(req, res))) return;
       const broadcastId = String(req.params.id);
       const bucket = parseBucket(req.query.bucket);
 

@@ -48,20 +48,73 @@ export async function resolveSenderForUser(userId: string | null | undefined): P
   return fallback;
 }
 
+/** True when `phoneNumber` is an active sender assigned to an active user other than `userId`. */
+async function isAssignedToAnotherUser(phoneNumber: string, userId: string | null | undefined): Promise<boolean> {
+  if (!phoneNumber) return false;
+  const count = await prisma.user.count({
+    where: {
+      ...(userId ? { id: { not: userId } } : {}),
+      isActive: true,
+      messagingSender: { phoneNumber, isActive: true },
+    },
+  });
+  return count > 0;
+}
+
 /**
  * Senders whose conversations a user may see.
  *
  * Returns null for privileged roles, meaning "no restriction". For everyone
  * else it is their own sender, so a rep's inbox contains only the threads on
  * their number.
+ *
+ * An unassigned user falls back to the env default — unless that number has
+ * been assigned to someone, in which case its threads are that person's and
+ * the unassigned user gets nothing rather than a view into their inbox.
  */
 export async function visibleSendersForUser(
   userId: string | null | undefined,
   role: unknown,
 ): Promise<string[] | null> {
   if (isPrivilegedMessagingRole(role)) return null;
-  const sender = await resolveSenderForUser(userId);
-  return sender ? [sender] : [];
+  const sender = await resolveSenderDetailForUser(userId);
+  if (!sender.phoneNumber) return [];
+  if (!sender.assigned && (await isAssignedToAnotherUser(sender.phoneNumber, userId))) return [];
+  return [sender.phoneNumber];
+}
+
+export class SenderNotAllowedError extends Error {
+  readonly statusCode = 403;
+}
+
+/**
+ * The number an action by this caller goes out as.
+ *
+ * Admins may pick any sender (or fall back to their own). Everyone else is
+ * pinned to the one number whose inbox they can see: a `fromNumber` in the
+ * request cannot move an agent onto someone else's line, and an agent with no
+ * usable number is refused instead of sending as another person.
+ */
+export async function resolveSenderForActor(
+  userId: string | null | undefined,
+  role: unknown,
+  requested?: unknown,
+): Promise<string> {
+  const requestedNumber = String(requested ?? '').trim();
+  if (isPrivilegedMessagingRole(role)) {
+    return requestedNumber ? normalizeSender(requestedNumber) : resolveSenderForUser(userId);
+  }
+
+  const [own] = (await visibleSendersForUser(userId, role)) ?? [];
+  if (!own) {
+    throw new SenderNotAllowedError(
+      'No sending number is assigned to you. Ask an admin to assign one under Sending Numbers.',
+    );
+  }
+  if (requestedNumber && normalizeSender(requestedNumber) !== own) {
+    throw new SenderNotAllowedError('You can only send from your own number');
+  }
+  return own;
 }
 
 /**

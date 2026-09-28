@@ -130,7 +130,9 @@ export async function messagingPerformance(params: {
 
     prisma.smsBroadcast.groupBy({
       by: ['createdById'],
-      where: { createdAt: { gte: start, lte: end } },
+      // A campaign counts once it actually went out; drafts, rejected and
+      // still-awaiting-approval ones never reached anyone.
+      where: { startedAt: { gte: start, lte: end } },
       _count: { _all: true },
     }),
 

@@ -255,6 +255,11 @@ class MessagingContactController {
    */
   async clients(req: Request, res: Response): Promise<void> {
     try {
+      // The whole CRM book with phone numbers; agents work only their assigned leads.
+      if (!isPrivilegedMessagingRole(req.user?.role)) {
+        res.status(403).json({ success: false, message: 'Forbidden: admins only' });
+        return;
+      }
       const result = await listClientRecipients({
         search: String(req.query.search ?? ''),
         page: Number(req.query.page) || 1,

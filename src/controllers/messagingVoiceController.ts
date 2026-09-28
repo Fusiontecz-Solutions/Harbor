@@ -14,7 +14,12 @@ import {
   createWebRtcToken,
   toInfobipError,
 } from '../services/messaging/infobip.service';
-import { resolveSenderForUser } from '../services/messaging/sender.service';
+import {
+  SenderNotAllowedError,
+  resolveSenderForActor,
+  resolveSenderForUser,
+  visibleSendersForUser,
+} from '../services/messaging/sender.service';
 import { normalizePhoneNumber } from '../services/messaging/phone';
 import { checkSuppression } from '../services/messaging/suppression.service';
 
@@ -73,8 +78,7 @@ class MessagingVoiceController {
         return;
       }
 
-      const fromNumber =
-        String(req.body?.fromNumber ?? '').trim() || (await resolveSenderForUser(req.user?.id ?? null));
+      const fromNumber = await resolveSenderForActor(req.user?.id ?? null, req.user?.role, req.body?.fromNumber);
       const result = await createOutboundCall({ to: toNumber, from: fromNumber });
 
       const call = await prisma.messagingCall.create({
@@ -91,6 +95,10 @@ class MessagingVoiceController {
 
       res.status(201).json({ success: true, data: call });
     } catch (err) {
+      if (err instanceof SenderNotAllowedError) {
+        res.status(err.statusCode).json({ success: false, message: err.message });
+        return;
+      }
       const error = toInfobipError(err);
       console.error('[messaging:voice] outbound call failed:', error.message);
       res.status(502).json({ success: false, message: error.message });
@@ -103,7 +111,7 @@ class MessagingVoiceController {
       const page = Math.max(1, Number(req.query.page) || 1);
       const pageSize = Math.min(200, Math.max(1, Number(req.query.pageSize) || 50));
 
-      const where = req.query.phoneNumber
+      const phoneFilter = req.query.phoneNumber
         ? {
             OR: [
               { toNumber: normalizePhoneNumber(req.query.phoneNumber) ?? '' },
@@ -111,6 +119,20 @@ class MessagingVoiceController {
             ],
           }
         : {};
+
+      // Agents see their own calls and calls on their own line, same scope as the inbox.
+      const allowed = await visibleSendersForUser(req.user?.id ?? null, req.user?.role);
+      const ownerFilter = allowed
+        ? {
+            OR: [
+              { userId: req.user?.id ?? '' },
+              { fromNumber: { in: allowed } },
+              { toNumber: { in: allowed } },
+            ],
+          }
+        : {};
+
+      const where = { AND: [phoneFilter, ownerFilter] };
 
       const [items, total] = await Promise.all([
         prisma.messagingCall.findMany({
