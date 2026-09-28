@@ -11,6 +11,7 @@ import {
     axiosPost,
     axiosPostFormData,
 } from '@/redux/axios';
+import type { AxiosRequestConfig } from 'axios';
 
 export type MessageDirection = 'INBOUND' | 'OUTBOUND';
 
@@ -617,8 +618,8 @@ export async function deleteSender(id: string): Promise<void> {
     await axiosDelete(`${BASE}/senders/${id}`);
 }
 
-export async function fetchSenderAssignments(): Promise<SenderAssignment[]> {
-    const response = await axiosGet(`${BASE}/senders/assignments`);
+export async function fetchSenderAssignments(config?: AxiosRequestConfig): Promise<SenderAssignment[]> {
+    const response = await axiosGet(`${BASE}/senders/assignments`, config);
     return response.data.data ?? [];
 }
 

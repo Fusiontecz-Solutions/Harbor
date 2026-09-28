@@ -43,6 +43,7 @@ import { useTheme } from "@/context/ThemeContext";
 import { useEffect, useMemo, useState, type ComponentType } from "react";
 import { clearCrmCacheOnLogout } from "@/lib/crmCache";
 import { clearAllPersistentCaches } from "@/lib/persistentCache/clearAllPersistentCaches";
+import { endImpersonationOnLogout } from "@/lib/impersonation";
 import { clearHttpGetCache } from "@/lib/httpGetCache";
 import { cn } from "@/lib/utils";
 import { Loader2 } from "lucide-react";
@@ -361,6 +362,7 @@ const Sidebar = () => {
       clearCrmCacheOnLogout();
       clearHttpGetCache();
       void clearAllPersistentCaches();
+      void endImpersonationOnLogout();
       localStorage.removeItem("token");
       localStorage.removeItem("user");
       localStorage.removeItem("role");

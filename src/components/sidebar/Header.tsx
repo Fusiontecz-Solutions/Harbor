@@ -9,6 +9,7 @@ import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { fetchMessagingConfig, type MessagingConfig } from "@/services/messaging/messagingApi";
 
 import { useLocation, useNavigate } from "react-router";
+import UserSwitcher from "./UserSwitcher";
 
 /** NANP display format; anything else is left as provided. */
 const formatSenderNumber = (value: string): string => {
@@ -122,6 +123,7 @@ const Header = () => {
                                 ) : null}
                             </span>
                         )}
+                        <UserSwitcher />
                         <ThemeToggle />
                         <button
                             type="button"
