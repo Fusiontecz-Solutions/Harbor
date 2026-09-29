@@ -4016,6 +4016,8 @@ export class DocusignService {
     userId: string,
     options: {
       supplementalRefs?: string[];
+      /** Resolved refs (subset of supplementalRefs) placed before the main contract. */
+      leadingSupplementalRefs?: string[];
       standaloneDocumentRefs?: string[];
       includeMainContract?: boolean;
       mainContractLayoutKey?: string;
@@ -4112,6 +4114,7 @@ export class DocusignService {
 
       built = await buildPlatformLayoutEnvelopeDefinition({
         supplementalRefs,
+        leadingSupplementalRefs: options.leadingSupplementalRefs,
         standaloneDocumentRefs: standaloneRefs,
         includeMainContract: options.includeMainContract,
         mainContractLayoutKey: layoutKeyForSend,
@@ -4269,6 +4272,11 @@ export class DocusignService {
       templates?: Array<{ templateId: string }>;
       templateIds?: string[];
       supplementalDocumentRefs?: string[];
+      /**
+       * Refs from `supplementalDocumentRefs` placed before the main contract (state disclosure
+       * when "Place state disclosure first" is on). Envelope: leading → contract → addenda.
+       */
+      leadingSupplementalDocumentRefs?: string[];
       /** ACH / other standalone docs — envelope contains only these PDFs (no main contract). */
       standaloneDocumentRefs?: string[];
       contractTemplateFilters?: {
@@ -4337,8 +4345,17 @@ export class DocusignService {
       }
     }
 
+    let leadingSupplementalRefs: string[] = [];
+    if (options.leadingSupplementalDocumentRefs?.length && supplementalRefs.length) {
+      const resolvedLeading = await filterSupplementalRefs(
+        options.leadingSupplementalDocumentRefs.map((id) => String(id).trim()).filter(Boolean),
+      );
+      leadingSupplementalRefs = resolvedLeading.filter((ref) => supplementalRefs.includes(ref));
+    }
+
     return this.sendEnvelopeFromPlatformLayouts(userId, {
       supplementalRefs,
+      leadingSupplementalRefs,
       standaloneDocumentRefs: standaloneRefs,
       includeMainContract: options.includeMainContract,
       mainContractLayoutKey: options.mainContractLayoutKey,

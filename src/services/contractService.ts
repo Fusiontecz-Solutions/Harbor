@@ -426,6 +426,47 @@ class ContractService {
     });
   }
 
+  /**
+   * Re-sequence all mappings of one `documentType` (e.g. addendum send order) for a contract.
+   * `mappingIds` must be exactly the current set of mappings of that type; returns null otherwise.
+   * Reuses the rows' existing `order` slots so other document types keep their relative position.
+   */
+  async reorderContractDocumentTemplateMappings(
+    contractId: number,
+    documentType: string,
+    mappingIds: string[],
+  ) {
+    const existing: Array<{ id: string; order: number | null }> = await (
+      prisma as any
+    ).contractDocumentTemplateMapping.findMany({
+      where: { contractId, documentType: { equals: documentType, mode: 'insensitive' } },
+      select: { id: true, order: true },
+      orderBy: [{ order: 'asc' }, { createdAt: 'asc' }],
+    });
+    const existingIds = new Set(existing.map((row) => row.id));
+    if (
+      mappingIds.length !== existing.length ||
+      new Set(mappingIds).size !== mappingIds.length ||
+      mappingIds.some((id) => !existingIds.has(id))
+    ) {
+      return null;
+    }
+    // Strictly increasing slots so ties (legacy duplicate orders) cannot mask the new order.
+    const slots = existing.map((row) => Number(row.order || 0));
+    for (let i = 1; i < slots.length; i += 1) {
+      if (slots[i] <= slots[i - 1]) slots[i] = slots[i - 1] + 1;
+    }
+    await (prisma as any).$transaction(
+      mappingIds.map((id, index) =>
+        (prisma as any).contractDocumentTemplateMapping.update({
+          where: { id },
+          data: { order: slots[index] },
+        }),
+      ),
+    );
+    return this.getAllContractDocumentTemplateMappings(contractId);
+  }
+
   async updateContractDocumentTemplateMapping(
     id: string,
     data: { templateRef?: string; documentType?: string; order?: number },

@@ -500,6 +500,7 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
       templateIds,
       supplementalLayoutKeys,
       supplementalDocumentRefs,
+      leadingSupplementalDocumentRefs,
       standaloneDocumentRefs,
       contractTemplateFilters,
       roles,
@@ -531,6 +532,9 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
       templateIds,
       supplementalLayoutKeys,
       supplementalDocumentRefs,
+      leadingSupplementalDocumentRefs: Array.isArray(leadingSupplementalDocumentRefs)
+        ? leadingSupplementalDocumentRefs.map((ref: unknown) => String(ref))
+        : undefined,
       standaloneDocumentRefs,
       contractTemplateFilters,
       roles,
