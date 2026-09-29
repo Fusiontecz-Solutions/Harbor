@@ -248,6 +248,7 @@ import {
     type ContractSendTableRow,
 } from "./contractdata/contractSendHistory";
 import { Checkbox } from "@/components/ui/checkbox";
+import { AddendumSendOrderBoard } from "./AddendumSendOrderBoard";
 import {
     DEFAULT_DOCUSIGN_TEMPLATE_ID,
 } from "./contractdata/docusignTemplateConfig";
@@ -278,7 +279,7 @@ import {
     getBoldSignTemplateMappingRef,
     loadBoldSignTemplatePdfBlob,
 } from "./contractdata/boldSignTemplateDocument";
-import { axiosDelete, axiosGet, axiosPost } from "@/redux/axios";
+import { axiosDelete, axiosGet, axiosPost, axiosPut } from "@/redux/axios";
 
 /** Fingerprint of saved prefill + live offer money — patch open DocuSign draft when either changes. */
 function docuSignPrefillDraftFingerprint(input: {
@@ -393,8 +394,10 @@ interface PDFViewerModalProps {
         addendumDocumentRef?: string | null;
         addendumDocumentRefs?: string[] | null;
         addendumBoldSignTemplateId?: string | null;
-        /** CRM BoldSignTemplate row id (state disclosure) merged after addendum. */
+        /** CRM BoldSignTemplate row id (state disclosure). */
         disclosureDocumentRef?: string | null;
+        /** "first" = disclosure → contract → addenda; "last" = contract → addenda → disclosure. */
+        disclosurePosition?: "first" | "last";
         achDocumentRef?: string | null;
         standaloneAchOnly?: boolean;
         includeMainContract?: boolean;
@@ -1742,11 +1745,13 @@ const PDFViewerModal = ({
         [templateMappings],
     );
 
-    /** Canonical linked addenda (highest `order` first) — one row per template. */
+    /** Canonical linked addenda in DocuSign send order (`order` ascending) — one row per template. */
     const linkedAddendumMappings = useMemo(() => {
         if (!addendumTemplateMappings.length) return [];
         const sorted = [...addendumTemplateMappings].sort(
-            (a, b) => Number(b.order ?? 0) - Number(a.order ?? 0),
+            (a, b) =>
+                Number(a.order ?? 0) - Number(b.order ?? 0) ||
+                String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")),
         );
         const seen = new Set<string>();
         return sorted.filter((row) => {
@@ -1761,9 +1766,9 @@ const PDFViewerModal = ({
         });
     }, [addendumTemplateMappings]);
 
-    /** Primary linked addendum (for single-row UI helpers). */
+    /** Primary linked addendum (most recently linked — highest `order`) for single-row UI helpers. */
     const linkedAddendumMapping = useMemo(
-        () => linkedAddendumMappings[0] ?? null,
+        () => linkedAddendumMappings[linkedAddendumMappings.length - 1] ?? null,
         [linkedAddendumMappings],
     );
 
@@ -1826,6 +1831,9 @@ const PDFViewerModal = ({
     const addendumDropdownRef = useRef<HTMLDivElement>(null);
     /** Main contract in envelope — default on; addendum/disclosure auto-merge when configured below. */
     const [includeMainContractInSend, setIncludeMainContractInSend] = useState(initialIncludeMainContract);
+    /** State disclosure opens the envelope (disclosure → contract → addenda) vs. last. Saved per contract. */
+    const [disclosureFirstInSend, setDisclosureFirstInSend] = useState(true);
+    const [reorderingAddendums, setReorderingAddendums] = useState(false);
 
     useEffect(() => {
         if (!addendumDropdownOpen) return;
@@ -3014,6 +3022,32 @@ const PDFViewerModal = ({
     const draftPreparedPackageFingerprintRef = useRef<string | null>(null);
     const includeMainContractInSendRef = useRef(includeMainContractInSend);
     includeMainContractInSendRef.current = includeMainContractInSend;
+    const disclosureFirstInSendRef = useRef(disclosureFirstInSend);
+    disclosureFirstInSendRef.current = disclosureFirstInSend;
+
+    const disclosurePositionStorageKey =
+        effectiveContractId != null ? `contract:${effectiveContractId}:disclosurePosition` : null;
+    useEffect(() => {
+        if (!isOpen || !disclosurePositionStorageKey) return;
+        try {
+            const saved = localStorage.getItem(disclosurePositionStorageKey);
+            setDisclosureFirstInSend(saved !== "last");
+        } catch {
+            /* storage unavailable — keep default */
+        }
+    }, [isOpen, disclosurePositionStorageKey]);
+    const updateDisclosureFirstInSend = useCallback(
+        (first: boolean) => {
+            setDisclosureFirstInSend(first);
+            if (!disclosurePositionStorageKey) return;
+            try {
+                localStorage.setItem(disclosurePositionStorageKey, first ? "first" : "last");
+            } catch {
+                /* ignore */
+            }
+        },
+        [disclosurePositionStorageKey],
+    );
 
     const resolveSignerOverrideRowsForSend = useCallback((): ContractSignerOverrideRow[] => {
         if (showRecipientEditor) {
@@ -3294,7 +3328,22 @@ const PDFViewerModal = ({
                 return "";
             })
             .filter(Boolean);
-        if (fromSelected.length) return [...new Set(fromSelected)];
+        if (fromSelected.length) {
+            // Send order follows the persisted mapping `order` (drag board); refs not yet
+            // persisted keep their selection order at the end.
+            const mappingOrder = new Map<string, number>();
+            linkedAddendumMappingsRef.current.forEach((row, index) => {
+                const ref =
+                    getAddendumDropdownRef(row?.template) ||
+                    getBoldSignTemplateMappingRef(row?.template) ||
+                    "";
+                if (ref && !mappingOrder.has(ref)) mappingOrder.set(ref, index);
+            });
+            return [...new Set(fromSelected)]
+                .map((ref, index) => ({ ref, index, rank: mappingOrder.get(ref) ?? Infinity }))
+                .sort((a, b) => a.rank - b.rank || a.index - b.index)
+                .map((entry) => entry.ref);
+        }
 
         const fromMappings = linkedAddendumMappingsRef.current
             .map(
@@ -3341,10 +3390,13 @@ const PDFViewerModal = ({
         () =>
             [
                 contractSendPackageFingerprint(getEffectiveSendPackage()),
-                resolveAddendumTemplateIdsForDocuSignMerge().slice().sort().join(","),
+                // Ordered — reordering addenda must invalidate a prepared draft.
+                resolveAddendumTemplateIdsForDocuSignMerge().join(","),
+                `disclosure:${disclosureFirstInSend ? "first" : "last"}`,
             ].join("|"),
         [
             getEffectiveSendPackage,
+            disclosureFirstInSend,
             includeMainContractInSend,
             selectedAddendumOptions,
             linkedAddendumMappings,
@@ -4293,6 +4345,7 @@ const PDFViewerModal = ({
                         addendumDocumentRef: addendumTemplateId,
                         addendumDocumentRefs: addendumTemplateIds,
                         disclosureDocumentRef,
+                        disclosurePosition: disclosureFirstInSendRef.current ? "first" : "last",
                         includeMainContract: packageSelection.includeMainContract,
                         sendPackage: packageSelection,
                         roles: signerRolesForSend,
@@ -4941,6 +4994,51 @@ const PDFViewerModal = ({
             setLoadingTemplateMappings(false);
         }
     }, [effectiveContractId]);
+
+    /** Persist drag-board addendum send order (reuses existing `order` slots server-side). */
+    const reorderAddendumTemplateMappings = useCallback(
+        async (nextRows: ContractDocumentTemplateMappingRow[]) => {
+            if (effectiveContractId == null || nextRows.length < 2) return;
+            const nextIds = new Set(nextRows.map((row) => String(row.id)));
+            // Board shows one row per template; leftover duplicates keep trailing slots.
+            const remaining = addendumTemplateMappings
+                .filter((row) => !nextIds.has(String(row.id)))
+                .sort((a, b) => Number(a.order ?? 0) - Number(b.order ?? 0));
+            const orderedRows = [...nextRows, ...remaining];
+            const mappingIds = orderedRows.map((row) => String(row.id));
+            // Same slot reuse as the API: the rows' own `order` values in the new sequence.
+            const slots = orderedRows.map((row) => Number(row.order ?? 0)).sort((a, b) => a - b);
+            for (let i = 1; i < slots.length; i += 1) {
+                if (slots[i] <= slots[i - 1]) slots[i] = slots[i - 1] + 1;
+            }
+            const nextOrderById = new Map(mappingIds.map((id, i) => [id, slots[i]]));
+            // Optimistic — board and send order update immediately.
+            setTemplateMappings((prev) =>
+                prev.map((row) =>
+                    nextOrderById.has(String(row.id))
+                        ? { ...row, order: nextOrderById.get(String(row.id)) as number }
+                        : row,
+                ),
+            );
+            setReorderingAddendums(true);
+            try {
+                const res = await axiosPut(
+                    `/contract/${effectiveContractId}/document-template-mappings-order`,
+                    { documentType: "addendum", mappingIds },
+                );
+                const rows = (res?.data?.data ?? null) as ContractDocumentTemplateMappingRow[] | null;
+                if (Array.isArray(rows)) setTemplateMappings(rows);
+            } catch (error: any) {
+                setDocumentUploadMessage(
+                    error?.response?.data?.message || error?.message || "Failed to save addendum order.",
+                );
+                await fetchTemplateMappings();
+            } finally {
+                setReorderingAddendums(false);
+            }
+        },
+        [effectiveContractId, addendumTemplateMappings, fetchTemplateMappings],
+    );
 
     const reloadContractPrefillSnapshots = useCallback(async () => {
         const appId = applicationIdForLookup;
@@ -9034,7 +9132,9 @@ const PDFViewerModal = ({
                                                             State disclosure
                                                         </h4>
                                                         <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
-                                                            Linked from the selected state and merged at the bottom of the contract.
+                                                            {disclosureFirstInSend
+                                                                ? "Linked from the selected state and placed first in the envelope, before the contract and addenda."
+                                                                : "Linked from the selected state and placed last in the envelope, after the contract and addenda."}
                                                         </p>
                                                     </div>
                                                 </div>
@@ -9132,6 +9232,25 @@ const PDFViewerModal = ({
                                                                 </Button>
                                                             </div>
                                                         </div>
+                                                        <label className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-slate-200/80 bg-white px-3 py-2.5 dark:border-slate-600 dark:bg-slate-950">
+                                                            <Checkbox
+                                                                checked={disclosureFirstInSend}
+                                                                onCheckedChange={(checked: boolean | "indeterminate") =>
+                                                                    updateDisclosureFirstInSend(checked === true)
+                                                                }
+                                                                className="mt-0.5"
+                                                            />
+                                                            <span className="min-w-0">
+                                                                <span className="block text-xs font-medium text-slate-800 dark:text-slate-100">
+                                                                    Place state disclosure first
+                                                                </span>
+                                                                <span className="mt-0.5 block text-[11px] text-slate-500 dark:text-slate-400">
+                                                                    {disclosureFirstInSend
+                                                                        ? "Opens first in DocuSign: disclosure → contract → addenda."
+                                                                        : "Placed last in DocuSign: contract → addenda → disclosure."}
+                                                                </span>
+                                                            </span>
+                                                        </label>
                                                         <Button
                                                             type="button"
                                                             variant="outline"
@@ -9193,7 +9312,11 @@ const PDFViewerModal = ({
                                             </p>
                                             <div className="space-y-2">
                                                 {linkedAddendumMappings.length > 0 ? (
-                                                    linkedAddendumMappings.map((row) => {
+                                                    <AddendumSendOrderBoard
+                                                        items={linkedAddendumMappings}
+                                                        disabled={loadingTemplateMappings || reorderingAddendums}
+                                                        onReorder={(next) => void reorderAddendumTemplateMappings(next)}
+                                                        renderItem={(row, index) => {
                                                         const mappingRef = getAddendumDropdownRef(row?.template);
                                                         const supportsPrefill = hasAddendumPrefillFieldMap(
                                                             row?.template?.templateId ??
@@ -9221,6 +9344,7 @@ const PDFViewerModal = ({
                                                                             </span>
                                                                         </div>
                                                                         <p className="mt-1 truncate text-[11px] font-medium text-slate-700 dark:text-slate-200">
+                                                                            {index + 1}.{" "}
                                                                             {formatDropdownLabel(
                                                                                 row?.template?.name ||
                                                                                     row?.template?.templateId ||
@@ -9289,7 +9413,8 @@ const PDFViewerModal = ({
                                                                 </div>
                                                             </div>
                                                         );
-                                                    })
+                                                        }}
+                                                    />
                                                 ) : (
                                                     <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-slate-200 bg-slate-50/80 py-6 text-center dark:border-slate-600 dark:bg-slate-800/30">
                                                         <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--brand)]/10 text-[var(--brand)]">
