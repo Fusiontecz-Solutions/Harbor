@@ -227,8 +227,8 @@
       "y": "300",
       "signerRole": "Signer",
       "optional": true,
-      "variable": "purchase_price",
-      "sourceTabLabel": "purchase_price",
+      "variable": "purchase_amount",
+      "sourceTabLabel": "purchase_amount",
       "width": "100",
       "lockedForSigner": true
     },
@@ -241,8 +241,8 @@
       "y": "358",
       "signerRole": "Signer",
       "optional": true,
-      "variable": "purchase_amount",
-      "sourceTabLabel": "purchase_amount",
+      "variable": "purchase_price",
+      "sourceTabLabel": "purchase_price",
       "width": "100",
       "lockedForSigner": true
     },

@@ -174,12 +174,9 @@ export function resolveDisclosureDocumentsLayoutFunderId(
     // Missing share target → common platform pack (all states), not this funder's empty scope.
     return sharedId || platformOwner || profile.id;
   }
-  // "own" on a non-platform funder (e.g. Clear Capital) still consumes the
-  // common Harbor View disclosure pack. Own contract PDFs must not hide
-  // state disclosures that were only uploaded under the platform funder.
-  if (!isWoodmereFunderProfile(profile) && platformOwner) {
-    return platformOwner;
-  }
+  // "own" = this funder's uploads only. (Unset source already resolves to
+  // "platform" in resolveDisclosureDocumentsSource, so funders that never chose
+  // still get the common Harbor View pack.)
   return resolveLayoutFunderIdForSource(profile, source, "disclosure");
 }
 
