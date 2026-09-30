@@ -63,8 +63,10 @@ import { fetchLatestContractTemplate } from "@/utils/contractTemplate";
 import {
     resolveAddendumDocumentsLayoutFunderId,
     resolveDisclosureDocumentsLayoutFunderId,
+    resolveDisclosureDocumentsSource,
 } from "@/utils/funderDocumentSource";
 import {
+    disclosureDealTypeFromRow,
     funderDisclosureLayoutKeyForState,
     isPlatformScopedBoldSignTemplateRow,
 } from "@/utils/funderLayoutKeys";
@@ -726,9 +728,12 @@ function disclosureMappingMatchesFunderDocuments(
     docsLayoutFunderId: string | null,
     platformDisclosureFunderId?: string | null,
     selectedFunderId?: string | null,
+    /** "This funder only": a disclosure linked from another funder is stale. */
+    ownFunderOnly = false,
 ): boolean {
     if (!row) return false;
     if (templateMatchesFunderDocuments(row.template, docsLayoutFunderId)) return true;
+    if (ownFunderOnly) return false;
     // Common Harbor View / platform disclosure uploads are valid for every funder
     // that falls back to that shared set (incl. Clear Capital with platform source).
     const platformId = String(platformDisclosureFunderId ?? "").trim();
@@ -798,7 +803,63 @@ function disclosureRowMatchesWantedFrequency(
     return rowToken === wanted;
 }
 
+type DisclosurePickRow = {
+    id?: string;
+    pdfUrl?: string | null;
+    layoutKey?: string | null;
+    templateId?: string | null;
+    name?: string | null;
+    frequency?: string | null;
+    state?: string | null;
+};
+
+/**
+ * Refi applications must get a Refi disclosure and No Refi applications a No Refi
+ * (or untagged) one. Try an exact deal-type match across every funder scope first;
+ * only when no matching PDF exists anywhere fall back to the looser pick.
+ */
 function pickDisclosureTemplateIdForFunder(
+    rows: DisclosurePickRow[],
+    docsLayoutFunderId: string | null,
+    state: string,
+    frequency: string,
+    isRefinance = false,
+    platformDisclosureFunderId?: string | null,
+    /** "This funder only": never borrow another funder's (e.g. Harbor View) PDFs. */
+    ownFunderOnly = false,
+): string | null {
+    const dealMatched = rows.filter((row) => {
+        const dealType = disclosureDealTypeFromRow({
+            layoutKey: String(row.layoutKey ?? row.templateId ?? ""),
+            name: String(row.name ?? ""),
+        });
+        return isRefinance ? dealType === "refi" : dealType !== "refi";
+    });
+    return (
+        pickDisclosureTemplateIdForFunderAnyDeal(
+            dealMatched,
+            docsLayoutFunderId,
+            state,
+            frequency,
+            isRefinance,
+            platformDisclosureFunderId,
+            true,
+            ownFunderOnly,
+        ) ??
+        pickDisclosureTemplateIdForFunderAnyDeal(
+            rows,
+            docsLayoutFunderId,
+            state,
+            frequency,
+            isRefinance,
+            platformDisclosureFunderId,
+            false,
+            ownFunderOnly,
+        )
+    );
+}
+
+function pickDisclosureTemplateIdForFunderAnyDeal(
     rows: Array<{
         id?: string;
         pdfUrl?: string | null;
@@ -813,6 +874,9 @@ function pickDisclosureTemplateIdForFunder(
     frequency: string,
     isRefinance = false,
     platformDisclosureFunderId?: string | null,
+    /** Strict pass: no fallback to other states / frequencies. */
+    requireExactStateAndFrequency = false,
+    ownFunderOnly = false,
 ): string | null {
     const usable = rows.filter(
         (row) =>
@@ -829,11 +893,13 @@ function pickDisclosureTemplateIdForFunder(
         if (rowState && rowState === picked) return true;
         return disclosureTemplateBlobMatchesState(row, picked);
     });
+    if (requireExactStateAndFrequency && !stateMatched.length) return null;
     const statePool = stateMatched.length ? stateMatched : usable;
 
     const freqMatched = statePool.filter((row) =>
         disclosureRowMatchesWantedFrequency(row, frequency),
     );
+    if (requireExactStateAndFrequency && !freqMatched.length) return null;
     const pool = freqMatched.length ? freqMatched : statePool;
 
     const prefersRefiName = (row: { name?: string | null; layoutKey?: string | null; templateId?: string | null }) => {
@@ -911,6 +977,7 @@ function pickDisclosureTemplateIdForFunder(
     // 1) Selected funder's disclosure scope (own / shared / platform-owner id).
     const fromPrimary = pickForFunderId(docsLayoutFunderId);
     if (fromPrimary) return fromPrimary;
+    if (ownFunderOnly) return null;
 
     // 2) Common Harbor View Capital set — both funders share these uploads.
     const platformOwnerId = String(platformDisclosureFunderId ?? "").trim();
@@ -969,8 +1036,9 @@ function pickDisclosureTemplateIdForFunder(
     }
 
     // 5) Any PDF for this state, regardless of funder prefix (common pack).
-    if (stateMatched.length) {
-        const fromAny = pickFromScoped(stateMatched, null);
+    const anyFunderPool = requireExactStateAndFrequency ? pool : stateMatched;
+    if (anyFunderPool.length) {
+        const fromAny = pickFromScoped(anyFunderPool, null);
         if (fromAny) return fromAny;
     }
 
@@ -2307,6 +2375,11 @@ const PDFViewerModal = ({
     docsLayoutFunderIdRef.current = docsLayoutFunderId;
     const disclosureDocsLayoutFunderIdRef = useRef<string | null>(null);
     disclosureDocsLayoutFunderIdRef.current = disclosureDocsLayoutFunderId;
+    const disclosureOwnFunderOnly =
+        !!selectedFunderProfile &&
+        resolveDisclosureDocumentsSource(selectedFunderProfile) === "own";
+    const disclosureOwnFunderOnlyRef = useRef(false);
+    disclosureOwnFunderOnlyRef.current = disclosureOwnFunderOnly;
     const boldSignTemplatesRef = useRef(boldSignTemplates);
     boldSignTemplatesRef.current = boldSignTemplates;
 
@@ -6179,6 +6252,7 @@ const PDFViewerModal = ({
                     frequency,
                     isRefinance,
                     platformDisclosureFunderIdRef.current,
+                    disclosureOwnFunderOnlyRef.current,
                 );
             try {
                 const withFreq = await fetchRows(true);
@@ -6336,6 +6410,7 @@ const PDFViewerModal = ({
                         layoutFunderId,
                         platformDisclosureFunderIdRef.current,
                         selectedFunderProfileIdRef.current,
+                        disclosureOwnFunderOnlyRef.current,
                     )
                 ) {
                     disclosureAutoLinkKeyRef.current = syncKey;
@@ -6345,9 +6420,19 @@ const PDFViewerModal = ({
                     // Keep an existing disclosure that already matches this state.
                     // Lookup can miss while funder docs scope is still settling, or when
                     // no catalog row exists for the current filter — do not wipe on refresh.
+                    // Exception: "This funder only" must drop another funder's PDF
+                    // (e.g. a Harbor View disclosure linked before the switch).
                     if (
                         current &&
-                        disclosureMappingMatchesState(current, picked)
+                        disclosureMappingMatchesState(current, picked) &&
+                        (!disclosureOwnFunderOnlyRef.current ||
+                            disclosureMappingMatchesFunderDocuments(
+                                current,
+                                layoutFunderId,
+                                null,
+                                null,
+                                true,
+                            ))
                     ) {
                         disclosureAutoLinkKeyRef.current = syncKey;
                         return;
@@ -6403,7 +6488,7 @@ const PDFViewerModal = ({
         const catalogCount = (Array.isArray(boldSignTemplates) ? boldSignTemplates : []).filter(
             isDisclosureCatalogRow,
         ).length;
-        const docsKey = `${disclosureDocsLayoutFunderId ?? "platform"}:${platformDisclosureFunderId ?? ""}:${catalogCount}`;
+        const docsKey = `${disclosureDocsLayoutFunderId ?? "platform"}:${platformDisclosureFunderId ?? ""}:${disclosureOwnFunderOnly ? "own" : ""}:${catalogCount}`;
         const key = `${effectiveContractId}:${picked}:${contractDisclosureFrequency}:${docsKey}`;
         if (
             linkedDisclosureMapping &&
@@ -6413,6 +6498,7 @@ const PDFViewerModal = ({
                 disclosureDocsLayoutFunderId,
                 platformDisclosureFunderId,
                 selectedFunderProfileId,
+                disclosureOwnFunderOnly,
             )
         ) {
             disclosureAutoLinkKeyRef.current = key;
@@ -6436,6 +6522,7 @@ const PDFViewerModal = ({
         disclosureDocsLayoutFunderId,
         platformDisclosureFunderId,
         selectedFunderProfileId,
+        disclosureOwnFunderOnly,
         linkedDisclosureMapping,
         syncDisclosureTemplateForState,
     ]);
