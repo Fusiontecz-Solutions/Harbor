@@ -506,6 +506,19 @@ function mappingMatchesTemplateRef(
     return ref === layoutKey || ref === templateId || ref === rowId;
 }
 
+/** Linked disclosure fits the wanted deal type (No Refi also accepts untagged PDFs). */
+function disclosureMappingMatchesDealType(
+    row: ContractDocumentTemplateMappingRow | null | undefined,
+    isRefinance: boolean,
+): boolean {
+    if (!row) return false;
+    const dealType = disclosureDealTypeFromRow({
+        layoutKey: String(row.template?.layoutKey ?? row.template?.templateId ?? ""),
+        name: String(row.template?.name ?? ""),
+    });
+    return isRefinance ? dealType === "refi" : dealType !== "refi";
+}
+
 /** Canonical state key for disclosure matching (ca/california, ny/new york/newyork). */
 function disclosureStateMatchKey(state: string): string {
     return (
@@ -2126,6 +2139,25 @@ const PDFViewerModal = ({
         return normalizeFrequencyForTemplateLookup(raw);
     }, [offerDecisionData, resolvedContract]);
 
+    /** Refi detected from the offer (refinance amount > 0). */
+    const autoDisclosureIsRefinance = useMemo(() => {
+        const od = offerDecisionData as Record<string, unknown> | null;
+        const refiRaw = od?.refinanceAmount ?? od?.RefinanceAmount;
+        const refiNum =
+            typeof refiRaw === "number"
+                ? refiRaw
+                : Number(String(refiRaw ?? "").replace(/[$,\s]/g, ""));
+        return Number.isFinite(refiNum) && refiNum > 0;
+    }, [offerDecisionData]);
+    /** Manual Refi / No Refi disclosure choice; null = follow the offer. Saved per contract. */
+    const [disclosureDealTypeChoice, setDisclosureDealTypeChoice] = useState<
+        "refi" | "norefi" | null
+    >(null);
+    const disclosureIsRefinance =
+        disclosureDealTypeChoice != null
+            ? disclosureDealTypeChoice === "refi"
+            : autoDisclosureIsRefinance;
+
     const disclosureCalculatorSeedInputs = useMemo(
         () =>
             buildDisclosureCalculatorInputsFromSources({
@@ -3120,6 +3152,30 @@ const PDFViewerModal = ({
             }
         },
         [disclosurePositionStorageKey],
+    );
+
+    const disclosureDealTypeStorageKey =
+        effectiveContractId != null ? `contract:${effectiveContractId}:disclosureDealType` : null;
+    useEffect(() => {
+        if (!isOpen || !disclosureDealTypeStorageKey) return;
+        try {
+            const saved = localStorage.getItem(disclosureDealTypeStorageKey);
+            setDisclosureDealTypeChoice(saved === "refi" || saved === "norefi" ? saved : null);
+        } catch {
+            setDisclosureDealTypeChoice(null);
+        }
+    }, [isOpen, disclosureDealTypeStorageKey]);
+    const updateDisclosureDealTypeChoice = useCallback(
+        (choice: "refi" | "norefi") => {
+            setDisclosureDealTypeChoice(choice);
+            if (!disclosureDealTypeStorageKey) return;
+            try {
+                localStorage.setItem(disclosureDealTypeStorageKey, choice);
+            } catch {
+                /* ignore */
+            }
+        },
+        [disclosureDealTypeStorageKey],
     );
 
     const resolveSignerOverrideRowsForSend = useCallback((): ContractSignerOverrideRow[] => {
@@ -6375,17 +6431,11 @@ const PDFViewerModal = ({
                     ? boldSignTemplatesRef.current
                     : []
             ).filter(isDisclosureCatalogRow).length;
-            const syncKey = `${effectiveContractId}:${picked}:${contractDisclosureFrequency}:${layoutFunderId ?? "platform"}:${platformOwnerId ?? ""}:${catalogCount}`;
+            const isRefinance = disclosureIsRefinance;
+            const syncKey = `${effectiveContractId}:${picked}:${contractDisclosureFrequency}:${isRefinance ? "refi" : "norefi"}:${layoutFunderId ?? "platform"}:${platformOwnerId ?? ""}:${catalogCount}`;
             const syncGen = ++disclosureSyncGenRef.current;
             try {
                 setLinkingDisclosureTemplate(true);
-                const od = offerDecisionData as Record<string, unknown> | null;
-                const refiRaw = od?.refinanceAmount ?? od?.RefinanceAmount;
-                const refiNum =
-                    typeof refiRaw === "number"
-                        ? refiRaw
-                        : Number(String(refiRaw ?? "").replace(/[$,\s]/g, ""));
-                const isRefinance = Number.isFinite(refiNum) && refiNum > 0;
                 const templateRef = await lookupDisclosureTemplateRef(
                     picked,
                     contractDisclosureFrequency,
@@ -6464,9 +6514,9 @@ const PDFViewerModal = ({
         },
         [
             contractDisclosureFrequency,
+            disclosureIsRefinance,
             effectiveContractId,
             lookupDisclosureTemplateRef,
-            offerDecisionData,
             setDisclosureTemplateMapping,
         ],
     );
@@ -6489,10 +6539,11 @@ const PDFViewerModal = ({
             isDisclosureCatalogRow,
         ).length;
         const docsKey = `${disclosureDocsLayoutFunderId ?? "platform"}:${platformDisclosureFunderId ?? ""}:${disclosureOwnFunderOnly ? "own" : ""}:${catalogCount}`;
-        const key = `${effectiveContractId}:${picked}:${contractDisclosureFrequency}:${docsKey}`;
+        const key = `${effectiveContractId}:${picked}:${contractDisclosureFrequency}:${disclosureIsRefinance ? "refi" : "norefi"}:${docsKey}`;
         if (
             linkedDisclosureMapping &&
             disclosureMappingMatchesState(linkedDisclosureMapping, picked) &&
+            disclosureMappingMatchesDealType(linkedDisclosureMapping, disclosureIsRefinance) &&
             disclosureMappingMatchesFunderDocuments(
                 linkedDisclosureMapping,
                 disclosureDocsLayoutFunderId,
@@ -6519,6 +6570,7 @@ const PDFViewerModal = ({
         boldSignTemplates,
         selectedState,
         contractDisclosureFrequency,
+        disclosureIsRefinance,
         disclosureDocsLayoutFunderId,
         platformDisclosureFunderId,
         selectedFunderProfileId,
@@ -9240,6 +9292,52 @@ const PDFViewerModal = ({
                                             </div>
 
                                             <div className="space-y-2">
+                                                <div className="rounded-lg border border-slate-200/80 bg-white px-3 py-2.5 dark:border-slate-600 dark:bg-slate-950">
+                                                    <div className="flex items-center justify-between gap-2">
+                                                        <span className="text-xs font-medium text-slate-800 dark:text-slate-100">
+                                                            Disclosure type
+                                                        </span>
+                                                        <div
+                                                            role="radiogroup"
+                                                            aria-label="Disclosure deal type"
+                                                            className="inline-flex rounded-md bg-slate-100 p-0.5 dark:bg-slate-800"
+                                                        >
+                                                            {(
+                                                                [
+                                                                    { value: "norefi", label: "No Refi" },
+                                                                    { value: "refi", label: "Refi" },
+                                                                ] as const
+                                                            ).map((opt) => {
+                                                                const active =
+                                                                    (opt.value === "refi") === disclosureIsRefinance;
+                                                                return (
+                                                                    <button
+                                                                        key={opt.value}
+                                                                        type="button"
+                                                                        role="radio"
+                                                                        aria-checked={active}
+                                                                        disabled={linkingDisclosureTemplate}
+                                                                        onClick={() =>
+                                                                            updateDisclosureDealTypeChoice(opt.value)
+                                                                        }
+                                                                        className={`cursor-pointer rounded px-3 py-1 text-[11px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+                                                                            active
+                                                                                ? "bg-[var(--brand)] text-white shadow-sm"
+                                                                                : "text-slate-600 hover:text-[var(--brand)] dark:text-slate-300"
+                                                                        }`}
+                                                                    >
+                                                                        {opt.label}
+                                                                    </button>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    </div>
+                                                    <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                                                        {disclosureDealTypeChoice == null
+                                                            ? `Auto-detected from the offer: ${autoDisclosureIsRefinance ? "Refi" : "No Refi"} deal.`
+                                                            : `Using the ${disclosureIsRefinance ? "Refi" : "No Refi"} disclosure for this state and frequency.`}
+                                                    </p>
+                                                </div>
                                                 {linkingDisclosureTemplate ? (
                                                     <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-[var(--brand)]/25 bg-slate-50/80 py-6 text-center dark:border-slate-600 dark:bg-slate-800/30">
                                                         <Loader2
