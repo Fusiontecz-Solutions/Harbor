@@ -1,0 +1,11 @@
+/// Single-row switch controlled by the central Tenant Console
+/// (Tenant Control API v1). While `sendingEnabled` is false every outbound SMS
+/// is refused at the Infobip adapter.
+model TenantControl {
+  id             Int      @id @default(1)
+  sendingEnabled Boolean  @default(true)
+  reason         String?
+  updatedBy      String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}

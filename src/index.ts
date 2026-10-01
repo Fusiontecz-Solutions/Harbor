@@ -15,6 +15,7 @@ import { startDeliveryReconciler } from './services/messaging/deliveryReconciler
 import { startBroadcastScheduler } from './services/messaging/broadcastScheduler';
 import { ensureDefaultSendWindows } from './services/messaging/sendWindow.service';
 import { verifySuperAdminProxy } from './middleware/verifySuperAdminProxy';
+import tenantControlRoutes from './routes/tenantControlRoutes';
 import { activityLogger } from './middleware/activityLogger';
 import { getDefaultMailFrom, isSendGridConfigured } from './config/nodemailer';
 
@@ -127,6 +128,10 @@ app.get('/health', (req: Request, res: Response) => {
 // x-super-admin-secret headers, `req.isSuperAdminProxy` is set and downstream
 // `authenticateToken` will skip tenant JWT validation and synthesize a
 // SUPER_ADMIN principal. Regular tenant-user requests are untouched.
+// Central Tenant Console (usage + SMS pause switch). HMAC-signed, outside the
+// user JWT chain.
+app.use('/api/tenant-control/v1', tenantControlRoutes);
+
 app.use('/api/v1', verifySuperAdminProxy, activityLogger, router);
 
 // 404 handler
