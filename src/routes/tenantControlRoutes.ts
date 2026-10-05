@@ -1,12 +1,14 @@
 import { Router, type Request, type Response } from 'express';
 import { verifyTenantControlSignature } from '../middleware/verifyTenantControlSignature';
 import { collectStatus } from '../services/tenantControl/status';
-import { setSendingState } from '../services/tenantControl/state';
+import { setQuotaConfig, setSendingState } from '../services/tenantControl/state';
+import { computeLimitState, resetQuotaCache } from '../services/tenantControl/quota';
+import { BadRequest, collectBroadcasts, collectReps, collectUsage } from '../services/tenantControl/reports';
 
 /**
- * Tenant Control API v1 — called only by the central Tenant Console, never by
- * Harbor users. Mounted before the user JWT chain; the HMAC signature is the
- * credential.
+ * Tenant Control API (v2, a superset of v1) — called only by the central
+ * Tenant Console, never by Harbor users. Mounted before the user JWT chain;
+ * the HMAC signature is the credential.
  */
 const router = Router();
 
@@ -41,6 +43,62 @@ router.put('/sending', async (req: Request, res: Response) => {
       success: false,
       message: 'Could not save the sending state. Is the TenantControl migration applied?',
     });
+  }
+});
+
+const report =
+  (name: string, collect: (query: Record<string, unknown>) => Promise<unknown>) => async (req: Request, res: Response) => {
+    try {
+      res.json(await collect(req.query as Record<string, unknown>));
+    } catch (err) {
+      if (err instanceof BadRequest) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      console.error(`[tenant-control] ${name} failed:`, (err as Error)?.message);
+      res.status(500).json({ error: `Could not collect ${name}.` });
+    }
+  };
+
+router.get('/usage', report('usage', collectUsage));
+router.get('/broadcasts', report('broadcasts', collectBroadcasts));
+router.get('/reps', report('reps', collectReps));
+
+router.put('/limit', async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const { limit, countBy = 'messages', scope = 'monthly', resetDay, actor } = body;
+  if (!('limit' in body) || (limit !== null && (!Number.isInteger(limit) || (limit as number) < 0))) {
+    res.status(400).json({ error: 'limit must be a non-negative integer or null' });
+    return;
+  }
+  if (countBy !== 'messages' && countBy !== 'segments') {
+    res.status(400).json({ error: 'countBy must be messages or segments' });
+    return;
+  }
+  if (scope !== 'monthly' && scope !== 'daily' && scope !== 'total') {
+    res.status(400).json({ error: 'scope must be monthly, daily or total' });
+    return;
+  }
+  if (resetDay != null && (!Number.isInteger(resetDay) || (resetDay as number) < 1 || (resetDay as number) > 28)) {
+    res.status(400).json({ error: 'resetDay must be an integer from 1 to 28' });
+    return;
+  }
+  try {
+    const config = await setQuotaConfig({
+      limit: limit as number | null,
+      countBy,
+      scope,
+      resetDay: (resetDay as number | null | undefined) ?? 1,
+      updatedBy: typeof actor === 'string' ? actor : null,
+    });
+    resetQuotaCache();
+    console.log(
+      `[tenant-control] quota set to ${config.limit ?? 'none'} ${config.countBy} (${config.scope}) by ${typeof actor === 'string' ? actor : 'console'}`,
+    );
+    res.json({ limit: await computeLimitState(config) });
+  } catch (err) {
+    console.error('[tenant-control] set limit failed:', (err as Error)?.message);
+    res.status(500).json({ error: 'Could not save the limit. Is the TenantControl quota migration applied?' });
   }
 });
 

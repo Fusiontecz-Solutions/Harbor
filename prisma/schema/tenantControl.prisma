@@ -1,11 +1,22 @@
 /// Single-row switch controlled by the central Tenant Console
 /// (Tenant Control API v1). While `sendingEnabled` is false every outbound SMS
 /// is refused at the Infobip adapter.
+///
+/// v2 adds the console's quota: once `messageLimit` is reached in the current
+/// window, sends are refused with TENANT_LIMIT_REACHED. Null means no quota.
 model TenantControl {
-  id             Int      @id @default(1)
-  sendingEnabled Boolean  @default(true)
+  id             Int       @id @default(1)
+  sendingEnabled Boolean   @default(true)
   reason         String?
   updatedBy      String?
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  /// Quota size, counted per `limitCountBy` ("messages" | "segments").
+  messageLimit   Int?
+  limitCountBy   String    @default("messages")
+  /// "monthly" (resets on `limitResetDay`), "daily" (UTC midnight) or "total".
+  limitScope     String    @default("monthly")
+  limitResetDay  Int       @default(1)
+  limitUpdatedBy String?
+  limitUpdatedAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 }

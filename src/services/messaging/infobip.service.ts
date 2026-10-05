@@ -28,6 +28,7 @@
 import axios, { AxiosError, type AxiosInstance } from 'axios';
 import { toInfobipDestination, toInfobipSender } from './phone';
 import { getSendingState, SENDING_DISABLED_CODE } from '../tenantControl/state';
+import { isOverQuota, LIMIT_REACHED_CODE, recordQuotaUse } from '../tenantControl/quota';
 
 export type NormalizedStatus =
   | 'QUEUED'
@@ -222,13 +223,24 @@ export async function sendSms(input: SendSmsInput): Promise<SendSmsResult> {
       false,
     );
   }
+  if (await isOverQuota()) {
+    throw new InfobipRequestError(
+      'The message limit set by the platform administrator has been reached.',
+      429,
+      LIMIT_REACHED_CODE,
+      false,
+    );
+  }
 
   const from = toInfobipSender(input.from?.trim() || getDefaultSender());
   if (!from) throw new InfobipNotConfiguredError(['INFOBIP_SENDER']);
 
-  if (input.mediaUrls && input.mediaUrls.length > 0) {
-    return sendMms({ ...input, from });
-  }
+  const result = input.mediaUrls && input.mediaUrls.length > 0 ? await sendMms({ ...input, from }) : await sendText(input, from);
+  if (result.status !== 'FAILED') recordQuotaUse(result.segmentCount);
+  return result;
+}
+
+async function sendText(input: SendSmsInput, from: string): Promise<SendSmsResult> {
 
   const payload: Record<string, unknown> = {
     messages: [

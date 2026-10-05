@@ -3,7 +3,8 @@ import { SIGNATURE_HEADER, TIMESTAMP_HEADER, verifySignature } from '../services
 
 /**
  * Authenticates calls from the central Tenant Console. Mounted outside the
- * user JWT chain: the HMAC over the raw body is the only credential.
+ * user JWT chain: the HMAC over the path, query and raw body is the only
+ * credential.
  */
 export function verifyTenantControlSignature(req: Request, res: Response, next: NextFunction): void {
   const secret = String(process.env.TENANT_CONTROL_SECRET || '').trim();
@@ -14,7 +15,9 @@ export function verifyTenantControlSignature(req: Request, res: Response, next: 
 
   const rawBody = (req as Request & { rawBody?: Buffer }).rawBody;
   const body = rawBody ? rawBody.toString('utf8') : '';
-  const endpoint = req.path.replace(/\/+$/, '') || '/';
+  // The query string is signed too, so verify it exactly as received.
+  const queryAt = req.originalUrl.indexOf('?');
+  const endpoint = (req.path.replace(/\/+$/, '') || '/') + (queryAt >= 0 ? req.originalUrl.slice(queryAt) : '');
   const ok = verifySignature(
     secret,
     req.header(TIMESTAMP_HEADER),
