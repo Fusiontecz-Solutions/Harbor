@@ -329,11 +329,14 @@ class MessagingController {
   /** GET /messaging/config — what the FE needs to render the composer. */
   async getConfig(_req: Request, res: Response): Promise<void> {
     const sender = await resolveSenderDetailForUser(actorId(_req));
+    const { getPrepaidState } = await import('../services/tenantControl/prepaid');
+    const prepaid = await getPrepaidState();
     res.json({
       success: true,
       data: {
         provider: 'infobip',
         configured: isInfobipConfigured(),
+        prepaid,
         // What THIS user will send as, not the global env value.
         defaultSender: sender.phoneNumber || getDefaultSender() || null,
         /** Label of the assigned sender, null when falling back to the env default. */

@@ -3,6 +3,7 @@ import { verifyTenantControlSignature } from '../middleware/verifyTenantControlS
 import { collectStatus } from '../services/tenantControl/status';
 import { setQuotaConfig, setSendingState } from '../services/tenantControl/state';
 import { computeLimitState, resetQuotaCache } from '../services/tenantControl/quota';
+import { setPrepaidState } from '../services/tenantControl/prepaid';
 import { BadRequest, collectBroadcasts, collectReps, collectUsage } from '../services/tenantControl/reports';
 
 /**
@@ -99,6 +100,39 @@ router.put('/limit', async (req: Request, res: Response) => {
   } catch (err) {
     console.error('[tenant-control] set limit failed:', (err as Error)?.message);
     res.status(500).json({ error: 'Could not save the limit. Is the TenantControl quota migration applied?' });
+  }
+});
+
+router.put('/prepaid', async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const { balance, pricePerUnit, currency, chargeBy, actor } = body;
+  if (typeof balance !== 'number' || !Number.isFinite(balance) || balance < 0) {
+    res.status(400).json({ error: 'balance must be a non-negative number' });
+    return;
+  }
+  if (typeof pricePerUnit !== 'number' || !Number.isFinite(pricePerUnit) || pricePerUnit < 0) {
+    res.status(400).json({ error: 'pricePerUnit must be a non-negative number' });
+    return;
+  }
+  if (chargeBy !== undefined && chargeBy !== 'messages' && chargeBy !== 'segments') {
+    res.status(400).json({ error: 'chargeBy must be messages or segments' });
+    return;
+  }
+  try {
+    const prepaid = await setPrepaidState({
+      balance,
+      pricePerUnit,
+      currency: typeof currency === 'string' ? currency : 'USD',
+      chargeBy: chargeBy === 'segments' ? 'segments' : 'messages',
+      updatedBy: typeof actor === 'string' ? actor : null,
+    });
+    console.log(
+      `[tenant-control] prepaid set to ${prepaid.balance} ${prepaid.currency} @ ${prepaid.pricePerUnit} by ${typeof actor === 'string' ? actor : 'console'}`,
+    );
+    res.json({ prepaid });
+  } catch (err) {
+    console.error('[tenant-control] set prepaid failed:', (err as Error)?.message);
+    res.status(500).json({ error: 'Could not save prepaid balance. Is the prepaid migration applied?' });
   }
 });
 

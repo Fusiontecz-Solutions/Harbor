@@ -2,9 +2,10 @@ import prisma from '../../config/prismaClient';
 import { getAccountBalance, isInfobipConfigured, toInfobipError } from '../messaging/infobip.service';
 import { COUNTED_SQL, countedWhere, DAY_MS, FAILED_SQL, REFUSED_CODES, SEGMENTS_SQL } from './counting';
 import { getLimitState, type LimitState } from './quota';
+import { getPrepaidState, type PrepaidState } from './prepaid';
 import { getSendingState, type SendingState } from './state';
 
-export const CAPABILITIES = ['usage', 'broadcasts', 'reps', 'limit'] as const;
+export const CAPABILITIES = ['usage', 'broadcasts', 'reps', 'limit', 'prepaid'] as const;
 
 /** Shape of GET /api/tenant-control/v1/status (Tenant Control API v2, a superset of v1). */
 export interface TenantStatus {
@@ -30,6 +31,8 @@ export interface TenantStatus {
   generatedAt: string;
   capabilities: (typeof CAPABILITIES)[number][];
   limit: LimitState | null;
+  /** Console-managed prepaid balance; null when not priced by the console. */
+  prepaid: PrepaidState | null;
 }
 
 const BALANCE_CACHE_MS = 60_000;
@@ -64,10 +67,11 @@ export async function collectStatus(now = new Date()): Promise<TenantStatus> {
   const d30 = new Date(now.getTime() - 30 * DAY_MS);
   const seriesStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - 29 * DAY_MS);
 
-  const [sending, balance, limit, totals, last24h, last7d, window30, blocked30d, dailyRows] = await Promise.all([
+  const [sending, balance, limit, prepaid, totals, last24h, last7d, window30, blocked30d, dailyRows] = await Promise.all([
     getSendingState({ fresh: true }),
     readBalance(),
     getLimitState(now),
+    getPrepaidState({ fresh: true }),
     prisma.$queryRaw<{ total: bigint; segments: bigint }[]>`
       SELECT count(*) AS total, COALESCE(SUM(${SEGMENTS_SQL}), 0)::bigint AS segments
         FROM "MessagingMessage" WHERE ${COUNTED_SQL}`,
@@ -120,5 +124,6 @@ export async function collectStatus(now = new Date()): Promise<TenantStatus> {
     generatedAt: now.toISOString(),
     capabilities: [...CAPABILITIES],
     limit,
+    prepaid,
   };
 }

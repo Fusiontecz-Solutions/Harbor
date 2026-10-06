@@ -29,6 +29,7 @@ import axios, { AxiosError, type AxiosInstance } from 'axios';
 import { toInfobipDestination, toInfobipSender } from './phone';
 import { getSendingState, SENDING_DISABLED_CODE } from '../tenantControl/state';
 import { isOverQuota, LIMIT_REACHED_CODE, recordQuotaUse } from '../tenantControl/quota';
+import { assertPrepaidBalance, deductPrepaidAfterSend, PrepaidExhaustedError } from '../tenantControl/prepaid';
 
 export type NormalizedStatus =
   | 'QUEUED'
@@ -231,12 +232,23 @@ export async function sendSms(input: SendSmsInput): Promise<SendSmsResult> {
       false,
     );
   }
+  try {
+    await assertPrepaidBalance(null);
+  } catch (err) {
+    if (err instanceof PrepaidExhaustedError) {
+      throw new InfobipRequestError(err.message, 429, LIMIT_REACHED_CODE, false);
+    }
+    throw err;
+  }
 
   const from = toInfobipSender(input.from?.trim() || getDefaultSender());
   if (!from) throw new InfobipNotConfiguredError(['INFOBIP_SENDER']);
 
   const result = input.mediaUrls && input.mediaUrls.length > 0 ? await sendMms({ ...input, from }) : await sendText(input, from);
-  if (result.status !== 'FAILED') recordQuotaUse(result.segmentCount);
+  if (result.status !== 'FAILED') {
+    recordQuotaUse(result.segmentCount);
+    await deductPrepaidAfterSend(result.segmentCount);
+  }
   return result;
 }
 
