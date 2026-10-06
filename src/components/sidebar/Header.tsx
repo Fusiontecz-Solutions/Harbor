@@ -1,10 +1,11 @@
 import type { RootState } from "@/redux/store"
-import { PanelLeftClose, PanelLeftOpen, Phone } from "lucide-react"
+import { PanelLeftClose, PanelLeftOpen, Phone, Wallet } from "lucide-react"
 import { useEffect, useState } from "react"
 import { useSelector } from "react-redux"
 import type { user } from "../../redux/slices/authSlice";
 import { useSidebar } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { fetchMessagingConfig, type MessagingConfig } from "@/services/messaging/messagingApi";
 
@@ -68,13 +69,18 @@ const Header = () => {
     const [messagingConfig, setMessagingConfig] = useState<MessagingConfig | null>(null);
     useEffect(() => {
         let cancelled = false;
-        fetchMessagingConfig()
-            .then((cfg) => {
-                if (!cancelled) setMessagingConfig(cfg);
-            })
-            .catch(() => undefined);
+        const load = () => {
+            fetchMessagingConfig()
+                .then((cfg) => {
+                    if (!cancelled) setMessagingConfig(cfg);
+                })
+                .catch(() => undefined);
+        };
+        load();
+        const timer = window.setInterval(load, 15_000);
         return () => {
             cancelled = true;
+            window.clearInterval(timer);
         };
     }, []);
 
@@ -111,6 +117,27 @@ const Header = () => {
                         </h1>
                     </div>
                     <div className="flex items-center gap-3">
+                        {messagingConfig?.prepaid && (
+                            <span
+                                className={cn(
+                                    "hidden items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs md:inline-flex",
+                                    messagingConfig.prepaid.balance <= 0
+                                        ? "border-destructive/40 bg-destructive/10 text-destructive"
+                                        : "border-border bg-muted/50 text-muted-foreground",
+                                )}
+                                title={`Prepaid SMS balance (${messagingConfig.prepaid.pricePerUnit} ${messagingConfig.prepaid.currency} per ${messagingConfig.prepaid.chargeBy === "segments" ? "segment" : "message"})`}
+                            >
+                                <Wallet className="h-3.5 w-3.5 shrink-0" />
+                                <span className="font-medium text-foreground">
+                                    {new Intl.NumberFormat(undefined, {
+                                        style: "currency",
+                                        currency: messagingConfig.prepaid.currency || "USD",
+                                        minimumFractionDigits: 2,
+                                        maximumFractionDigits: 2,
+                                    }).format(messagingConfig.prepaid.balance)}
+                                </span>
+                            </span>
+                        )}
                         {messagingConfig?.defaultSender && (
                             <span
                                 className="hidden items-center gap-1.5 rounded-full border border-border bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground md:inline-flex"

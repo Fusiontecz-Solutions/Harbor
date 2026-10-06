@@ -59,9 +59,19 @@ export interface Paginated<T> {
     pagination: { page: number; pageSize: number; total?: number; hasMore: boolean };
 }
 
+export interface MessagingPrepaid {
+    balance: number;
+    pricePerUnit: number;
+    currency: string;
+    chargeBy: 'messages' | 'segments';
+    updatedAt: string | null;
+}
+
 export interface MessagingConfig {
     provider: string;
     configured: boolean;
+    /** Console-managed prepaid balance; null when billing is not configured. */
+    prepaid: MessagingPrepaid | null;
     /** The number THIS user sends from — their assignment, or the server default. */
     defaultSender: string | null;
     /** Label of the assigned sender; null when falling back to the server default. */
