@@ -51,6 +51,11 @@ import { isAgentRole } from '@/lib/agentAccess';
 import { resolveEffectiveRole } from '@/lib/sessionRole';
 import { useInbox } from '@/hooks/useInbox';
 import { ClientPicker } from '@/components/messaging/ClientPicker';
+import {
+    confirmMultiSegmentSend,
+    SmsComposeMeter,
+    useSmsSegmentInfo,
+} from '@/components/messaging/SmsComposeMeter';
 import { MessagingAvatar } from '@/components/messaging/MessagingAvatar';
 import {
     blockContact,
@@ -196,6 +201,7 @@ export default function Inbox() {
 
     const [config, setConfig] = useState<MessagingConfig | null>(null);
     const [draft, setDraft] = useState('');
+    const draftSms = useSmsSegmentInfo(draft);
     const [isSending, setIsSending] = useState(false);
     const [newNumber, setNewNumber] = useState('');
     const [isClientPickerOpen, setIsClientPickerOpen] = useState(false);
@@ -304,6 +310,7 @@ export default function Inbox() {
     const handleSend = useCallback(async () => {
         const body = draft.trim();
         if (!body || !activeConversation || isSending) return;
+        if (!confirmMultiSegmentSend(draftSms, 1)) return;
 
         setIsSending(true);
         try {
@@ -334,6 +341,7 @@ export default function Inbox() {
         activeConversation,
         draft,
         draftClientId,
+        draftSms,
         isDraft,
         isSending,
         openConversation,
@@ -787,10 +795,17 @@ export default function Inbox() {
                                     )}
                                 </Button>
                             </div>
-                            <p className="mt-1 text-[11px] text-muted-foreground">
-                                Enter to send · Shift+Enter for a new line
-                                {draft.length > 0 && ` · ${draft.length} chars`}
-                            </p>
+                            {draft.trim() ? (
+                                <SmsComposeMeter
+                                    className="mt-1"
+                                    text={draft}
+                                    onTextChange={setDraft}
+                                />
+                            ) : (
+                                <p className="mt-1 text-[11px] text-muted-foreground">
+                                    Enter to send · Shift+Enter for a new line
+                                </p>
+                            )}
                         </footer>
                     </>
                 )}

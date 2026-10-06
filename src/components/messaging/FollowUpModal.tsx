@@ -28,6 +28,11 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import {
+    confirmMultiSegmentSend,
+    SmsComposeMeter,
+    useSmsSegmentInfo,
+} from '@/components/messaging/SmsComposeMeter';
+import {
     createFollowUp,
     fetchFollowUpPreview,
     fetchUpcomingSendWindows,
@@ -59,6 +64,7 @@ export default function FollowUpModal({ broadcastId, open, onOpenChange, onCreat
     const [sendWindowId, setSendWindowId] = useState('');
     const [scheduledAt, setScheduledAt] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const smsInfo = useSmsSegmentInfo(body);
 
     useEffect(() => {
         if (!open) return;
@@ -96,6 +102,8 @@ export default function FollowUpModal({ broadcastId, open, onOpenChange, onCreat
         !isSubmitting;
 
     const submit = useCallback(async () => {
+        if (!confirmMultiSegmentSend(smsInfo, preview?.eligibleCount ?? null)) return;
+
         setIsSubmitting(true);
         try {
             const result = await createFollowUp(broadcastId, {
@@ -117,7 +125,7 @@ export default function FollowUpModal({ broadcastId, open, onOpenChange, onCreat
         } finally {
             setIsSubmitting(false);
         }
-    }, [body, broadcastId, name, onCreated, onOpenChange, scheduledAt, sendWindowId]);
+    }, [body, broadcastId, name, onCreated, onOpenChange, preview?.eligibleCount, scheduledAt, sendWindowId, smsInfo]);
 
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
@@ -181,6 +189,11 @@ export default function FollowUpModal({ broadcastId, open, onOpenChange, onCreat
                                         value={body}
                                         onChange={(event) => setBody(event.target.value)}
                                         placeholder="Just following up on my last message…"
+                                    />
+                                    <SmsComposeMeter
+                                        text={body}
+                                        recipientCount={preview.eligibleCount}
+                                        onTextChange={setBody}
                                     />
                                 </div>
 

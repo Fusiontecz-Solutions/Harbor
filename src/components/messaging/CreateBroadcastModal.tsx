@@ -46,6 +46,11 @@ import { isAgentRole } from '@/lib/agentAccess';
 import { resolveEffectiveRole } from '@/lib/sessionRole';
 import { ClientPicker } from '@/components/messaging/ClientPicker';
 import {
+    confirmMultiSegmentSend,
+    SmsComposeMeter,
+    useSmsSegmentInfo,
+} from '@/components/messaging/SmsComposeMeter';
+import {
     createBroadcastFromFile,
     createBroadcastFromList,
     fetchLeadBatches,
@@ -64,9 +69,6 @@ interface CreateBroadcastModalProps {
 }
 
 const TOTAL_STEPS = 3;
-
-/** Single-segment GSM-7 limit; beyond this a message bills as multiple parts. */
-const SEGMENT_CHARS = 160;
 
 export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBroadcastModalProps) {
     // The CRM client book is admin-only; agents broadcast to the leads distributed to them.
@@ -152,7 +154,7 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
         return file ? null : 0; // file size is only known server-side after parsing
     }, [clientIds.length, file, manualList.length, selectedBatch, source]);
 
-    const segments = Math.max(1, Math.ceil(body.length / SEGMENT_CHARS));
+    const smsInfo = useSmsSegmentInfo(body);
 
     const mergeTokens = useMemo(() => {
         const matches = body.match(/\{\{\s*([\w.]+)\s*\}\}/g) ?? [];
@@ -169,6 +171,8 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
 
     const submit = useCallback(
         async (startNow: boolean) => {
+            if (!confirmMultiSegmentSend(smsInfo, audienceCount)) return;
+
             setIsSubmitting(true);
             try {
                 let result: CreateBroadcastResult;
@@ -245,6 +249,8 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
             sendWindowId,
             source,
             throttle,
+            smsInfo,
+            audienceCount,
         ],
     );
 
@@ -284,14 +290,11 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
                                         rows={7}
                                         placeholder="Hi {{firstName}}, we have new terms available for {{company}}…"
                                     />
-                                    <div className="flex items-center justify-between text-xs text-muted-foreground">
-                                        <span>
-                                            {body.length} characters · {segments} segment{segments === 1 ? '' : 's'}
-                                        </span>
-                                        {segments > 1 && (
-                                            <span className="text-amber-600">Bills as {segments} messages each</span>
-                                        )}
-                                    </div>
+                                    <SmsComposeMeter
+                                        text={body}
+                                        recipientCount={step >= 2 ? audienceCount : null}
+                                        onTextChange={setBody}
+                                    />
                                 </div>
 
                                 {mergeTokens.length > 0 && (
@@ -421,7 +424,14 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
                                                     : (file?.name ?? 'spreadsheet')
                                         }
                                     />
-                                    <Row label="Segments per message" value={String(segments)} />
+                                    <Row label="Encoding" value={smsInfo.encodingLabel} />
+                                    <Row label="Credits per recipient" value={String(smsInfo.credits)} />
+                                    {audienceCount != null && audienceCount > 0 && (
+                                        <Row
+                                            label="Estimated total credits"
+                                            value={(audienceCount * smsInfo.credits).toLocaleString()}
+                                        />
+                                    )}
                                     <Row label="Merge fields" value={mergeTokens.join(', ') || 'none'} />
                                 </dl>
 
