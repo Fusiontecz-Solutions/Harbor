@@ -32,6 +32,7 @@ import {
 } from '../services/messaging/sender.service';
 import { messagingPerformance } from '../services/messaging/performance.service';
 import { normalizePhoneNumber } from '../services/messaging/phone';
+import { analyzeSmsText } from '../services/messaging/smsSegments';
 import { dispatchOutboundMessage } from '../services/messaging/sms.service';
 
 const actorId = (req: Request): string | null => req.user?.id ?? null;
@@ -159,6 +160,7 @@ class MessagingController {
         res.status(400).json({ success: false, message: 'Message body is required' });
         return;
       }
+      const sms = analyzeSmsText(body);
 
       const toNumber = normalizePhoneNumber(req.body?.toNumber);
       if (!toNumber) {
@@ -202,7 +204,7 @@ class MessagingController {
         return;
       }
 
-      res.status(201).json({ success: true, data: result });
+      res.status(201).json({ success: true, data: { ...result, sms } });
     } catch (err) {
       console.error('[messaging] sendMessage failed:', err);
       res.status(errorStatus(err, 500)).json({ success: false, message: (err as Error)?.message || 'Failed to send message' });

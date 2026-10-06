@@ -15,6 +15,7 @@
  */
 import prisma from '../../config/prismaClient';
 import { createBroadcast, type BroadcastRecipientInput } from './broadcast.service';
+import { analyzeSmsTemplate, estimatedCampaignCredits } from './smsSegments';
 
 /**
  * Minimum gap between a campaign and the follow-up that chases it.
@@ -279,9 +280,17 @@ export async function createFollowUpBroadcast(input: {
     throw new Error('Nobody is left to follow up: everyone replied, was marked, or was never reached');
   }
 
-  return createBroadcast({
+  const bodyText = String(input.body ?? '').trim();
+  if (!bodyText) throw new Error('Message body is required');
+
+  const mergeSamples = recipients
+    .map((row) => row.mergeData)
+    .filter((data): data is Record<string, unknown> => Boolean(data && typeof data === 'object'));
+  const smsSegment = analyzeSmsTemplate(bodyText, mergeSamples);
+
+  const result = await createBroadcast({
     name: input.name?.trim() || `${parent.name} — follow-up`,
-    body: input.body,
+    body: bodyText,
     // Same number as the original, so the thread reads as one conversation
     // rather than a stranger picking up where someone else left off.
     fromNumber: input.fromNumber ?? parent.fromNumber,
@@ -292,6 +301,14 @@ export async function createFollowUpBroadcast(input: {
     leadBatchId: parent.leadBatchId,
     requiresApproval: input.requiresApproval,
   });
+
+  return {
+    ...result,
+    sms: {
+      ...smsSegment,
+      estimatedTotalCredits: estimatedCampaignCredits(result.queuedCount, smsSegment.credits),
+    },
+  };
 }
 
 /* ============================================================================

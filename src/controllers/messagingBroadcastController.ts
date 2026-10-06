@@ -16,6 +16,7 @@ import {
 } from '../services/messaging/broadcast.service';
 import { parseContactSheet } from '../services/messaging/contact.service';
 import { buildMergeDataFromSheetRow } from '../services/messaging/mergeTemplate';
+import { analyzeSmsTemplate, estimatedCampaignCredits } from '../services/messaging/smsSegments';
 import { normalizePhoneNumber } from '../services/messaging/phone';
 import {
   exportAudienceCsv,
@@ -241,6 +242,17 @@ class MessagingBroadcastController {
         return;
       }
 
+      const bodyText = String(req.body?.body ?? req.body?.message ?? '').trim();
+      if (!bodyText) {
+        res.status(400).json({ success: false, message: 'Message body is required' });
+        return;
+      }
+
+      const mergeSamples = recipients
+        .map((r) => r.mergeData)
+        .filter((data): data is Record<string, unknown> => Boolean(data && typeof data === 'object'));
+      const smsSegment = analyzeSmsTemplate(bodyText, mergeSamples);
+
       /**
        * When to send.
        *
@@ -259,7 +271,7 @@ class MessagingBroadcastController {
 
       const result = await createBroadcast({
         name: String(req.body?.name ?? ''),
-        body: String(req.body?.body ?? req.body?.message ?? ''),
+        body: bodyText,
         fromNumber,
         mediaUrls: Array.isArray(req.body?.mediaUrls) ? req.body.mediaUrls.map(String) : undefined,
         recipients,
@@ -276,7 +288,19 @@ class MessagingBroadcastController {
       // agent — it would be a way straight past the approval gate.
       if ((req.body?.startNow === true || String(req.body?.startNow) === 'true') && isAdmin(req)) {
         const started = await startBroadcast(result.id);
-        res.status(201).json({ success: true, data: { ...result, skippedClients, batchExcluded, started } });
+        res.status(201).json({
+          success: true,
+          data: {
+            ...result,
+            skippedClients,
+            batchExcluded,
+            started,
+            sms: {
+              ...smsSegment,
+              estimatedTotalCredits: estimatedCampaignCredits(result.queuedCount, smsSegment.credits),
+            },
+          },
+        });
         return;
       }
 
@@ -288,6 +312,10 @@ class MessagingBroadcastController {
           batchExcluded,
           scheduledAt,
           awaitingApproval: !isAdmin(req),
+          sms: {
+            ...smsSegment,
+            estimatedTotalCredits: estimatedCampaignCredits(result.queuedCount, smsSegment.credits),
+          },
         },
       });
     } catch (err) {
