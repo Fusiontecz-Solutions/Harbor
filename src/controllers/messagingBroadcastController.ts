@@ -15,6 +15,7 @@ import {
   startBroadcast,
 } from '../services/messaging/broadcast.service';
 import { parseContactSheet } from '../services/messaging/contact.service';
+import { buildMergeDataFromSheetRow } from '../services/messaging/mergeTemplate';
 import { normalizePhoneNumber } from '../services/messaging/phone';
 import {
   exportAudienceCsv,
@@ -164,13 +165,12 @@ class MessagingBroadcastController {
         recipients = rows.flatMap((row) => {
           const phoneNumber = normalizePhoneNumber(row[phoneHeader]);
           if (!phoneNumber) return [];
-          // Every other column becomes a merge field, so {{firstName}} in the
-          // body resolves from the sheet without extra configuration.
-          const mergeData: Record<string, unknown> = {};
-          for (const [header, field] of Object.entries(columnMapping)) {
-            if (field !== 'phoneNumber') mergeData[field] = row[header];
-          }
-          return [{ phoneNumber, mergeData }];
+          return [
+            {
+              phoneNumber,
+              mergeData: buildMergeDataFromSheetRow(row, columnMapping, phoneHeader),
+            },
+          ];
         });
       } else if (Array.isArray(req.body?.recipients)) {
         recipients = req.body.recipients;
