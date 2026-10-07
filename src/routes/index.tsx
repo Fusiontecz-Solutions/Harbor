@@ -22,6 +22,10 @@ import Inbox from '../pages/messaging/Inbox';
 import Broadcasts from '../pages/messaging/Broadcasts';
 import BroadcastDetail from '../pages/messaging/BroadcastDetail';
 import MessagingContacts from '../pages/messaging/MessagingContacts';
+import MessagingSenders from '../pages/messaging/MessagingSenders';
+import LeadDistribution from '../pages/messaging/LeadDistribution';
+import SendWindows from '../pages/messaging/SendWindows';
+import MessagingPerformance from '../pages/messaging/MessagingPerformance';
 import { applicationsPageLoader } from './applicationsLoader';
 
 /** Remount when `?query` changes so list state matches URL + route loader. */
@@ -118,6 +122,10 @@ const Routes: RouteObject[] = [
             { path: 'broadcasts', element: <Broadcasts /> },
             { path: 'broadcasts/:broadcastId', element: <BroadcastDetail /> },
             { path: 'messaging-contacts', element: <MessagingContacts /> },
+            { path: 'messaging-senders', element: <MessagingSenders /> },
+            { path: 'lead-distribution', element: <LeadDistribution /> },
+            { path: 'send-windows', element: <SendWindows /> },
+            { path: 'messaging-performance', element: <MessagingPerformance /> },
             { path: 'create-clients', element: <CreateClient /> },
             { path: 'create-clients/:clientId', element: <CreateClient /> },
             {

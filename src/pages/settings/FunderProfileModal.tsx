@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ChevronDown,
+  Eye,
   FileText,
   Info,
   Loader2,
@@ -11,6 +12,7 @@ import {
   Upload,
 } from "lucide-react";
 import { toast } from "react-toastify";
+import { resolvePdfViewUrl } from "@/utils/cloudinaryPdfUrl";
 
 import {
   Dialog,
@@ -20,6 +22,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -108,8 +111,18 @@ const ADDENDUM_PRESETS = [
   { name: "Addendum NY", type: "addendum_ny" },
   { name: "Addendum VA", type: "addendum_va" },
   { name: "EPA Addendum", type: "addendum_epa" },
+  { name: "EPD Addendum", type: "addendum_epd" },
+  { name: "Exhibit A", type: "exhibit_a" },
   { name: "ACH Authorization", type: "ach_authorization" },
 ] as const;
+
+/** Prefer the API's `message` over axios' generic "Request failed with status code …". */
+function apiErrorMessage(err: unknown, fallback: string): string {
+  const apiMessage = (err as { response?: { data?: { message?: unknown } } })?.response?.data
+    ?.message;
+  if (typeof apiMessage === "string" && apiMessage.trim()) return apiMessage;
+  return err instanceof Error ? err.message : fallback;
+}
 
 function InfoBanner({ children }: { children: React.ReactNode }) {
   return (
@@ -216,6 +229,8 @@ export default function FunderProfileModal({
   const [documents, setDocuments] = useState<FunderDocumentTemplateRow[]>([]);
   const [documentsLoading, setDocumentsLoading] = useState(false);
   const [docActionId, setDocActionId] = useState<string | null>(null);
+  const [selectedDisclosureIds, setSelectedDisclosureIds] = useState<Set<string>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   const [disclosureState, setDisclosureState] = useState("Texas");
   const [disclosureFrequency, setDisclosureFrequency] = useState("daily");
@@ -247,7 +262,7 @@ export default function FunderProfileModal({
       const rows = await fetchFunderDocuments(funderId);
       setDocuments(rows);
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : "Failed to load documents");
+      toast.error(apiErrorMessage(err, "Failed to load documents"));
       setDocuments([]);
     } finally {
       setDocumentsLoading(false);
@@ -389,6 +404,12 @@ export default function FunderProfileModal({
     contractFile?.name || initial?.contractPdfFileName || DEFAULT_CONTRACT_FILENAME;
 
   const disclosureRows = documents.filter(isFunderDisclosureRow);
+  // Drop selections for rows that no longer exist (after delete / reload).
+  const selectedDisclosureRows = disclosureRows.filter((row) =>
+    selectedDisclosureIds.has(row.id),
+  );
+  const allDisclosuresSelected =
+    disclosureRows.length > 0 && selectedDisclosureRows.length === disclosureRows.length;
   const addendumRows = documents.filter(isFunderAddendumRow);
 
   const addendumSource = resolveAddendumDocumentsSource({
@@ -554,7 +575,7 @@ export default function FunderProfileModal({
       if (disclosureInputRef.current) disclosureInputRef.current.value = "";
       await loadDocuments(initial.id);
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : "Upload failed");
+      toast.error(apiErrorMessage(err, "Upload failed"));
     } finally {
       setDisclosureUploading(false);
     }
@@ -583,7 +604,7 @@ export default function FunderProfileModal({
       if (addendumInputRef.current) addendumInputRef.current.value = "";
       await loadDocuments(initial.id);
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : "Upload failed");
+      toast.error(apiErrorMessage(err, "Upload failed"));
     } finally {
       setAddendumUploading(false);
     }
@@ -591,17 +612,77 @@ export default function FunderProfileModal({
 
   const handleDeleteDocument = async (row: FunderDocumentTemplateRow) => {
     if (!initial?.id) return;
-    if (!window.confirm(`Remove "${row.name}"?`)) return;
+    const ownPrefix = `funder_${initial.id}_`.toLowerCase();
+    const isShared = !String(row.layoutKey || "").toLowerCase().startsWith(ownPrefix);
+    const prompt = isShared
+      ? `Remove "${row.name}"?\n\nThis PDF is part of the shared disclosure pack — removing it affects every funder that uses it.`
+      : `Remove "${row.name}"?`;
+    if (!window.confirm(prompt)) return;
     setDocActionId(row.id);
     try {
       await deleteFunderDocument(initial.id, row.id);
       toast.success("Removed");
       await loadDocuments(initial.id);
     } catch (err: unknown) {
-      toast.error(err instanceof Error ? err.message : "Could not remove");
+      toast.error(apiErrorMessage(err, "Could not remove"));
     } finally {
       setDocActionId(null);
     }
+  };
+
+  // Cloudinary PDFs are access-restricted (401 on the raw URL) — load through
+  // the authenticated inline-preview proxy, then open the blob in a new tab.
+  const handleViewDocument = async (row: FunderDocumentTemplateRow) => {
+    if (!row.pdfUrl) return;
+    const tab = window.open("", "_blank");
+    try {
+      const viewUrl = await resolvePdfViewUrl(row.pdfUrl, `${row.name || "disclosure"}.pdf`);
+      if (!viewUrl) throw new Error("Could not load PDF.");
+      if (tab) tab.location.href = viewUrl;
+      else window.open(viewUrl, "_blank");
+    } catch (err: unknown) {
+      tab?.close();
+      toast.error(apiErrorMessage(err, "Could not load PDF"));
+    }
+  };
+
+  const toggleDisclosureSelected = (id: string, checked: boolean) => {
+    setSelectedDisclosureIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  const handleDeleteSelectedDisclosures = async () => {
+    if (!initial?.id || !selectedDisclosureRows.length) return;
+    const ownPrefix = `funder_${initial.id}_`.toLowerCase();
+    const sharedCount = selectedDisclosureRows.filter(
+      (row) => !String(row.layoutKey || "").toLowerCase().startsWith(ownPrefix),
+    ).length;
+    const prompt =
+      `Remove ${selectedDisclosureRows.length} disclosure PDF(s)?` +
+      (sharedCount
+        ? `\n\n${sharedCount} of them are part of the shared disclosure pack — removing them affects every funder that uses them.`
+        : "");
+    if (!window.confirm(prompt)) return;
+    setBulkDeleting(true);
+    let removed = 0;
+    const failures: string[] = [];
+    for (const row of selectedDisclosureRows) {
+      try {
+        await deleteFunderDocument(initial.id, row.id);
+        removed += 1;
+      } catch (err: unknown) {
+        failures.push(`${row.name}: ${apiErrorMessage(err, "Could not remove")}`);
+      }
+    }
+    setSelectedDisclosureIds(new Set());
+    if (removed) toast.success(`Removed ${removed} disclosure PDF(s)`);
+    if (failures.length) toast.error(failures.join("\n"));
+    await loadDocuments(initial.id);
+    setBulkDeleting(false);
   };
 
   const applyAddendumPreset = (preset: (typeof ADDENDUM_PRESETS)[number]) => {
@@ -1170,9 +1251,51 @@ export default function FunderProfileModal({
               </Button>
 
               <div>
-                <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                  Uploaded ({disclosureRows.length})
-                </p>
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <label className="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                    {disclosureRows.length > 0 ? (
+                      <Checkbox
+                        checked={
+                          allDisclosuresSelected
+                            ? true
+                            : selectedDisclosureRows.length
+                              ? "indeterminate"
+                              : false
+                        }
+                        disabled={bulkDeleting}
+                        onCheckedChange={(checked: boolean | "indeterminate") =>
+                          setSelectedDisclosureIds(
+                            checked === true
+                              ? new Set(disclosureRows.map((row) => row.id))
+                              : new Set(),
+                          )
+                        }
+                        aria-label="Select all disclosures"
+                      />
+                    ) : null}
+                    Uploaded ({disclosureRows.length})
+                    {selectedDisclosureRows.length
+                      ? ` · ${selectedDisclosureRows.length} selected`
+                      : ""}
+                  </label>
+                  {selectedDisclosureRows.length > 0 ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-destructive"
+                      disabled={bulkDeleting}
+                      onClick={() => void handleDeleteSelectedDisclosures()}
+                    >
+                      {bulkDeleting ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-3.5 w-3.5" />
+                      )}
+                      Delete selected ({selectedDisclosureRows.length})
+                    </Button>
+                  ) : null}
+                </div>
                 {documentsLoading ? (
                   <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
                     <Loader2 className="h-4 w-4 animate-spin" />
@@ -1191,26 +1314,47 @@ export default function FunderProfileModal({
                         className="flex items-center justify-between gap-3 px-3 py-2.5"
                       >
                         <div className="flex min-w-0 flex-wrap items-center gap-2">
+                          <Checkbox
+                            checked={selectedDisclosureIds.has(row.id)}
+                            disabled={bulkDeleting}
+                            onCheckedChange={(checked: boolean | "indeterminate") =>
+                              toggleDisclosureSelected(row.id, checked === true)
+                            }
+                            aria-label={`Select ${row.name}`}
+                          />
                           <DocBadge>{row.state || "—"}</DocBadge>
                           <DocBadge>{row.frequency || "—"}</DocBadge>
                           {dealLabel ? <DocBadge>{dealLabel}</DocBadge> : null}
                           <span className="truncate text-muted-foreground">{row.name}</span>
                         </div>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8 shrink-0 text-destructive"
-                          disabled={docActionId === row.id}
-                          onClick={() => void handleDeleteDocument(row)}
-                          title="Remove"
-                        >
-                          {docActionId === row.id ? (
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                          ) : (
-                            <Trash2 className="h-4 w-4" />
-                          )}
-                        </Button>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8"
+                            disabled={!row.pdfUrl}
+                            onClick={() => void handleViewDocument(row)}
+                            title={row.pdfUrl ? "View PDF" : "No PDF uploaded"}
+                          >
+                            <Eye className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 text-destructive"
+                            disabled={docActionId === row.id}
+                            onClick={() => void handleDeleteDocument(row)}
+                            title="Remove"
+                          >
+                            {docActionId === row.id ? (
+                              <Loader2 className="h-4 w-4 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-4 w-4" />
+                            )}
+                          </Button>
+                        </div>
                       </li>
                       );
                     })}
@@ -1227,7 +1371,7 @@ export default function FunderProfileModal({
               <>
             <UploadCard
               title="Addendum PDFs"
-              description="Upload Addendum P (REFI), state addendums (CA / NY / VA), EPA, or ACH. Contract tab auto-selects by refinance and state."
+              description="Upload Addendum P (REFI), state addendums (CA / NY / VA), EPA, EPD, Exhibit A, or ACH. Contract tab auto-selects by refinance and state."
             >
               <div className="flex flex-wrap gap-2">
                 {ADDENDUM_PRESETS.map((preset) => (

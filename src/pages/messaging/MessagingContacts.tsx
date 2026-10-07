@@ -26,18 +26,40 @@ import {
     blockContact,
     checkDnc,
     fetchContacts,
+    fetchLeadBatches,
     importContacts,
     unblockContact,
+    type ContactDisposition,
     type DncResult,
     type ImportSummary,
+    type LeadBatch,
     type MessagingContact,
 } from '@/services/messaging/messagingApi';
+
+/**
+ * The status filter is one control over two different facts.
+ *
+ * "Blocked / opted out" is what an operator actually wants to see — a manual
+ * block and an inbound STOP mean the same thing to them — but they are stored
+ * separately, one on the contact and one as a suppression row. The server
+ * resolves both behind `suppressed`.
+ */
+type StatusFilter = 'ALL' | 'ACTIVE' | 'BLOCKED' | 'SUPPRESSED';
+
+const DISPOSITION_LABELS: Record<ContactDisposition, string> = {
+    NEW: 'New',
+    INTERESTED: 'Interested',
+    NOT_INTERESTED: 'Not interested',
+};
 
 export default function MessagingContacts() {
     const [contacts, setContacts] = useState<MessagingContact[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [search, setSearch] = useState('');
-    const [statusFilter, setStatusFilter] = useState<'ALL' | 'ACTIVE' | 'BLOCKED'>('ALL');
+    const [statusFilter, setStatusFilter] = useState<StatusFilter>('ALL');
+    const [dispositionFilter, setDispositionFilter] = useState<'ALL' | ContactDisposition>('ALL');
+    const [batchFilter, setBatchFilter] = useState<string>('ALL');
+    const [batches, setBatches] = useState<LeadBatch[]>([]);
 
     const [file, setFile] = useState<File | null>(null);
     const [isImporting, setIsImporting] = useState(false);
@@ -54,7 +76,11 @@ export default function MessagingContacts() {
                 page: 1,
                 pageSize: 100,
                 search: search || undefined,
-                status: statusFilter === 'ALL' ? undefined : statusFilter,
+                status:
+                    statusFilter === 'ACTIVE' || statusFilter === 'BLOCKED' ? statusFilter : undefined,
+                suppressed: statusFilter === 'SUPPRESSED' || undefined,
+                disposition: dispositionFilter === 'ALL' ? undefined : dispositionFilter,
+                batchId: batchFilter === 'ALL' ? undefined : batchFilter,
             });
             setContacts(response.data);
         } catch (error: any) {
@@ -62,7 +88,15 @@ export default function MessagingContacts() {
         } finally {
             setIsLoading(false);
         }
-    }, [search, statusFilter]);
+    }, [batchFilter, dispositionFilter, search, statusFilter]);
+
+    // Batches change only on an upload, so they load once rather than with
+    // every filter change.
+    useEffect(() => {
+        fetchLeadBatches()
+            .then(setBatches)
+            .catch(() => setBatches([]));
+    }, []);
 
     useEffect(() => {
         void load();
@@ -243,13 +277,42 @@ export default function MessagingContacts() {
                             className="h-9 w-48"
                         />
                         <select
+                            value={dispositionFilter}
+                            onChange={(event) =>
+                                setDispositionFilter(event.target.value as typeof dispositionFilter)
+                            }
+                            className="h-9 rounded-md border bg-background px-2 text-sm"
+                            title="Filter by how the lead was marked in the inbox"
+                        >
+                            <option value="ALL">Any marker</option>
+                            <option value="NEW">New</option>
+                            <option value="INTERESTED">Interested</option>
+                            <option value="NOT_INTERESTED">Not interested</option>
+                        </select>
+                        {batches.length > 0 && (
+                            <select
+                                value={batchFilter}
+                                onChange={(event) => setBatchFilter(event.target.value)}
+                                className="h-9 max-w-44 rounded-md border bg-background px-2 text-sm"
+                                title="Filter by the upload these leads came from"
+                            >
+                                <option value="ALL">Any batch</option>
+                                {batches.map((batch) => (
+                                    <option key={batch.id} value={batch.id}>
+                                        {batch.name} ({batch.myLeadCount})
+                                    </option>
+                                ))}
+                            </select>
+                        )}
+                        <select
                             value={statusFilter}
-                            onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}
+                            onChange={(event) => setStatusFilter(event.target.value as StatusFilter)}
                             className="h-9 rounded-md border bg-background px-2 text-sm"
                         >
                             <option value="ALL">All</option>
                             <option value="ACTIVE">Active</option>
                             <option value="BLOCKED">Blocked</option>
+                            <option value="SUPPRESSED">Blocked / opted out</option>
                         </select>
                     </div>
                 </CardHeader>
@@ -266,7 +329,8 @@ export default function MessagingContacts() {
                                     <TableHead>Name</TableHead>
                                     <TableHead>Phone</TableHead>
                                     <TableHead>Company</TableHead>
-                                    <TableHead>Tags</TableHead>
+                                    <TableHead>Marker</TableHead>
+                                    <TableHead>Batch</TableHead>
                                     <TableHead>Status</TableHead>
                                     <TableHead className="text-right">Actions</TableHead>
                                 </TableRow>
@@ -279,8 +343,23 @@ export default function MessagingContacts() {
                                         </TableCell>
                                         <TableCell className="font-mono text-xs">{contact.phoneNumber}</TableCell>
                                         <TableCell>{contact.company || '—'}</TableCell>
-                                        <TableCell className="text-xs text-muted-foreground">
-                                            {contact.tags?.join(', ') || '—'}
+                                        <TableCell>
+                                            {contact.disposition === 'INTERESTED' ? (
+                                                <Badge className="bg-emerald-600 hover:bg-emerald-600">
+                                                    {DISPOSITION_LABELS.INTERESTED}
+                                                </Badge>
+                                            ) : contact.disposition === 'NOT_INTERESTED' ? (
+                                                <Badge variant="outline" className="border-amber-500 text-amber-600">
+                                                    {DISPOSITION_LABELS.NOT_INTERESTED}
+                                                </Badge>
+                                            ) : (
+                                                <span className="text-xs text-muted-foreground">
+                                                    {DISPOSITION_LABELS.NEW}
+                                                </span>
+                                            )}
+                                        </TableCell>
+                                        <TableCell className="max-w-36 truncate text-xs text-muted-foreground">
+                                            {contact.batch?.name || '—'}
                                         </TableCell>
                                         <TableCell>
                                             {contact.status === 'BLOCKED' ? (

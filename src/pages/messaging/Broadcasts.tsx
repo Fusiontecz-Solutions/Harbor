@@ -12,6 +12,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'react-toastify';
 import {
+    Check,
     CheckCheck,
     ChevronRight,
     MessageSquare,
@@ -31,10 +32,14 @@ import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import { useSocket } from '@/context/SocketContext';
 import { CreateBroadcastModal } from '@/components/messaging/CreateBroadcastModal';
+import { isAgentRole } from '@/lib/agentAccess';
+import { resolveEffectiveRole } from '@/lib/sessionRole';
 import {
     cancelBroadcast,
     fetchBroadcasts,
     pauseBroadcast,
+    approveBroadcast,
+    rejectBroadcast,
     startBroadcast,
     type BroadcastSummary,
 } from '@/services/messaging/messagingApi';
@@ -47,13 +52,31 @@ const STATUS_STYLE: Record<string, string> = {
     COMPLETED: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300',
     CANCELLED: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300',
     FAILED: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300',
+    PENDING_APPROVAL: 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300',
 };
 
-const STATUS_FILTERS = ['ALL', 'RUNNING', 'DRAFT', 'COMPLETED', 'PAUSED', 'CANCELLED'] as const;
+/** PENDING_APPROVAL is first: it is the only status that needs someone to act. */
+const STATUS_FILTERS = [
+    'ALL',
+    'PENDING_APPROVAL',
+    'RUNNING',
+    'DRAFT',
+    'COMPLETED',
+    'PAUSED',
+    'CANCELLED',
+] as const;
+
+/** "PENDING_APPROVAL" reads badly as a button; give it a real label. */
+const STATUS_FILTER_LABELS: Record<string, string> = {
+    ALL: 'All',
+    PENDING_APPROVAL: 'Awaiting approval',
+};
 
 export default function Broadcasts() {
     const { socket } = useSocket();
     const navigate = useNavigate();
+    // Agents prepare campaigns; releasing one (approve, reject, start) is an admin call.
+    const canRelease = !isAgentRole(resolveEffectiveRole(undefined));
 
     const [broadcasts, setBroadcasts] = useState<BroadcastSummary[]>([]);
     const [isLoading, setIsLoading] = useState(true);
@@ -92,11 +115,15 @@ export default function Broadcasts() {
     }, [socket]);
 
     const act = useCallback(
-        async (id: string, action: 'start' | 'pause' | 'cancel') => {
+        async (id: string, action: 'start' | 'pause' | 'cancel' | 'approve' | 'reject') => {
             try {
                 if (action === 'start') await startBroadcast(id);
                 if (action === 'pause') await pauseBroadcast(id);
                 if (action === 'cancel') await cancelBroadcast(id);
+                // Approving a campaign with no schedule starts it straight
+                // away: an approver clicking the tick means "send this".
+                if (action === 'approve') await approveBroadcast(id, true);
+                if (action === 'reject') await rejectBroadcast(id);
                 await load();
             } catch (error: any) {
                 toast.error(error?.response?.data?.message || `Failed to ${action} broadcast`);
@@ -178,7 +205,8 @@ export default function Broadcasts() {
                                     : 'bg-muted text-muted-foreground hover:bg-muted/70',
                             )}
                         >
-                            {status === 'ALL' ? 'All' : status.charAt(0) + status.slice(1).toLowerCase()}
+                            {STATUS_FILTER_LABELS[status] ??
+                                status.charAt(0) + status.slice(1).toLowerCase()}
                         </button>
                     ))}
                 </div>
@@ -205,6 +233,7 @@ export default function Broadcasts() {
                                 <BroadcastRow
                                     key={broadcast.id}
                                     broadcast={broadcast}
+                                    canRelease={canRelease}
                                     onAction={act}
                                     onOpen={() => navigate(`/broadcasts/${broadcast.id}`)}
                                 />
@@ -243,11 +272,13 @@ function SummaryTile({
 
 function BroadcastRow({
     broadcast,
+    canRelease,
     onAction,
     onOpen,
 }: {
     broadcast: BroadcastSummary;
-    onAction: (id: string, action: 'start' | 'pause' | 'cancel') => void;
+    canRelease: boolean;
+    onAction: (id: string, action: 'start' | 'pause' | 'cancel' | 'approve' | 'reject') => void;
     onOpen: () => void;
 }) {
     const attempted = broadcast.sentCount + broadcast.failedCount + broadcast.suppressedCount;
@@ -300,7 +331,30 @@ function BroadcastRow({
             </button>
 
             <div className="flex shrink-0 items-center gap-1">
-                {(broadcast.status === 'DRAFT' || broadcast.status === 'PAUSED' || broadcast.status === 'QUEUED') && (
+                {/* An agent built this and it will not send until someone releases it. */}
+                {canRelease && broadcast.status === 'PENDING_APPROVAL' && (
+                    <>
+                        <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8 text-emerald-600"
+                            onClick={() => onAction(broadcast.id, 'approve')}
+                            title="Approve and send"
+                        >
+                            <Check className="h-4 w-4" />
+                        </Button>
+                        <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8 text-red-500"
+                            onClick={() => onAction(broadcast.id, 'reject')}
+                            title="Reject"
+                        >
+                            <X className="h-4 w-4" />
+                        </Button>
+                    </>
+                )}
+                {canRelease && (broadcast.status === 'DRAFT' || broadcast.status === 'PAUSED' || broadcast.status === 'QUEUED') && (
                     <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => onAction(broadcast.id, 'start')} title="Start">
                         <Play className="h-4 w-4" />
                     </Button>

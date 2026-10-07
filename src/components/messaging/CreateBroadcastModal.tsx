@@ -10,7 +10,7 @@
  * starts, so the final step exists to make the operator confirm the audience
  * size and compliance before anything sends.
  */
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { toast } from 'react-toastify';
 import {
     AlertTriangle,
@@ -19,6 +19,7 @@ import {
     ArrowUp,
     BatteryFull,
     CheckCircle2,
+    Layers,
     Loader2,
     Send,
     Signal,
@@ -41,14 +42,25 @@ import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { cn } from '@/lib/utils';
+import { isAgentRole } from '@/lib/agentAccess';
+import { resolveEffectiveRole } from '@/lib/sessionRole';
 import { ClientPicker } from '@/components/messaging/ClientPicker';
+import {
+    confirmMultiSegmentSend,
+    SmsComposeMeter,
+    useSmsSegmentInfo,
+} from '@/components/messaging/SmsComposeMeter';
 import {
     createBroadcastFromFile,
     createBroadcastFromList,
+    fetchLeadBatches,
+    fetchUpcomingSendWindows,
+    type LeadBatch,
+    type UpcomingSendWindow,
     type CreateBroadcastResult,
 } from '@/services/messaging/messagingApi';
 
-type AudienceSource = 'clients' | 'file' | 'manual';
+type AudienceSource = 'clients' | 'batch' | 'file' | 'manual';
 
 interface CreateBroadcastModalProps {
     open: boolean;
@@ -58,10 +70,11 @@ interface CreateBroadcastModalProps {
 
 const TOTAL_STEPS = 3;
 
-/** Single-segment GSM-7 limit; beyond this a message bills as multiple parts. */
-const SEGMENT_CHARS = 160;
-
 export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBroadcastModalProps) {
+    // The CRM client book is admin-only; agents broadcast to the leads distributed to them.
+    const canUseClients = !isAgentRole(resolveEffectiveRole(undefined));
+    const defaultSource: AudienceSource = canUseClients ? 'clients' : 'batch';
+
     const [step, setStep] = useState(1);
     const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -70,8 +83,12 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
     const [body, setBody] = useState('');
 
     // Step 2
-    const [source, setSource] = useState<AudienceSource>('clients');
+    const [source, setSource] = useState<AudienceSource>(defaultSource);
     const [clientIds, setClientIds] = useState<string[]>([]);
+    const [leadBatchId, setLeadBatchId] = useState<string>('');
+    const [batches, setBatches] = useState<LeadBatch[]>([]);
+    const [sendWindows, setSendWindows] = useState<UpcomingSendWindow[]>([]);
+    const [sendWindowId, setSendWindowId] = useState<string>('');
     const [file, setFile] = useState<File | null>(null);
     const [manualNumbers, setManualNumbers] = useState('');
 
@@ -85,15 +102,16 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
         setStep(1);
         setName('');
         setBody('');
-        setSource('clients');
+        setSource(defaultSource);
         setClientIds([]);
+        setLeadBatchId('');
         setFile(null);
         setManualNumbers('');
         setThrottle('10');
         setScheduledAt('');
         setAckCompliance(false);
         setAckIrreversible(false);
-    }, []);
+    }, [defaultSource]);
 
     const close = useCallback(
         (nextOpen: boolean) => {
@@ -112,13 +130,31 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
         [manualNumbers],
     );
 
+    /**
+     * Batches and send windows are small, stable lists — loaded once when the
+     * modal opens rather than on every step change.
+     */
+    useEffect(() => {
+        if (!open) return;
+        void fetchLeadBatches().then(setBatches).catch(() => setBatches([]));
+        void fetchUpcomingSendWindows().then(setSendWindows).catch(() => setSendWindows([]));
+    }, [open]);
+
+    const selectedBatch = useMemo(
+        () => batches.find((batch) => batch.id === leadBatchId) ?? null,
+        [batches, leadBatchId],
+    );
+
     const audienceCount = useMemo(() => {
         if (source === 'clients') return clientIds.length;
         if (source === 'manual') return manualList.length;
+        // The batch count is the caller's own share, before blocked and
+        // already-marked leads are dropped — so it is an upper bound.
+        if (source === 'batch') return selectedBatch?.myLeadCount ?? 0;
         return file ? null : 0; // file size is only known server-side after parsing
-    }, [clientIds.length, file, manualList.length, source]);
+    }, [clientIds.length, file, manualList.length, selectedBatch, source]);
 
-    const segments = Math.max(1, Math.ceil(body.length / SEGMENT_CHARS));
+    const smsInfo = useSmsSegmentInfo(body);
 
     const mergeTokens = useMemo(() => {
         const matches = body.match(/\{\{\s*([\w.]+)\s*\}\}/g) ?? [];
@@ -128,12 +164,15 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
     const canLeaveStepOne = name.trim().length > 0 && body.trim().length > 0;
     const canLeaveStepTwo =
         (source === 'clients' && clientIds.length > 0) ||
+        (source === 'batch' && Boolean(leadBatchId)) ||
         (source === 'file' && Boolean(file)) ||
         (source === 'manual' && manualList.length > 0);
     const canSubmit = ackCompliance && ackIrreversible && !isSubmitting;
 
     const submit = useCallback(
         async (startNow: boolean) => {
+            if (!confirmMultiSegmentSend(smsInfo, audienceCount)) return;
+
             setIsSubmitting(true);
             try {
                 let result: CreateBroadcastResult;
@@ -151,10 +190,14 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
                         name: name.trim(),
                         body: body.trim(),
                         ...(source === 'clients' ? { clientIds } : {}),
+                        ...(source === 'batch' ? { leadBatchId } : {}),
                         ...(source === 'manual'
                             ? { recipients: manualList.map((phoneNumber) => ({ phoneNumber })) }
                             : {}),
                         throttlePerSecond: Number(throttle) || undefined,
+                        // A window wins over a hand-picked time: picking one is
+                        // the more deliberate choice of the two.
+                        ...(sendWindowId ? { sendWindowId } : {}),
                         scheduledAt: scheduledAt ? new Date(scheduledAt).toISOString() : null,
                         startNow,
                     });
@@ -170,6 +213,21 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
                     toast.warn(`${result.skippedClients.length} client(s) skipped — see the campaign for details`);
                 }
 
+                if (result.batchExcluded) {
+                    const { blocked, disposed } = result.batchExcluded;
+                    if (blocked + disposed > 0) {
+                        toast.info(
+                            `${disposed} already marked and ${blocked} blocked were left out of this batch`,
+                        );
+                    }
+                }
+
+                // An agent's campaign does not send on submit — say so plainly
+                // rather than letting them assume it went out.
+                if (result.awaitingApproval) {
+                    toast.info('Sent for approval — an admin has to release it before it goes out');
+                }
+
                 close(false);
                 onCreated();
             } catch (err: any) {
@@ -178,7 +236,22 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
                 setIsSubmitting(false);
             }
         },
-        [body, clientIds, close, file, manualList, name, onCreated, scheduledAt, source, throttle],
+        [
+            body,
+            clientIds,
+            close,
+            file,
+            leadBatchId,
+            manualList,
+            name,
+            onCreated,
+            scheduledAt,
+            sendWindowId,
+            source,
+            throttle,
+            smsInfo,
+            audienceCount,
+        ],
     );
 
     return (
@@ -217,14 +290,12 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
                                         rows={7}
                                         placeholder="Hi {{firstName}}, we have new terms available for {{company}}…"
                                     />
-                                    <div className="flex items-center justify-between text-xs text-muted-foreground">
-                                        <span>
-                                            {body.length} characters · {segments} segment{segments === 1 ? '' : 's'}
-                                        </span>
-                                        {segments > 1 && (
-                                            <span className="text-amber-600">Bills as {segments} messages each</span>
-                                        )}
-                                    </div>
+                                    <SmsComposeMeter
+                                        text={body}
+                                        recipientCount={step >= 2 ? audienceCount : null}
+                                        onTextChange={setBody}
+                                        showCampaignCreditHint
+                                    />
                                 </div>
 
                                 {mergeTokens.length > 0 && (
@@ -250,9 +321,14 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
 
                     {step === 2 && (
                         <Tabs value={source} onValueChange={(value: string) => setSource(value as AudienceSource)}>
-                            <TabsList className="grid w-full grid-cols-3">
-                                <TabsTrigger value="clients">
-                                    <Users className="mr-1 h-4 w-4" /> CRM clients
+                            <TabsList className={cn('grid w-full', canUseClients ? 'grid-cols-4' : 'grid-cols-3')}>
+                                {canUseClients && (
+                                    <TabsTrigger value="clients">
+                                        <Users className="mr-1 h-4 w-4" /> CRM clients
+                                    </TabsTrigger>
+                                )}
+                                <TabsTrigger value="batch">
+                                    <Layers className="mr-1 h-4 w-4" /> Leads
                                 </TabsTrigger>
                                 <TabsTrigger value="file">
                                     <Upload className="mr-1 h-4 w-4" /> Spreadsheet
@@ -260,8 +336,41 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
                                 <TabsTrigger value="manual">Numbers</TabsTrigger>
                             </TabsList>
 
-                            <TabsContent value="clients" className="pt-3">
-                                <ClientPicker selectedIds={clientIds} onChange={setClientIds} />
+                            {canUseClients && (
+                                <TabsContent value="clients" className="pt-3">
+                                    <ClientPicker selectedIds={clientIds} onChange={setClientIds} />
+                                </TabsContent>
+                            )}
+
+                            <TabsContent value="batch" className="space-y-2 pt-3">
+                                <Label htmlFor="bc-batch">Lead upload</Label>
+                                {batches.length === 0 ? (
+                                    <p className="text-sm text-muted-foreground">
+                                        No lead uploads yet. An admin distributes leads from Lead
+                                        Distribution, and each upload then appears here.
+                                    </p>
+                                ) : (
+                                    <>
+                                        <select
+                                            id="bc-batch"
+                                            value={leadBatchId}
+                                            onChange={(event) => setLeadBatchId(event.target.value)}
+                                            className="h-9 w-full rounded-md border bg-background px-2 text-sm"
+                                        >
+                                            <option value="">Choose an upload…</option>
+                                            {batches.map((batch) => (
+                                                <option key={batch.id} value={batch.id}>
+                                                    {batch.name} — {batch.myLeadCount.toLocaleString()} of your leads
+                                                </option>
+                                            ))}
+                                        </select>
+                                        <p className="text-xs text-muted-foreground">
+                                            Only the leads distributed to you. Anyone you have already
+                                            marked Interested or Not Interested, and anyone blocked, is
+                                            left out automatically.
+                                        </p>
+                                    </>
+                                )}
                             </TabsContent>
 
                             <TabsContent value="file" className="space-y-2 pt-3">
@@ -307,12 +416,23 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
                                         value={
                                             source === 'clients'
                                                 ? `${clientIds.length} CRM client${clientIds.length === 1 ? '' : 's'}`
-                                                : source === 'manual'
-                                                  ? `${manualList.length} number${manualList.length === 1 ? '' : 's'}`
-                                                  : (file?.name ?? 'spreadsheet')
+                                                : source === 'batch'
+                                                  ? selectedBatch
+                                                      ? `${selectedBatch.name} (${selectedBatch.myLeadCount.toLocaleString()} leads)`
+                                                      : 'No lead upload chosen'
+                                                  : source === 'manual'
+                                                    ? `${manualList.length} number${manualList.length === 1 ? '' : 's'}`
+                                                    : (file?.name ?? 'spreadsheet')
                                         }
                                     />
-                                    <Row label="Segments per message" value={String(segments)} />
+                                    <Row label="Encoding" value={smsInfo.encodingLabel} />
+                                    <Row label="Credits per recipient" value={String(smsInfo.credits)} />
+                                    {audienceCount != null && audienceCount > 0 && (
+                                        <Row
+                                            label="Estimated total credits"
+                                            value={(audienceCount * smsInfo.credits).toLocaleString()}
+                                        />
+                                    )}
                                     <Row label="Merge fields" value={mergeTokens.join(', ') || 'none'} />
                                 </dl>
 
@@ -336,14 +456,46 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
 
                                 <div className="space-y-1">
                                     <Label htmlFor="bc-schedule">Schedule (optional)</Label>
-                                    <Input
-                                        id="bc-schedule"
-                                        type="datetime-local"
-                                        value={scheduledAt}
-                                        onChange={(event) => setScheduledAt(event.target.value)}
-                                    />
+                                    {sendWindows.length > 0 && (
+                                        <select
+                                            value={sendWindowId}
+                                            onChange={(event) => {
+                                                setSendWindowId(event.target.value);
+                                                // The two controls mean the same thing; keeping
+                                                // both filled in would leave the operator unsure
+                                                // which one the campaign actually used.
+                                                if (event.target.value) setScheduledAt('');
+                                            }}
+                                            className="h-9 w-full rounded-md border bg-background px-2 text-sm"
+                                        >
+                                            <option value="">A specific time…</option>
+                                            {sendWindows.map((window) => (
+                                                <option key={window.id} value={window.id}>
+                                                    {window.label ? `${window.label} — ` : ''}
+                                                    {window.timeOfDay} ·{' '}
+                                                    {new Date(window.nextOccurrence).toLocaleString(undefined, {
+                                                        weekday: 'short',
+                                                        hour: 'numeric',
+                                                        minute: '2-digit',
+                                                    })}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    )}
+                                    {!sendWindowId && (
+                                        <Input
+                                            id="bc-schedule"
+                                            type="datetime-local"
+                                            value={scheduledAt}
+                                            onChange={(event) => setScheduledAt(event.target.value)}
+                                        />
+                                    )}
                                     <p className="text-xs text-muted-foreground">
-                                        Stored on the campaign. Sending still has to be started manually.
+                                        {sendWindowId
+                                            ? 'Sends automatically at the next occurrence of that window.'
+                                            : scheduledAt
+                                              ? 'Sends automatically at this time.'
+                                              : 'Leave empty to start the campaign by hand.'}
                                     </p>
                                 </div>
                             </div>

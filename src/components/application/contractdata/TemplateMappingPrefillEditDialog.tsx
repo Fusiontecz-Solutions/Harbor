@@ -35,6 +35,7 @@ import {
     parseDocumentTemplateEnvelopeByMappingId,
     parseDocumentTemplatePrefillByMappingId,
     getDocumentTemplatePrefillFieldRowsForEditor,
+    groupPrefillFieldsBySection,
     usesCoordinateLayoutTemplate,
 } from "./documentTemplateMappingPrefill";
 
@@ -141,6 +142,8 @@ export function TemplateMappingPrefillEditDialog({
         agreementDate,
         mainPrefillOverrides,
     ]);
+
+    const editorSections = useMemo(() => groupPrefillFieldsBySection(editorRows), [editorRows]);
 
     useEffect(() => {
         if (!open || !row) {
@@ -346,19 +349,36 @@ export function TemplateMappingPrefillEditDialog({
                                 <span className="font-mono text-xs">ach_authorization</span>.
                             </p>
                         ) : (
-                            <div className="grid gap-3 sm:grid-cols-2">
-                                {editorRows.map((r) => (
-                                    <div key={r.id} className="space-y-1.5">
-                                        <Label htmlFor={`tmpl-field-${r.id}`} className="text-xs font-medium">
-                                            {r.label}
-                                        </Label>
-                                        <Input
-                                            id={`tmpl-field-${r.id}`}
-                                            value={fieldValues[r.id] ?? ""}
-                                            onChange={(e) =>
-                                                setFieldValues((prev) => ({ ...prev, [r.id]: e.target.value }))
-                                            }
-                                        />
+                            <div className="space-y-5">
+                                {editorSections.map((group, gi) => (
+                                    <div key={`${group.section ?? "fields"}-${gi}`} className="space-y-3">
+                                        {group.section ? (
+                                            <h4 className="text-muted-foreground text-xs font-semibold uppercase tracking-wide">
+                                                {group.section}
+                                            </h4>
+                                        ) : null}
+                                        <div className="grid gap-3 sm:grid-cols-2">
+                                            {group.rows.map((r) => (
+                                                <div key={r.id} className="space-y-1.5">
+                                                    <Label
+                                                        htmlFor={`tmpl-field-${r.id}`}
+                                                        className="text-xs font-medium"
+                                                    >
+                                                        {r.label}
+                                                    </Label>
+                                                    <Input
+                                                        id={`tmpl-field-${r.id}`}
+                                                        value={fieldValues[r.id] ?? ""}
+                                                        onChange={(e) =>
+                                                            setFieldValues((prev) => ({
+                                                                ...prev,
+                                                                [r.id]: e.target.value,
+                                                            }))
+                                                        }
+                                                    />
+                                                </div>
+                                            ))}
+                                        </div>
                                     </div>
                                 ))}
                             </div>

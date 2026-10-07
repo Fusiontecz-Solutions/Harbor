@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/select";
 
 import { savePaymentMailLogEntry } from "./paymentMailLogStorage";
+import { invalidateApplicationsListCache } from "@/lib/applicationsListCache";
 import {
   getPaymentTemplates,
   readPaymentTemplatesCache,
@@ -976,6 +977,8 @@ export default function Letters() {
       if (paymentMailLog) {
         savePaymentMailLogEntry(paymentMailLog);
       }
+      // Letters list shows latest Payoff/ZBL webhook status — bust stale list cache.
+      invalidateApplicationsListCache();
     } catch (error: any) {
       const message =
         typeof error === "string"

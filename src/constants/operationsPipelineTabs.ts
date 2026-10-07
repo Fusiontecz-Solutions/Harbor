@@ -13,6 +13,7 @@ export const SUPER_ADMIN_PIPELINE_TABS: PipelineTab[] = [
   { id: "overview", label: "OVERVIEW" },
   { id: "documents", label: "DOCUMENTS" },
   { id: "decision-making", label: "CREATE OFFER" },
+  { id: "background-check", label: "BACKGROUND CHECK" },
   { id: "contract", label: "CONTRACT" },
 ];
 

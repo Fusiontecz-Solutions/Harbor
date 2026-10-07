@@ -63,8 +63,10 @@ import { fetchLatestContractTemplate } from "@/utils/contractTemplate";
 import {
     resolveAddendumDocumentsLayoutFunderId,
     resolveDisclosureDocumentsLayoutFunderId,
+    resolveDisclosureDocumentsSource,
 } from "@/utils/funderDocumentSource";
 import {
+    disclosureDealTypeFromRow,
     funderDisclosureLayoutKeyForState,
     isPlatformScopedBoldSignTemplateRow,
 } from "@/utils/funderLayoutKeys";
@@ -248,6 +250,7 @@ import {
     type ContractSendTableRow,
 } from "./contractdata/contractSendHistory";
 import { Checkbox } from "@/components/ui/checkbox";
+import { AddendumSendOrderBoard } from "./AddendumSendOrderBoard";
 import {
     DEFAULT_DOCUSIGN_TEMPLATE_ID,
 } from "./contractdata/docusignTemplateConfig";
@@ -278,7 +281,7 @@ import {
     getBoldSignTemplateMappingRef,
     loadBoldSignTemplatePdfBlob,
 } from "./contractdata/boldSignTemplateDocument";
-import { axiosDelete, axiosGet, axiosPost } from "@/redux/axios";
+import { axiosDelete, axiosGet, axiosPost, axiosPut } from "@/redux/axios";
 
 /** Fingerprint of saved prefill + live offer money — patch open DocuSign draft when either changes. */
 function docuSignPrefillDraftFingerprint(input: {
@@ -393,8 +396,10 @@ interface PDFViewerModalProps {
         addendumDocumentRef?: string | null;
         addendumDocumentRefs?: string[] | null;
         addendumBoldSignTemplateId?: string | null;
-        /** CRM BoldSignTemplate row id (state disclosure) merged after addendum. */
+        /** CRM BoldSignTemplate row id (state disclosure). */
         disclosureDocumentRef?: string | null;
+        /** "first" = disclosure → contract → addenda; "last" = contract → addenda → disclosure. */
+        disclosurePosition?: "first" | "last";
         achDocumentRef?: string | null;
         standaloneAchOnly?: boolean;
         includeMainContract?: boolean;
@@ -499,6 +504,19 @@ function mappingMatchesTemplateRef(
     const templateId = String(row.template?.templateId ?? "").trim();
     const rowId = mappingTemplateRowId(row);
     return ref === layoutKey || ref === templateId || ref === rowId;
+}
+
+/** Linked disclosure fits the wanted deal type (No Refi also accepts untagged PDFs). */
+function disclosureMappingMatchesDealType(
+    row: ContractDocumentTemplateMappingRow | null | undefined,
+    isRefinance: boolean,
+): boolean {
+    if (!row) return false;
+    const dealType = disclosureDealTypeFromRow({
+        layoutKey: String(row.template?.layoutKey ?? row.template?.templateId ?? ""),
+        name: String(row.template?.name ?? ""),
+    });
+    return isRefinance ? dealType === "refi" : dealType !== "refi";
 }
 
 /** Canonical state key for disclosure matching (ca/california, ny/new york/newyork). */
@@ -723,9 +741,12 @@ function disclosureMappingMatchesFunderDocuments(
     docsLayoutFunderId: string | null,
     platformDisclosureFunderId?: string | null,
     selectedFunderId?: string | null,
+    /** "This funder only": a disclosure linked from another funder is stale. */
+    ownFunderOnly = false,
 ): boolean {
     if (!row) return false;
     if (templateMatchesFunderDocuments(row.template, docsLayoutFunderId)) return true;
+    if (ownFunderOnly) return false;
     // Common Harbor View / platform disclosure uploads are valid for every funder
     // that falls back to that shared set (incl. Clear Capital with platform source).
     const platformId = String(platformDisclosureFunderId ?? "").trim();
@@ -795,7 +816,63 @@ function disclosureRowMatchesWantedFrequency(
     return rowToken === wanted;
 }
 
+type DisclosurePickRow = {
+    id?: string;
+    pdfUrl?: string | null;
+    layoutKey?: string | null;
+    templateId?: string | null;
+    name?: string | null;
+    frequency?: string | null;
+    state?: string | null;
+};
+
+/**
+ * Refi applications must get a Refi disclosure and No Refi applications a No Refi
+ * (or untagged) one. Try an exact deal-type match across every funder scope first;
+ * only when no matching PDF exists anywhere fall back to the looser pick.
+ */
 function pickDisclosureTemplateIdForFunder(
+    rows: DisclosurePickRow[],
+    docsLayoutFunderId: string | null,
+    state: string,
+    frequency: string,
+    isRefinance = false,
+    platformDisclosureFunderId?: string | null,
+    /** "This funder only": never borrow another funder's (e.g. Harbor View) PDFs. */
+    ownFunderOnly = false,
+): string | null {
+    const dealMatched = rows.filter((row) => {
+        const dealType = disclosureDealTypeFromRow({
+            layoutKey: String(row.layoutKey ?? row.templateId ?? ""),
+            name: String(row.name ?? ""),
+        });
+        return isRefinance ? dealType === "refi" : dealType !== "refi";
+    });
+    return (
+        pickDisclosureTemplateIdForFunderAnyDeal(
+            dealMatched,
+            docsLayoutFunderId,
+            state,
+            frequency,
+            isRefinance,
+            platformDisclosureFunderId,
+            true,
+            ownFunderOnly,
+        ) ??
+        pickDisclosureTemplateIdForFunderAnyDeal(
+            rows,
+            docsLayoutFunderId,
+            state,
+            frequency,
+            isRefinance,
+            platformDisclosureFunderId,
+            false,
+            ownFunderOnly,
+        )
+    );
+}
+
+function pickDisclosureTemplateIdForFunderAnyDeal(
     rows: Array<{
         id?: string;
         pdfUrl?: string | null;
@@ -810,6 +887,9 @@ function pickDisclosureTemplateIdForFunder(
     frequency: string,
     isRefinance = false,
     platformDisclosureFunderId?: string | null,
+    /** Strict pass: no fallback to other states / frequencies. */
+    requireExactStateAndFrequency = false,
+    ownFunderOnly = false,
 ): string | null {
     const usable = rows.filter(
         (row) =>
@@ -826,11 +906,13 @@ function pickDisclosureTemplateIdForFunder(
         if (rowState && rowState === picked) return true;
         return disclosureTemplateBlobMatchesState(row, picked);
     });
+    if (requireExactStateAndFrequency && !stateMatched.length) return null;
     const statePool = stateMatched.length ? stateMatched : usable;
 
     const freqMatched = statePool.filter((row) =>
         disclosureRowMatchesWantedFrequency(row, frequency),
     );
+    if (requireExactStateAndFrequency && !freqMatched.length) return null;
     const pool = freqMatched.length ? freqMatched : statePool;
 
     const prefersRefiName = (row: { name?: string | null; layoutKey?: string | null; templateId?: string | null }) => {
@@ -908,6 +990,7 @@ function pickDisclosureTemplateIdForFunder(
     // 1) Selected funder's disclosure scope (own / shared / platform-owner id).
     const fromPrimary = pickForFunderId(docsLayoutFunderId);
     if (fromPrimary) return fromPrimary;
+    if (ownFunderOnly) return null;
 
     // 2) Common Harbor View Capital set — both funders share these uploads.
     const platformOwnerId = String(platformDisclosureFunderId ?? "").trim();
@@ -966,8 +1049,9 @@ function pickDisclosureTemplateIdForFunder(
     }
 
     // 5) Any PDF for this state, regardless of funder prefix (common pack).
-    if (stateMatched.length) {
-        const fromAny = pickFromScoped(stateMatched, null);
+    const anyFunderPool = requireExactStateAndFrequency ? pool : stateMatched;
+    if (anyFunderPool.length) {
+        const fromAny = pickFromScoped(anyFunderPool, null);
         if (fromAny) return fromAny;
     }
 
@@ -1742,11 +1826,13 @@ const PDFViewerModal = ({
         [templateMappings],
     );
 
-    /** Canonical linked addenda (highest `order` first) — one row per template. */
+    /** Canonical linked addenda in DocuSign send order (`order` ascending) — one row per template. */
     const linkedAddendumMappings = useMemo(() => {
         if (!addendumTemplateMappings.length) return [];
         const sorted = [...addendumTemplateMappings].sort(
-            (a, b) => Number(b.order ?? 0) - Number(a.order ?? 0),
+            (a, b) =>
+                Number(a.order ?? 0) - Number(b.order ?? 0) ||
+                String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")),
         );
         const seen = new Set<string>();
         return sorted.filter((row) => {
@@ -1761,9 +1847,9 @@ const PDFViewerModal = ({
         });
     }, [addendumTemplateMappings]);
 
-    /** Primary linked addendum (for single-row UI helpers). */
+    /** Primary linked addendum (most recently linked — highest `order`) for single-row UI helpers. */
     const linkedAddendumMapping = useMemo(
-        () => linkedAddendumMappings[0] ?? null,
+        () => linkedAddendumMappings[linkedAddendumMappings.length - 1] ?? null,
         [linkedAddendumMappings],
     );
 
@@ -1826,6 +1912,9 @@ const PDFViewerModal = ({
     const addendumDropdownRef = useRef<HTMLDivElement>(null);
     /** Main contract in envelope — default on; addendum/disclosure auto-merge when configured below. */
     const [includeMainContractInSend, setIncludeMainContractInSend] = useState(initialIncludeMainContract);
+    /** State disclosure opens the envelope (disclosure → contract → addenda) vs. last. Saved per contract. */
+    const [disclosureFirstInSend, setDisclosureFirstInSend] = useState(true);
+    const [reorderingAddendums, setReorderingAddendums] = useState(false);
 
     useEffect(() => {
         if (!addendumDropdownOpen) return;
@@ -2049,6 +2138,25 @@ const PDFViewerModal = ({
         ).trim();
         return normalizeFrequencyForTemplateLookup(raw);
     }, [offerDecisionData, resolvedContract]);
+
+    /** Refi detected from the offer (refinance amount > 0). */
+    const autoDisclosureIsRefinance = useMemo(() => {
+        const od = offerDecisionData as Record<string, unknown> | null;
+        const refiRaw = od?.refinanceAmount ?? od?.RefinanceAmount;
+        const refiNum =
+            typeof refiRaw === "number"
+                ? refiRaw
+                : Number(String(refiRaw ?? "").replace(/[$,\s]/g, ""));
+        return Number.isFinite(refiNum) && refiNum > 0;
+    }, [offerDecisionData]);
+    /** Manual Refi / No Refi disclosure choice; null = follow the offer. Saved per contract. */
+    const [disclosureDealTypeChoice, setDisclosureDealTypeChoice] = useState<
+        "refi" | "norefi" | null
+    >(null);
+    const disclosureIsRefinance =
+        disclosureDealTypeChoice != null
+            ? disclosureDealTypeChoice === "refi"
+            : autoDisclosureIsRefinance;
 
     const disclosureCalculatorSeedInputs = useMemo(
         () =>
@@ -2299,6 +2407,11 @@ const PDFViewerModal = ({
     docsLayoutFunderIdRef.current = docsLayoutFunderId;
     const disclosureDocsLayoutFunderIdRef = useRef<string | null>(null);
     disclosureDocsLayoutFunderIdRef.current = disclosureDocsLayoutFunderId;
+    const disclosureOwnFunderOnly =
+        !!selectedFunderProfile &&
+        resolveDisclosureDocumentsSource(selectedFunderProfile) === "own";
+    const disclosureOwnFunderOnlyRef = useRef(false);
+    disclosureOwnFunderOnlyRef.current = disclosureOwnFunderOnly;
     const boldSignTemplatesRef = useRef(boldSignTemplates);
     boldSignTemplatesRef.current = boldSignTemplates;
 
@@ -3014,6 +3127,56 @@ const PDFViewerModal = ({
     const draftPreparedPackageFingerprintRef = useRef<string | null>(null);
     const includeMainContractInSendRef = useRef(includeMainContractInSend);
     includeMainContractInSendRef.current = includeMainContractInSend;
+    const disclosureFirstInSendRef = useRef(disclosureFirstInSend);
+    disclosureFirstInSendRef.current = disclosureFirstInSend;
+
+    const disclosurePositionStorageKey =
+        effectiveContractId != null ? `contract:${effectiveContractId}:disclosurePosition` : null;
+    useEffect(() => {
+        if (!isOpen || !disclosurePositionStorageKey) return;
+        try {
+            const saved = localStorage.getItem(disclosurePositionStorageKey);
+            setDisclosureFirstInSend(saved !== "last");
+        } catch {
+            /* storage unavailable — keep default */
+        }
+    }, [isOpen, disclosurePositionStorageKey]);
+    const updateDisclosureFirstInSend = useCallback(
+        (first: boolean) => {
+            setDisclosureFirstInSend(first);
+            if (!disclosurePositionStorageKey) return;
+            try {
+                localStorage.setItem(disclosurePositionStorageKey, first ? "first" : "last");
+            } catch {
+                /* ignore */
+            }
+        },
+        [disclosurePositionStorageKey],
+    );
+
+    const disclosureDealTypeStorageKey =
+        effectiveContractId != null ? `contract:${effectiveContractId}:disclosureDealType` : null;
+    useEffect(() => {
+        if (!isOpen || !disclosureDealTypeStorageKey) return;
+        try {
+            const saved = localStorage.getItem(disclosureDealTypeStorageKey);
+            setDisclosureDealTypeChoice(saved === "refi" || saved === "norefi" ? saved : null);
+        } catch {
+            setDisclosureDealTypeChoice(null);
+        }
+    }, [isOpen, disclosureDealTypeStorageKey]);
+    const updateDisclosureDealTypeChoice = useCallback(
+        (choice: "refi" | "norefi") => {
+            setDisclosureDealTypeChoice(choice);
+            if (!disclosureDealTypeStorageKey) return;
+            try {
+                localStorage.setItem(disclosureDealTypeStorageKey, choice);
+            } catch {
+                /* ignore */
+            }
+        },
+        [disclosureDealTypeStorageKey],
+    );
 
     const resolveSignerOverrideRowsForSend = useCallback((): ContractSignerOverrideRow[] => {
         if (showRecipientEditor) {
@@ -3294,7 +3457,22 @@ const PDFViewerModal = ({
                 return "";
             })
             .filter(Boolean);
-        if (fromSelected.length) return [...new Set(fromSelected)];
+        if (fromSelected.length) {
+            // Send order follows the persisted mapping `order` (drag board); refs not yet
+            // persisted keep their selection order at the end.
+            const mappingOrder = new Map<string, number>();
+            linkedAddendumMappingsRef.current.forEach((row, index) => {
+                const ref =
+                    getAddendumDropdownRef(row?.template) ||
+                    getBoldSignTemplateMappingRef(row?.template) ||
+                    "";
+                if (ref && !mappingOrder.has(ref)) mappingOrder.set(ref, index);
+            });
+            return [...new Set(fromSelected)]
+                .map((ref, index) => ({ ref, index, rank: mappingOrder.get(ref) ?? Infinity }))
+                .sort((a, b) => a.rank - b.rank || a.index - b.index)
+                .map((entry) => entry.ref);
+        }
 
         const fromMappings = linkedAddendumMappingsRef.current
             .map(
@@ -3341,10 +3519,13 @@ const PDFViewerModal = ({
         () =>
             [
                 contractSendPackageFingerprint(getEffectiveSendPackage()),
-                resolveAddendumTemplateIdsForDocuSignMerge().slice().sort().join(","),
+                // Ordered — reordering addenda must invalidate a prepared draft.
+                resolveAddendumTemplateIdsForDocuSignMerge().join(","),
+                `disclosure:${disclosureFirstInSend ? "first" : "last"}`,
             ].join("|"),
         [
             getEffectiveSendPackage,
+            disclosureFirstInSend,
             includeMainContractInSend,
             selectedAddendumOptions,
             linkedAddendumMappings,
@@ -4293,6 +4474,7 @@ const PDFViewerModal = ({
                         addendumDocumentRef: addendumTemplateId,
                         addendumDocumentRefs: addendumTemplateIds,
                         disclosureDocumentRef,
+                        disclosurePosition: disclosureFirstInSendRef.current ? "first" : "last",
                         includeMainContract: packageSelection.includeMainContract,
                         sendPackage: packageSelection,
                         roles: signerRolesForSend,
@@ -4941,6 +5123,51 @@ const PDFViewerModal = ({
             setLoadingTemplateMappings(false);
         }
     }, [effectiveContractId]);
+
+    /** Persist drag-board addendum send order (reuses existing `order` slots server-side). */
+    const reorderAddendumTemplateMappings = useCallback(
+        async (nextRows: ContractDocumentTemplateMappingRow[]) => {
+            if (effectiveContractId == null || nextRows.length < 2) return;
+            const nextIds = new Set(nextRows.map((row) => String(row.id)));
+            // Board shows one row per template; leftover duplicates keep trailing slots.
+            const remaining = addendumTemplateMappings
+                .filter((row) => !nextIds.has(String(row.id)))
+                .sort((a, b) => Number(a.order ?? 0) - Number(b.order ?? 0));
+            const orderedRows = [...nextRows, ...remaining];
+            const mappingIds = orderedRows.map((row) => String(row.id));
+            // Same slot reuse as the API: the rows' own `order` values in the new sequence.
+            const slots = orderedRows.map((row) => Number(row.order ?? 0)).sort((a, b) => a - b);
+            for (let i = 1; i < slots.length; i += 1) {
+                if (slots[i] <= slots[i - 1]) slots[i] = slots[i - 1] + 1;
+            }
+            const nextOrderById = new Map(mappingIds.map((id, i) => [id, slots[i]]));
+            // Optimistic — board and send order update immediately.
+            setTemplateMappings((prev) =>
+                prev.map((row) =>
+                    nextOrderById.has(String(row.id))
+                        ? { ...row, order: nextOrderById.get(String(row.id)) as number }
+                        : row,
+                ),
+            );
+            setReorderingAddendums(true);
+            try {
+                const res = await axiosPut(
+                    `/contract/${effectiveContractId}/document-template-mappings-order`,
+                    { documentType: "addendum", mappingIds },
+                );
+                const rows = (res?.data?.data ?? null) as ContractDocumentTemplateMappingRow[] | null;
+                if (Array.isArray(rows)) setTemplateMappings(rows);
+            } catch (error: any) {
+                setDocumentUploadMessage(
+                    error?.response?.data?.message || error?.message || "Failed to save addendum order.",
+                );
+                await fetchTemplateMappings();
+            } finally {
+                setReorderingAddendums(false);
+            }
+        },
+        [effectiveContractId, addendumTemplateMappings, fetchTemplateMappings],
+    );
 
     const reloadContractPrefillSnapshots = useCallback(async () => {
         const appId = applicationIdForLookup;
@@ -6081,6 +6308,7 @@ const PDFViewerModal = ({
                     frequency,
                     isRefinance,
                     platformDisclosureFunderIdRef.current,
+                    disclosureOwnFunderOnlyRef.current,
                 );
             try {
                 const withFreq = await fetchRows(true);
@@ -6203,17 +6431,11 @@ const PDFViewerModal = ({
                     ? boldSignTemplatesRef.current
                     : []
             ).filter(isDisclosureCatalogRow).length;
-            const syncKey = `${effectiveContractId}:${picked}:${contractDisclosureFrequency}:${layoutFunderId ?? "platform"}:${platformOwnerId ?? ""}:${catalogCount}`;
+            const isRefinance = disclosureIsRefinance;
+            const syncKey = `${effectiveContractId}:${picked}:${contractDisclosureFrequency}:${isRefinance ? "refi" : "norefi"}:${layoutFunderId ?? "platform"}:${platformOwnerId ?? ""}:${catalogCount}`;
             const syncGen = ++disclosureSyncGenRef.current;
             try {
                 setLinkingDisclosureTemplate(true);
-                const od = offerDecisionData as Record<string, unknown> | null;
-                const refiRaw = od?.refinanceAmount ?? od?.RefinanceAmount;
-                const refiNum =
-                    typeof refiRaw === "number"
-                        ? refiRaw
-                        : Number(String(refiRaw ?? "").replace(/[$,\s]/g, ""));
-                const isRefinance = Number.isFinite(refiNum) && refiNum > 0;
                 const templateRef = await lookupDisclosureTemplateRef(
                     picked,
                     contractDisclosureFrequency,
@@ -6238,6 +6460,7 @@ const PDFViewerModal = ({
                         layoutFunderId,
                         platformDisclosureFunderIdRef.current,
                         selectedFunderProfileIdRef.current,
+                        disclosureOwnFunderOnlyRef.current,
                     )
                 ) {
                     disclosureAutoLinkKeyRef.current = syncKey;
@@ -6247,9 +6470,19 @@ const PDFViewerModal = ({
                     // Keep an existing disclosure that already matches this state.
                     // Lookup can miss while funder docs scope is still settling, or when
                     // no catalog row exists for the current filter — do not wipe on refresh.
+                    // Exception: "This funder only" must drop another funder's PDF
+                    // (e.g. a Harbor View disclosure linked before the switch).
                     if (
                         current &&
-                        disclosureMappingMatchesState(current, picked)
+                        disclosureMappingMatchesState(current, picked) &&
+                        (!disclosureOwnFunderOnlyRef.current ||
+                            disclosureMappingMatchesFunderDocuments(
+                                current,
+                                layoutFunderId,
+                                null,
+                                null,
+                                true,
+                            ))
                     ) {
                         disclosureAutoLinkKeyRef.current = syncKey;
                         return;
@@ -6281,9 +6514,9 @@ const PDFViewerModal = ({
         },
         [
             contractDisclosureFrequency,
+            disclosureIsRefinance,
             effectiveContractId,
             lookupDisclosureTemplateRef,
-            offerDecisionData,
             setDisclosureTemplateMapping,
         ],
     );
@@ -6305,16 +6538,18 @@ const PDFViewerModal = ({
         const catalogCount = (Array.isArray(boldSignTemplates) ? boldSignTemplates : []).filter(
             isDisclosureCatalogRow,
         ).length;
-        const docsKey = `${disclosureDocsLayoutFunderId ?? "platform"}:${platformDisclosureFunderId ?? ""}:${catalogCount}`;
-        const key = `${effectiveContractId}:${picked}:${contractDisclosureFrequency}:${docsKey}`;
+        const docsKey = `${disclosureDocsLayoutFunderId ?? "platform"}:${platformDisclosureFunderId ?? ""}:${disclosureOwnFunderOnly ? "own" : ""}:${catalogCount}`;
+        const key = `${effectiveContractId}:${picked}:${contractDisclosureFrequency}:${disclosureIsRefinance ? "refi" : "norefi"}:${docsKey}`;
         if (
             linkedDisclosureMapping &&
             disclosureMappingMatchesState(linkedDisclosureMapping, picked) &&
+            disclosureMappingMatchesDealType(linkedDisclosureMapping, disclosureIsRefinance) &&
             disclosureMappingMatchesFunderDocuments(
                 linkedDisclosureMapping,
                 disclosureDocsLayoutFunderId,
                 platformDisclosureFunderId,
                 selectedFunderProfileId,
+                disclosureOwnFunderOnly,
             )
         ) {
             disclosureAutoLinkKeyRef.current = key;
@@ -6335,9 +6570,11 @@ const PDFViewerModal = ({
         boldSignTemplates,
         selectedState,
         contractDisclosureFrequency,
+        disclosureIsRefinance,
         disclosureDocsLayoutFunderId,
         platformDisclosureFunderId,
         selectedFunderProfileId,
+        disclosureOwnFunderOnly,
         linkedDisclosureMapping,
         syncDisclosureTemplateForState,
     ]);
@@ -9034,7 +9271,9 @@ const PDFViewerModal = ({
                                                             State disclosure
                                                         </h4>
                                                         <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
-                                                            Linked from the selected state and merged at the bottom of the contract.
+                                                            {disclosureFirstInSend
+                                                                ? "Linked from the selected state and placed first in the envelope, before the contract and addenda."
+                                                                : "Linked from the selected state and placed last in the envelope, after the contract and addenda."}
                                                         </p>
                                                     </div>
                                                 </div>
@@ -9053,6 +9292,52 @@ const PDFViewerModal = ({
                                             </div>
 
                                             <div className="space-y-2">
+                                                <div className="rounded-lg border border-slate-200/80 bg-white px-3 py-2.5 dark:border-slate-600 dark:bg-slate-950">
+                                                    <div className="flex items-center justify-between gap-2">
+                                                        <span className="text-xs font-medium text-slate-800 dark:text-slate-100">
+                                                            Disclosure type
+                                                        </span>
+                                                        <div
+                                                            role="radiogroup"
+                                                            aria-label="Disclosure deal type"
+                                                            className="inline-flex rounded-md bg-slate-100 p-0.5 dark:bg-slate-800"
+                                                        >
+                                                            {(
+                                                                [
+                                                                    { value: "norefi", label: "No Refi" },
+                                                                    { value: "refi", label: "Refi" },
+                                                                ] as const
+                                                            ).map((opt) => {
+                                                                const active =
+                                                                    (opt.value === "refi") === disclosureIsRefinance;
+                                                                return (
+                                                                    <button
+                                                                        key={opt.value}
+                                                                        type="button"
+                                                                        role="radio"
+                                                                        aria-checked={active}
+                                                                        disabled={linkingDisclosureTemplate}
+                                                                        onClick={() =>
+                                                                            updateDisclosureDealTypeChoice(opt.value)
+                                                                        }
+                                                                        className={`cursor-pointer rounded px-3 py-1 text-[11px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+                                                                            active
+                                                                                ? "bg-[var(--brand)] text-white shadow-sm"
+                                                                                : "text-slate-600 hover:text-[var(--brand)] dark:text-slate-300"
+                                                                        }`}
+                                                                    >
+                                                                        {opt.label}
+                                                                    </button>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    </div>
+                                                    <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+                                                        {disclosureDealTypeChoice == null
+                                                            ? `Auto-detected from the offer: ${autoDisclosureIsRefinance ? "Refi" : "No Refi"} deal.`
+                                                            : `Using the ${disclosureIsRefinance ? "Refi" : "No Refi"} disclosure for this state and frequency.`}
+                                                    </p>
+                                                </div>
                                                 {linkingDisclosureTemplate ? (
                                                     <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-[var(--brand)]/25 bg-slate-50/80 py-6 text-center dark:border-slate-600 dark:bg-slate-800/30">
                                                         <Loader2
@@ -9132,6 +9417,25 @@ const PDFViewerModal = ({
                                                                 </Button>
                                                             </div>
                                                         </div>
+                                                        <label className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-slate-200/80 bg-white px-3 py-2.5 dark:border-slate-600 dark:bg-slate-950">
+                                                            <Checkbox
+                                                                checked={disclosureFirstInSend}
+                                                                onCheckedChange={(checked: boolean | "indeterminate") =>
+                                                                    updateDisclosureFirstInSend(checked === true)
+                                                                }
+                                                                className="mt-0.5"
+                                                            />
+                                                            <span className="min-w-0">
+                                                                <span className="block text-xs font-medium text-slate-800 dark:text-slate-100">
+                                                                    Place state disclosure first
+                                                                </span>
+                                                                <span className="mt-0.5 block text-[11px] text-slate-500 dark:text-slate-400">
+                                                                    {disclosureFirstInSend
+                                                                        ? "Opens first in DocuSign: disclosure → contract → addenda."
+                                                                        : "Placed last in DocuSign: contract → addenda → disclosure."}
+                                                                </span>
+                                                            </span>
+                                                        </label>
                                                         <Button
                                                             type="button"
                                                             variant="outline"
@@ -9193,7 +9497,11 @@ const PDFViewerModal = ({
                                             </p>
                                             <div className="space-y-2">
                                                 {linkedAddendumMappings.length > 0 ? (
-                                                    linkedAddendumMappings.map((row) => {
+                                                    <AddendumSendOrderBoard
+                                                        items={linkedAddendumMappings}
+                                                        disabled={loadingTemplateMappings || reorderingAddendums}
+                                                        onReorder={(next) => void reorderAddendumTemplateMappings(next)}
+                                                        renderItem={(row, index) => {
                                                         const mappingRef = getAddendumDropdownRef(row?.template);
                                                         const supportsPrefill = hasAddendumPrefillFieldMap(
                                                             row?.template?.templateId ??
@@ -9221,6 +9529,7 @@ const PDFViewerModal = ({
                                                                             </span>
                                                                         </div>
                                                                         <p className="mt-1 truncate text-[11px] font-medium text-slate-700 dark:text-slate-200">
+                                                                            {index + 1}.{" "}
                                                                             {formatDropdownLabel(
                                                                                 row?.template?.name ||
                                                                                     row?.template?.templateId ||
@@ -9289,7 +9598,8 @@ const PDFViewerModal = ({
                                                                 </div>
                                                             </div>
                                                         );
-                                                    })
+                                                        }}
+                                                    />
                                                 ) : (
                                                     <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-slate-200 bg-slate-50/80 py-6 text-center dark:border-slate-600 dark:bg-slate-800/30">
                                                         <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--brand)]/10 text-[var(--brand)]">

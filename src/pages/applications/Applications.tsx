@@ -32,8 +32,13 @@ import {
   extractBusinessDetails,
 } from "@/redux/actions/applicationActions";
 import {
+  patchApplicationFields,
   resetDeleteApplication,
 } from "@/redux/slices/applicationSlice";
+import {
+  useLetterDeliveryStatusRealtime,
+  type LetterDeliveryStatusRealtimePayload,
+} from "@/hooks/useLetterDeliveryStatusRealtime";
 import { fetchOperationsDashboardSummary } from "@/redux/actions/operationsDashboardActions";
 
 import { toast } from "react-toastify";
@@ -65,6 +70,7 @@ import {
   formatInt,
 } from "@/lib/utils";
 import ApplicationDetailsSheet from "@/components/application/ApplicationDetailsSheet";
+import LetterGeneratorModal from "@/pages/letterGenerator/LetterGeneratorModal";
 import { getClientByClientId } from "@/redux/actions/clientActions";
 import {
   normalizeOperationsDashboardStatusParam,
@@ -96,6 +102,13 @@ import { prefetchApplicationDetail } from "@/lib/applicationDetailCache";
 import { getOperationsPipelineStageTabId } from "@/constants/operationsPipelineTabs";
 import { getContractWorkflowQueueBadgeClass } from "@/lib/contractOutQueueBadge";
 import { getApplicationSummaryStatusLabel } from "@/lib/applicationSummaryStatus";
+import {
+  letterStatusBadgeClass,
+  letterStatusLabel,
+  letterTypeLabel,
+  mergeLetterStatusEntry,
+  resolveApplicationLetterStatuses,
+} from "@/lib/letterStatusDisplay";
 import {
   canViewApplicationApprovedAmount,
 } from "@/lib/applicationClaimLabel";
@@ -248,6 +261,9 @@ const Applications = () => {
   });
   const [selectedApplicationIds, setSelectedApplicationIds] = useState<string[]>([]);
   const [viewApplication, setViewApplication] = useState<Application | null>(null);
+  const [letterGeneratorAppId, setLetterGeneratorAppId] = useState<string | null>(
+    null,
+  );
   const [listViewMode, setListViewMode] = useState<"list" | "grid">(() => {
     if (typeof window === "undefined") return "list";
     try {
@@ -470,7 +486,7 @@ const Applications = () => {
       if (isLetterGeneratorMode) {
         const uuid = app._id?.trim();
         if (!uuid) return;
-        navigate(`/letter-generator/${encodeURIComponent(uuid)}`);
+        setLetterGeneratorAppId(uuid);
         return;
       }
       const role = (localStorage.getItem("role") || "").toUpperCase();
@@ -724,26 +740,82 @@ const Applications = () => {
         enableSorting: false,
         enableHiding: false,
       },
-      {
-        id: "loanAmount",
-        size: 160,
-        accessorFn: (row) => resolveApplicationRequestAmount(row),
-        enableSorting: true,
-        header: ({ column }) => (
-          <DataTableSortHeader column={column} label="Request Amount" />
-        ),
-        cell: ({ row }) => {
-          const loanAmount = resolveApplicationRequestAmount(row.original);
-          if (loanAmount == null) {
-            return <span className="text-foreground">-</span>;
-          }
-          return (
-            <span className="text-foreground">
-              {formatCurrency(loanAmount)}
-            </span>
-          );
-        },
-      },
+      ...(isLetterGeneratorMode
+        ? ([
+            {
+              id: "letterStatus",
+              size: 220,
+              accessorFn: (row) =>
+                resolveApplicationLetterStatuses(row)
+                  .map((entry) => `${entry.letterType}:${entry.status}`)
+                  .join("|"),
+              enableSorting: false,
+              header: () => (
+                <span className="font-medium text-foreground uppercase tracking-wide whitespace-nowrap">
+                  Letter Status
+                </span>
+              ),
+              cell: ({ row }) => {
+                const letterStatuses = resolveApplicationLetterStatuses(row.original);
+                if (!letterStatuses.length) {
+                  return <span className="text-muted-foreground">Not sent</span>;
+                }
+                return (
+                  <div className="flex flex-row flex-wrap items-start gap-2 min-w-0">
+                    {letterStatuses.map((letterStatus) => (
+                      <div
+                        key={`${letterStatus.letterType}-${letterStatus.sentAt ?? letterStatus.status}`}
+                        className="flex flex-col gap-0.5 min-w-0"
+                      >
+                        <span
+                          className={cn(
+                            "inline-flex w-fit items-center rounded-full border px-2 py-0.5 text-xs font-medium",
+                            letterStatusBadgeClass(letterStatus.status),
+                          )}
+                          title={
+                            letterStatus.templateName
+                              ? `${letterStatus.templateName}${
+                                  letterStatus.recipient
+                                    ? ` → ${letterStatus.recipient}`
+                                    : ""
+                                }`
+                              : undefined
+                          }
+                        >
+                          {letterStatusLabel(letterStatus.status)}
+                        </span>
+                        <span className="text-[11px] text-muted-foreground truncate">
+                          {letterTypeLabel(letterStatus.letterType)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              },
+            },
+          ] satisfies ColumnDef<Application>[])
+        : ([
+            {
+              id: "loanAmount",
+              size: 160,
+              accessorFn: (row) => resolveApplicationRequestAmount(row),
+              enableSorting: true,
+              header: ({ column }) => (
+                <DataTableSortHeader column={column} label="Request Amount" />
+              ),
+              cell: ({ row }) => {
+                const loanAmount = resolveApplicationRequestAmount(row.original);
+                if (loanAmount == null) {
+                  return <span className="text-foreground">-</span>;
+                }
+                return (
+                  <span className="text-foreground">
+                    {formatCurrency(loanAmount)}
+                  </span>
+                );
+              },
+            },
+          ] satisfies ColumnDef<Application>[])),
       ...(showApprovedAmountColumn
         ? ([
           {
@@ -1094,7 +1166,11 @@ const Applications = () => {
               handleOpenApplicationDetails(row.original);
             }}
             className="mx-auto flex h-8 w-8 items-center justify-center rounded-full bg-transparent text-[var(--brand)] hover:bg-transparent hover:text-[var(--brand-accent-strong)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand)]/30 cursor-pointer"
-            aria-label="View application in drawer"
+            aria-label={
+              isLetterGeneratorMode
+                ? "Open letters for this application"
+                : "View application in drawer"
+            }
           >
             <span className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-current bg-transparent text-xs font-bold">
               <EyeIcon className="h-4 w-4" />
@@ -1218,8 +1294,9 @@ const Applications = () => {
     (): GetApplicationsParams => ({
       ...listRequestParamsForKey,
       clearListOnFetch: true,
+      ...(isLetterGeneratorMode ? { includeLetterStatus: true } : {}),
     }),
-    [listRequestParamsForKey],
+    [listRequestParamsForKey, isLetterGeneratorMode],
   );
 
   const listFetchKey = useMemo(
@@ -1240,6 +1317,45 @@ const Applications = () => {
   }, [applicationsListQuery]);
 
   fetchApplicationsRef.current = fetchApplications;
+
+  const handleLetterDeliveryStatusRealtime = useCallback(
+    (payload: LetterDeliveryStatusRealtimePayload) => {
+      const applicationId = String(payload.applicationId || "").trim();
+      const status = String(payload.status || "").trim().toLowerCase();
+      if (!applicationId || !status) return;
+
+      const existing = applications?.find((app) => {
+        const id = app._id ?? (app as { id?: string }).id;
+        return id && String(id) === applicationId;
+      });
+      const incoming = {
+        status,
+        templateName: payload.templateName || "Letter",
+        letterType: payload.letterType || "payoff",
+        recipient: payload.recipient ?? null,
+        sentAt: payload.sentAt ?? null,
+      } as const;
+      const letterStatuses = mergeLetterStatusEntry(
+        resolveApplicationLetterStatuses(existing ?? {}),
+        incoming,
+      );
+
+      dispatch(
+        patchApplicationFields({
+          _id: applicationId,
+          id: applicationId,
+          letterStatuses,
+          letterStatus: letterStatuses[0] ?? null,
+        }),
+      );
+    },
+    [applications, dispatch],
+  );
+
+  useLetterDeliveryStatusRealtime(
+    isLetterGeneratorMode && isListFilterInitialized,
+    handleLetterDeliveryStatusRealtime,
+  );
 
   /** Sync one-time refresh flag cleanup after query-triggered fetch. */
   useEffect(() => {
@@ -1657,7 +1773,7 @@ const Applications = () => {
             </h1>
             {isLetterGeneratorMode ? (
               <p className="mt-1 text-sm text-muted-foreground">
-                Select an application to send Payoff or Zero Balance letters.
+                Select an application to open Payoff or Zero Balance letters.
               </p>
             ) : contractWorkflowHint ? (
               <p className="mt-1 text-sm text-muted-foreground">
@@ -1994,10 +2110,7 @@ const Applications = () => {
             )}
           </div>
         </div>
-        <div
-          className={`p-1 transition-opacity duration-300 ${isRefreshing ? "opacity-85" : "opacity-100"
-            }`}
-        >
+        <div className="p-1">
           {listViewMode === "list" ? (
             <div className="overflow-x-auto overflow-y-auto rounded-xl [scrollbar-gutter:stable]">
               <DataTableContent
@@ -2077,7 +2190,12 @@ const Applications = () => {
                 {table.getRowModel().rows.map((row) => {
                   const app = row.original;
                   const queueLabel = getApplicationQueueLabel(app);
-                  const loanAmount = resolveApplicationRequestAmount(app);
+                  const loanAmount = isLetterGeneratorMode
+                    ? null
+                    : resolveApplicationRequestAmount(app);
+                  const letterStatuses = isLetterGeneratorMode
+                    ? resolveApplicationLetterStatuses(app)
+                    : [];
                   const approvedAmount = showApprovedAmountColumn
                     ? getApplicationApprovedAmount(app)
                     : null;
@@ -2094,7 +2212,11 @@ const Applications = () => {
                           handleNavigateToApplication(app);
                         }
                       }}
-                      aria-label={`Open application ${getApplicationDealIdDisplay(app)} (${app._id})`}
+                      aria-label={
+                        isLetterGeneratorMode
+                          ? `Open letters for ${getApplicationDealIdDisplay(app)} (${app._id})`
+                          : `Open application ${getApplicationDealIdDisplay(app)} (${app._id})`
+                      }
                       className={`rounded-lg border shadow-sm flex flex-col gap-3 p-4 text-left transition hover:ring-2 hover:ring-[var(--brand)]/20 cursor-pointer ${isDark
                         ? "bg-[#1a1b1e] border-[#374151]"
                         : "bg-card border-[#F0F0F0]"
@@ -2156,12 +2278,40 @@ const Applications = () => {
                         </div>
                       </div>
                       <div className="text-xs text-muted-foreground space-y-1">
-                        <p>
-                          <span className="text-foreground/80">Request: </span>
-                          {loanAmount == null
-                            ? "—"
-                            : formatCurrency(loanAmount)}
-                        </p>
+                        {isLetterGeneratorMode ? (
+                          <p className="flex items-center gap-2 flex-wrap">
+                            <span className="text-foreground/80">Letter: </span>
+                            {letterStatuses.length ? (
+                              letterStatuses.map((letterStatus) => (
+                                <span
+                                  key={`${letterStatus.letterType}-${letterStatus.sentAt ?? letterStatus.status}`}
+                                  className="inline-flex items-center gap-1"
+                                >
+                                  <span
+                                    className={cn(
+                                      "inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium",
+                                      letterStatusBadgeClass(letterStatus.status),
+                                    )}
+                                  >
+                                    {letterStatusLabel(letterStatus.status)}
+                                  </span>
+                                  <span className="text-muted-foreground">
+                                    {letterTypeLabel(letterStatus.letterType)}
+                                  </span>
+                                </span>
+                              ))
+                            ) : (
+                              <span>Not sent</span>
+                            )}
+                          </p>
+                        ) : (
+                          <p>
+                            <span className="text-foreground/80">Request: </span>
+                            {loanAmount == null
+                              ? "—"
+                              : formatCurrency(loanAmount)}
+                          </p>
+                        )}
                         {showApprovedAmountColumn && (
                           <p>
                             <span className="text-foreground/80">Approved: </span>
@@ -2267,6 +2417,14 @@ const Applications = () => {
         open={!!viewApplication}
         onOpenChange={(open) => {
           if (!open) setViewApplication(null);
+        }}
+      />
+
+      <LetterGeneratorModal
+        applicationId={letterGeneratorAppId}
+        open={!!letterGeneratorAppId}
+        onOpenChange={(open) => {
+          if (!open) setLetterGeneratorAppId(null);
         }}
       />
 

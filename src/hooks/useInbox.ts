@@ -241,10 +241,17 @@ export function useInbox({ userScope, search = '', filter = 'all' }: UseInboxOpt
             }
 
             if (event.type === 'message_status_update') {
-                const { conversationId, providerMessageId, status } = event.payload;
+                const { conversationId, messageId, providerMessageId, status, errorMessage } = event.payload;
                 if (conversationId === activeConversationRef.current) {
+                    // Match on either id: our own uuid is usually echoed back by
+                    // the provider, but not always, and a status that fails to
+                    // land leaves a failed message rendering as a plain tick.
                     setMessages((prev) =>
-                        prev.map((m) => (m.id === providerMessageId ? { ...m, status } : m)),
+                        prev.map((m) =>
+                            m.id === messageId || m.id === providerMessageId
+                                ? { ...m, status, ...(errorMessage ? { errorMessage } : {}) }
+                                : m,
+                        ),
                     );
                 }
             }

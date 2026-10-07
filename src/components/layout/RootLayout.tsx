@@ -4,6 +4,7 @@ import { SidebarProvider } from "@/components/ui/sidebar";
 import { jwtDecode } from "jwt-decode";
 import RootLayoutWrapper from "./RootLayoutWrapper";
 import { useEffect, useMemo } from "react";
+import { AGENT_HOME_PATH, isAgentAllowedPath } from "@/lib/agentAccess";
 import { normalizeRoleKey, resolveEffectiveRole } from "@/lib/sessionRole";
 import { useSelector } from "react-redux";
 import type { RootState } from "@/redux/store";
@@ -52,7 +53,14 @@ const RootLayout = () => {
                 return;
             }
             const tokenRole = normalizeRoleKey(decoded?.role ?? "");
-            if (tokenRole && tokenRole !== "SUPER_ADMIN") {
+            if (tokenRole === "AGENT") {
+                // Agents are admitted for the communication side only. A page
+                // outside that set redirects rather than signing them out —
+                // they are legitimately logged in, just in the wrong place.
+                if (!isAgentAllowedPath(location.pathname)) {
+                    navigate(AGENT_HOME_PATH, { replace: true });
+                }
+            } else if (tokenRole && tokenRole !== "SUPER_ADMIN") {
                 localStorage.removeItem("token");
                 localStorage.removeItem("user");
                 localStorage.removeItem("role");
@@ -68,6 +76,12 @@ const RootLayout = () => {
     useEffect(() => {
         if (isPublicRoute) return;
         if (!data?.user) return;
+        if (normalizedRole === "AGENT") {
+            if (!isAgentAllowedPath(location.pathname)) {
+                navigate(AGENT_HOME_PATH, { replace: true });
+            }
+            return;
+        }
         if (normalizedRole && normalizedRole !== "SUPER_ADMIN") {
             localStorage.removeItem("token");
             localStorage.removeItem("user");

@@ -11,6 +11,10 @@ import Mail from "@mui/icons-material/Mail";
 import Forum from "@mui/icons-material/Forum";
 import Campaign from "@mui/icons-material/Campaign";
 import ContactPhone from "@mui/icons-material/ContactPhone";
+import Dialpad from "@mui/icons-material/Dialpad";
+import GroupAdd from "@mui/icons-material/GroupAdd";
+import Insights from "@mui/icons-material/Insights";
+import Schedule from "@mui/icons-material/Schedule";
 import {
   Sidebar as UISidebar,
   SidebarHeader,
@@ -27,6 +31,7 @@ import {
 } from "@/components/ui/sidebar";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router";
 import { useDispatch, useSelector } from "react-redux";
+import { isAgentAllowedPath, isAgentRole } from "@/lib/agentAccess";
 import type { AppDispatch, RootState } from "@/redux/store";
 import { logout } from "@/redux/actions/authActions";
 import { clearApplicationStats, clearApplicationDetail } from "@/redux/slices/applicationSlice";
@@ -38,6 +43,7 @@ import { useTheme } from "@/context/ThemeContext";
 import { useEffect, useMemo, useState, type ComponentType } from "react";
 import { clearCrmCacheOnLogout } from "@/lib/crmCache";
 import { clearAllPersistentCaches } from "@/lib/persistentCache/clearAllPersistentCaches";
+import { endImpersonationOnLogout } from "@/lib/impersonation";
 import { clearHttpGetCache } from "@/lib/httpGetCache";
 import { cn } from "@/lib/utils";
 import { Loader2 } from "lucide-react";
@@ -65,6 +71,9 @@ type SidebarNavItem = {
   icon: SidebarNavIcon;
   operationsStatus?: string;
   children?: SidebarNavChildItem[];
+  /** Hidden from everyone but admins — e.g. assigning sending numbers, which
+   *  also controls which conversations a user can see. */
+  adminOnly?: boolean;
 };
 
 type SidebarNavSection = {
@@ -104,14 +113,6 @@ const sidebarSections: SidebarNavSection[] = [
     ],
   },
   {
-    title: "COMMUNICATION",
-    items: [
-      { label: "Inbox", url: "/inbox", icon: Forum },
-      { label: "Broadcasts", url: "/broadcasts", icon: Campaign },
-      { label: "Contacts & DNC", url: "/messaging-contacts", icon: ContactPhone },
-    ],
-  },
-  {
     title: "DEAL PIPELINE",
     items: [
       { label: "Applications", url: "/applications", icon: InsertDriveFileIcon },
@@ -141,6 +142,18 @@ const sidebarSections: SidebarNavSection[] = [
         operationsStatus: "Recently_Deleted",
         icon: DeleteOutline,
       },
+    ],
+  },
+  {
+    title: "COMMUNICATION",
+    items: [
+      { label: "Inbox", url: "/inbox", icon: Forum },
+      { label: "Broadcasts", url: "/broadcasts", icon: Campaign },
+      { label: "Contacts & DNC", url: "/messaging-contacts", icon: ContactPhone },
+      { label: "Sending Numbers", url: "/messaging-senders", icon: Dialpad, adminOnly: true },
+      { label: "Lead Distribution", url: "/lead-distribution", icon: GroupAdd, adminOnly: true },
+      { label: "Send Windows", url: "/send-windows", icon: Schedule, adminOnly: true },
+      { label: "Performance", url: "/messaging-performance", icon: Insights, adminOnly: true },
     ],
   },
   {
@@ -290,6 +303,21 @@ const Sidebar = () => {
   const dispatch: AppDispatch = useDispatch();
   const navigate = useNavigate();
 
+  const userRole = useSelector(
+    (state: RootState) =>
+      state.login?.data?.user?.role ||
+      (typeof window !== "undefined" ? localStorage.getItem("role") : "") ||
+      ""
+  );
+  // Admin-only nav items. The server enforces this too — hiding the link is a
+  // convenience, not the access control.
+  const isAdmin = ["ADMIN", "SUPER_ADMIN"].includes(
+    String(userRole || "").replace(/-/g, "_").toUpperCase()
+  );
+  // Agents are admitted for the communication side only, so the rest of the
+  // navigation is not theirs to see. RootLayout blocks the paths regardless.
+  const isAgent = isAgentRole(userRole);
+
   const { data: notifications } = useSelector(
     (state: RootState) => state.notifications,
   );
@@ -334,6 +362,7 @@ const Sidebar = () => {
       clearCrmCacheOnLogout();
       clearHttpGetCache();
       void clearAllPersistentCaches();
+      void endImpersonationOnLogout();
       localStorage.removeItem("token");
       localStorage.removeItem("user");
       localStorage.removeItem("role");
@@ -386,7 +415,15 @@ const Sidebar = () => {
         </SidebarHeader>
         <SidebarContent className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto px-2 pb-2 pt-0 group-data-[collapsible=icon]:overflow-auto group-data-[collapsible=icon]:items-center group-data-[collapsible=icon]:px-0">
           <div className="w-full space-y-5 group-data-[collapsible=icon]:mx-auto group-data-[collapsible=icon]:w-auto">
-            {sidebarSections.map((section, sectionIndex) => (
+            {(isAgent
+              ? sidebarSections
+                  .filter((section) => section.title === "COMMUNICATION")
+                  .map((section) => ({
+                    ...section,
+                    items: section.items.filter((item) => isAgentAllowedPath(item.url)),
+                  }))
+              : sidebarSections
+            ).map((section, sectionIndex) => (
               <div
                 key={`${section.title || "section"}-${sectionIndex}`}
                 className="w-full"
@@ -395,7 +432,9 @@ const Sidebar = () => {
                   <p className={sectionHeadingClass}>{section.title}</p>
                 ) : null}
                 <SidebarMenu className="flex flex-col items-stretch gap-0.5 group-data-[collapsible=icon]:items-center">
-                  {section.items.map((item) => {
+                  {section.items
+                    .filter((item) => !item.adminOnly || isAdmin)
+                    .map((item) => {
                     const childItems = item.children ?? [];
                     const hasChildren = childItems.length > 0;
                     const to = buildNavHref(item);

@@ -11,6 +11,7 @@ import {
     axiosPost,
     axiosPostFormData,
 } from '@/redux/axios';
+import type { AxiosRequestConfig } from 'axios';
 
 export type MessageDirection = 'INBOUND' | 'OUTBOUND';
 
@@ -58,10 +59,25 @@ export interface Paginated<T> {
     pagination: { page: number; pageSize: number; total?: number; hasMore: boolean };
 }
 
+export interface MessagingPrepaid {
+    balance: number;
+    pricePerUnit: number;
+    currency: string;
+    chargeBy: 'messages' | 'segments';
+    updatedAt: string | null;
+}
+
 export interface MessagingConfig {
     provider: string;
     configured: boolean;
+    /** Console-managed prepaid balance; null when billing is not configured. */
+    prepaid: MessagingPrepaid | null;
+    /** The number THIS user sends from — their assignment, or the server default. */
     defaultSender: string | null;
+    /** Label of the assigned sender; null when falling back to the server default. */
+    defaultSenderLabel?: string | null;
+    /** False when nobody has assigned this user a number yet. */
+    senderAssigned?: boolean;
     voiceEnabled: boolean;
 }
 
@@ -95,8 +111,15 @@ export interface MessagingContact {
     state: string | null;
     tags: string[];
     status: 'ACTIVE' | 'BLOCKED';
+    /** The agent's manual read on this lead. NEW means nobody has judged it. */
+    disposition: ContactDisposition;
+    dispositionAt: string | null;
+    /** The upload this lead arrived in, when it came from one. */
+    batch: { id: string; name: string } | null;
     createdAt: string;
 }
+
+export type ContactDisposition = 'NEW' | 'INTERESTED' | 'NOT_INTERESTED';
 
 /**
  * The contact card beside a chat. `id` is null when the card was synthesized
@@ -128,6 +151,10 @@ export interface ImportSummary {
     skippedDuplicate: number;
     columnMapping: Record<string, string>;
     sampleErrors: Array<{ row: number; reason: string }>;
+    /** How many leads each user received, when the sheet was distributed. */
+    assigned?: Array<{ userId: string; count: number }>;
+    /** The batch the rows were filed under, selectable as a broadcast audience. */
+    batch?: { id: string; name: string } | null;
 }
 
 /** One of the clickable stat tiles on a broadcast's detail page. */
@@ -276,6 +303,10 @@ export async function fetchContacts(params: {
     pageSize?: number;
     search?: string;
     status?: 'ACTIVE' | 'BLOCKED';
+    disposition?: ContactDisposition;
+    batchId?: string;
+    /** Blocked or opted-out only. */
+    suppressed?: boolean;
 }): Promise<Paginated<MessagingContact>> {
     const response = await axiosGet(`${BASE}/contacts`, { params });
     return response.data;
@@ -290,12 +321,52 @@ export async function createContact(payload: Partial<MessagingContact> & { phone
  * Upload a spreadsheet. Sent as multipart rather than parsed in the browser so
  * a 50k-row sheet does not become a multi-megabyte JSON body.
  */
-export async function importContacts(file: File, tags?: string[]): Promise<ImportSummary> {
+/**
+ * Upload a lead sheet.
+ *
+ * `assigneeUserIds` deals the rows out across those users round-robin; admins
+ * only. Omit it and the whole sheet stays with the importer, as before.
+ */
+export async function importContacts(
+    file: File,
+    tags?: string[],
+    assigneeUserIds?: string[],
+    batchName?: string,
+): Promise<ImportSummary> {
     const formData = new FormData();
     formData.append('file', file);
     if (tags?.length) formData.append('tags', tags.join(','));
+    if (assigneeUserIds?.length) formData.append('assigneeUserIds', assigneeUserIds.join(','));
+    if (batchName?.trim()) formData.append('batchName', batchName.trim());
 
     const response = await axiosPostFormData(`${BASE}/contacts/import`, formData);
+    return response.data.data;
+}
+
+/** Lead counts per owner, for the distribution screen. */
+export interface LeadDistributionRow {
+    userId: string | null;
+    user: {
+        id: string;
+        firstName: string | null;
+        lastName: string | null;
+        email: string;
+        role: string;
+    } | null;
+    count: number;
+}
+
+export async function fetchLeadDistribution(): Promise<LeadDistributionRow[]> {
+    const response = await axiosGet(`${BASE}/contacts/distribution`);
+    return response.data.data ?? [];
+}
+
+/** Re-deal existing leads across users, round-robin. */
+export async function distributeLeads(input: {
+    contactIds: string[];
+    assigneeUserIds: string[];
+}): Promise<{ moved: number; skipped: number }> {
+    const response = await axiosPost(`${BASE}/contacts/distribute`, input);
     return response.data.data;
 }
 
@@ -406,6 +477,11 @@ export interface CreateBroadcastResult {
     duplicatesDropped: number;
     invalidDropped: number;
     skippedClients?: Array<{ clientId: string; businessName: string; reason: string }>;
+    /** Leads left out of a batch audience, and why. */
+    batchExcluded?: { blocked: number; disposed: number } | null;
+    scheduledAt?: string | null;
+    /** True when the creator was an agent, so a Super Admin must release it. */
+    awaitingApproval?: boolean;
 }
 
 /** Create from CRM clients, saved contacts, and/or an explicit number list. */
@@ -415,8 +491,12 @@ export async function createBroadcastFromList(input: {
     recipients?: Array<{ phoneNumber: string; mergeData?: Record<string, unknown> }>;
     clientIds?: string[];
     contactIds?: string[];
+    /** A lead upload as the audience — the caller's own share of it. */
+    leadBatchId?: string;
     fromNumber?: string;
     throttlePerSecond?: number;
+    /** One of the configured daily windows. Preferred over `scheduledAt`. */
+    sendWindowId?: string;
     scheduledAt?: string | null;
     startNow?: boolean;
 }): Promise<CreateBroadcastResult> {
@@ -494,3 +574,257 @@ export async function fetchCallHistory(params: { page?: number; phoneNumber?: st
 }
 
 export { axiosDelete };
+
+/* -------------------------------------------------------------------- */
+/* Sender registry (admin)                                               */
+/* -------------------------------------------------------------------- */
+
+/**
+ * A number messages go out from. Admins curate these and assign one per user;
+ * an unassigned user falls back to the server's INFOBIP_SENDER.
+ */
+export interface MessagingSender {
+    id: string;
+    phoneNumber: string;
+    label: string | null;
+    isActive: boolean;
+    createdAt: string;
+    /** How many users currently send from this number. */
+    _count?: { users: number };
+}
+
+export interface SenderAssignment {
+    id: string;
+    email: string;
+    firstName: string | null;
+    lastName: string | null;
+    role: string;
+    messagingSender: Pick<MessagingSender, 'id' | 'phoneNumber' | 'label' | 'isActive'> | null;
+}
+
+export async function fetchSenders(): Promise<MessagingSender[]> {
+    const response = await axiosGet(`${BASE}/senders`);
+    return response.data.data ?? [];
+}
+
+export async function createSender(input: {
+    phoneNumber: string;
+    label?: string | null;
+    isActive?: boolean;
+}): Promise<MessagingSender> {
+    const response = await axiosPost(`${BASE}/senders`, input);
+    return response.data.data;
+}
+
+export async function updateSender(
+    id: string,
+    input: { phoneNumber: string; label?: string | null; isActive?: boolean },
+): Promise<MessagingSender> {
+    const response = await axiosPatch(`${BASE}/senders/${id}`, input);
+    return response.data.data;
+}
+
+export async function deleteSender(id: string): Promise<void> {
+    await axiosDelete(`${BASE}/senders/${id}`);
+}
+
+export async function fetchSenderAssignments(config?: AxiosRequestConfig): Promise<SenderAssignment[]> {
+    const response = await axiosGet(`${BASE}/senders/assignments`, config);
+    return response.data.data ?? [];
+}
+
+/** Pass null to clear the assignment, returning the user to the env default. */
+export async function assignSender(userId: string, senderId: string | null): Promise<SenderAssignment> {
+    const response = await axiosPatch(`${BASE}/senders/assignments/${userId}`, { senderId });
+    return response.data.data;
+}
+
+/* -------------------------------------------------------------------- */
+/* Performance (admin)                                                   */
+/* -------------------------------------------------------------------- */
+
+export interface PerformanceUserRow {
+    userId: string | null;
+    name: string | null;
+    email: string | null;
+    role: string | null;
+    /** The number this user's inbound traffic is attributed through. */
+    senderNumber: string | null;
+    messagesSent: number;
+    delivered: number;
+    failed: number;
+    campaigns: number;
+    replies: number;
+    optOuts: number;
+}
+
+export interface PerformanceDayRow {
+    day: string;
+    userId: string | null;
+    messagesSent: number;
+    replies: number;
+    optOuts: number;
+}
+
+export interface PerformanceResult {
+    from: string;
+    to: string;
+    totals: {
+        messagesSent: number;
+        delivered: number;
+        failed: number;
+        campaigns: number;
+        replies: number;
+        optOuts: number;
+    };
+    users: PerformanceUserRow[];
+    daily: PerformanceDayRow[];
+    /** Inbound on numbers no user owns — usually the shared default. */
+    unattributedReplies: number;
+    unattributedOptOuts: number;
+}
+
+export async function fetchMessagingPerformance(params: {
+    from?: string;
+    to?: string;
+}): Promise<PerformanceResult> {
+    const response = await axiosGet(`${BASE}/stats/performance`, { params });
+    return response.data.data;
+}
+
+/* -------------------------------------------------------------------- */
+/* Disposition — Interested / Not Interested                             */
+/* -------------------------------------------------------------------- */
+
+/**
+ * Mark how an agent has qualified a lead.
+ *
+ * Takes a phone number rather than a contact id because this is set from the
+ * inbox, where the thread knows the number and not the contact row. Anything
+ * other than NEW drops the lead out of future follow-up broadcasts.
+ */
+export async function setContactDisposition(input: {
+    phoneNumber?: string;
+    contactId?: string;
+    disposition: ContactDisposition;
+}): Promise<{ updated: number; disposition: ContactDisposition }> {
+    const response = await axiosPatch(`${BASE}/contacts/disposition`, input);
+    return response.data.data;
+}
+
+/* -------------------------------------------------------------------- */
+/* Lead batches                                                          */
+/* -------------------------------------------------------------------- */
+
+export interface LeadBatch {
+    id: string;
+    name: string;
+    fileName: string | null;
+    totalRows: number;
+    importedCount: number;
+    createdAt: string;
+    createdBy: { id: string; firstName: string | null; lastName: string | null; email: string } | null;
+    /** How many of this batch's leads the signed-in user owns. */
+    myLeadCount: number;
+}
+
+/**
+ * Lead uploads available to the caller.
+ *
+ * Scoped server-side: an admin sees every upload, an agent sees only the ones
+ * they were dealt leads from — so the broadcast picker never offers an
+ * audience that would resolve to nobody.
+ */
+export async function fetchLeadBatches(): Promise<LeadBatch[]> {
+    const response = await axiosGet(`${BASE}/contacts/batches`);
+    return response.data.data ?? [];
+}
+
+/* -------------------------------------------------------------------- */
+/* Send windows — the configurable daily send times                      */
+/* -------------------------------------------------------------------- */
+
+export interface SendWindow {
+    id: string;
+    label: string | null;
+    /** 24-hour local time in `timezone`, "HH:MM". */
+    timeOfDay: string;
+    timezone: string;
+    isActive: boolean;
+    sortOrder: number;
+}
+
+/** A window with the next instant it comes round, for the scheduling picker. */
+export interface UpcomingSendWindow {
+    id: string;
+    label: string | null;
+    timeOfDay: string;
+    timezone: string;
+    nextOccurrence: string;
+}
+
+export async function fetchSendWindows(): Promise<SendWindow[]> {
+    const response = await axiosGet(`${BASE}/send-windows`);
+    return response.data.data ?? [];
+}
+
+export async function fetchUpcomingSendWindows(): Promise<UpcomingSendWindow[]> {
+    const response = await axiosGet(`${BASE}/send-windows/upcoming`);
+    return response.data.data ?? [];
+}
+
+export async function saveSendWindow(input: {
+    id?: string;
+    label?: string | null;
+    timeOfDay: string;
+    timezone?: string;
+    isActive?: boolean;
+    sortOrder?: number;
+}): Promise<SendWindow> {
+    const response = input.id
+        ? await axiosPatch(`${BASE}/send-windows/${input.id}`, input)
+        : await axiosPost(`${BASE}/send-windows`, input);
+    return response.data.data;
+}
+
+export async function deleteSendWindow(id: string): Promise<void> {
+    await axiosDelete(`${BASE}/send-windows/${id}`);
+}
+
+/* -------------------------------------------------------------------- */
+/* Approval + follow-up                                                  */
+/* -------------------------------------------------------------------- */
+
+export async function approveBroadcast(id: string, startNow = false) {
+    const response = await axiosPost(`${BASE}/broadcasts/${id}/approve`, { startNow });
+    return response.data.data;
+}
+
+export async function rejectBroadcast(id: string) {
+    const response = await axiosPost(`${BASE}/broadcasts/${id}/reject`);
+    return response.data.data;
+}
+
+export interface FollowUpPreview {
+    parentId: string;
+    parentName: string;
+    /** Earliest instant a follow-up may be scheduled for — an hour after the original. */
+    earliestSendAt: string;
+    eligibleCount: number;
+    excluded: { replied: number; disposed: number; notDelivered: number };
+}
+
+/** Who a follow-up would reach, without creating anything. */
+export async function fetchFollowUpPreview(id: string): Promise<FollowUpPreview> {
+    const response = await axiosGet(`${BASE}/broadcasts/${id}/follow-up`);
+    return response.data.data;
+}
+
+/** Chase a campaign's non-responders. Needs a window or a time — never immediate. */
+export async function createFollowUp(
+    id: string,
+    input: { body: string; name?: string; sendWindowId?: string; scheduledAt?: string },
+): Promise<CreateBroadcastResult & { awaitingApproval: boolean; scheduledAt: string }> {
+    const response = await axiosPost(`${BASE}/broadcasts/${id}/follow-up`, input);
+    return response.data.data;
+}

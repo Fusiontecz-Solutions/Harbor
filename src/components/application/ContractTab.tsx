@@ -418,7 +418,7 @@ export default function ContractTab({
     const [achTemplateMappings, setAchTemplateMappings] = useState<AchDocumentTemplateMappingRow[]>([]);
     const [loadingAchMappings, setLoadingAchMappings] = useState(false);
     const [achViewerOpen, setAchViewerOpen] = useState(false);
-    const [_preparingAchViewer, setPreparingAchViewer] = useState(false);
+    const [preparingAchViewer, setPreparingAchViewer] = useState(false);
     /** Which Info Required ACH row feeds the ACH Form modal (first / last picked). */
     const [selectedAchRecordId, setSelectedAchRecordId] = useState<string | null>(null);
     const [pdfUrl, setPdfUrl] = useState<string | null>(null);
@@ -2202,6 +2202,8 @@ export default function ContractTab({
             addendumBoldSignTemplateId?: string | null;
             /** CRM document-template row id for state disclosure PDF. */
             disclosureDocumentRef?: string | null;
+            /** "first" (default): disclosure → contract → addenda; "last": contract → addenda → disclosure. */
+            disclosurePosition?: "first" | "last";
             /** CRM document-template row id for optional ACH PDF. */
             achDocumentRef?: string | null;
             /** When true, envelope contains only the ACH form (no main contract PDF). */
@@ -2243,6 +2245,7 @@ export default function ContractTab({
             ).trim(),
         ].filter(Boolean);
         const disclosureDocumentRef = String(sendPayload.disclosureDocumentRef ?? "").trim();
+        const disclosureFirst = sendPayload.disclosurePosition !== "last";
         const achDocumentRef = String(sendPayload.achDocumentRef ?? "").trim();
         const standaloneAchOnly = sendPayload.standaloneAchOnly === true;
         const includeMainContract = sendPayload.includeMainContract !== false;
@@ -2523,7 +2526,15 @@ export default function ContractTab({
 
             const supplementalDocumentRefs = standaloneAchOnly
                 ? []
-                : [...new Set([...addendumDocumentRefs, disclosureDocumentRef].filter(Boolean))];
+                : disclosureFirst
+                  ? // Envelope order: state disclosure → main contract → addenda (backend places leading refs first).
+                    [...new Set([disclosureDocumentRef, ...addendumDocumentRefs].filter(Boolean))]
+                  : // Envelope order: main contract → addenda → state disclosure.
+                    [...new Set([...addendumDocumentRefs, disclosureDocumentRef].filter(Boolean))];
+            const leadingSupplementalDocumentRefs =
+                !standaloneAchOnly && disclosureFirst && disclosureDocumentRef
+                    ? [disclosureDocumentRef]
+                    : undefined;
             const mergedTemplateIdsForPrefill = standaloneAchOnly
                 ? [achDocumentRef]
                 : supplementalDocumentRefs;
@@ -2905,6 +2916,7 @@ export default function ContractTab({
                       }
                     : {
                           supplementalDocumentRefs,
+                          leadingSupplementalDocumentRefs,
                           includeMainContract,
                           mainContractLayoutKey,
                           funderName: resolvedFunderName ? String(resolvedFunderName).trim() : undefined,
@@ -3150,6 +3162,7 @@ export default function ContractTab({
         addendumDocumentRefs?: string[] | null;
         addendumBoldSignTemplateId?: string | null;
         disclosureDocumentRef?: string | null;
+        disclosurePosition?: "first" | "last";
         achDocumentRef?: string | null;
         standaloneAchOnly?: boolean;
         includeMainContract?: boolean;
@@ -3969,7 +3982,19 @@ export default function ContractTab({
 
                     </div>
                     <div className="flex items-center gap-3">
-                        {/* Send ACH Form button — hidden for now */}
+                        {!isReadOnly ? (
+                            <Button
+                                type="button"
+                                onClick={() => void openAchViewer()}
+                                loading={preparingAchViewer}
+                                disabled={preparingAchViewer || creatingEnvelope}
+                                variant="outline"
+                                className="rounded-md border-[var(--brand)] text-[var(--brand)] hover:bg-[var(--brand)]/10 cursor-pointer px-6 py-2 h-10 font-medium disabled:opacity-70 disabled:cursor-not-allowed"
+                            >
+                                <Landmark className="h-4 w-4 mr-2" />
+                                {preparingAchViewer ? "Opening ACH form..." : "Send ACH Form"}
+                            </Button>
+                        ) : null}
                         {!isReadOnly && hasGeneratedContract ? (
                             <Button
                                 type="button"

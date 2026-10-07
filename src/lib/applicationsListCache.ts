@@ -11,6 +11,7 @@ import {
 } from "@/lib/persistentCache/idbStore";
 import { invalidateApplicationsListQueries } from "@/lib/applicationsListQuerySync";
 import { invalidateUnderwriterPipelineCounts } from "@/lib/underwriterPipelineCounts";
+import { clearHttpGetCache } from "@/lib/httpGetCache";
 
 const TTL_MS = 60_000;
 const MAX_ENTRIES = 40;
@@ -83,6 +84,7 @@ export function applicationsListParamsCacheKey(
     sortBy: params.sortBy ?? "",
     sortOrder: params.sortOrder ?? "",
     lite: params.lite ? "1" : "",
+    includeLetterStatus: params.includeLetterStatus ? "1" : "",
     underwriterClaim: params.underwriterClaim ?? "",
     underwriterPipeline: params.underwriterPipeline ?? "",
     claimedByUnderwriterId: params.claimedByUnderwriterId ?? "",
@@ -115,6 +117,7 @@ export function buildApplicationsListUrl(
   if (params.sortBy) queryParams.append("sortBy", params.sortBy);
   if (params.sortOrder) queryParams.append("sortOrder", params.sortOrder);
   if (params.lite) queryParams.append("lite", "1");
+  if (params.includeLetterStatus) queryParams.append("includeLetterStatus", "1");
   if (params.underwriterClaim) {
     queryParams.append("underwriterClaim", params.underwriterClaim);
   }
@@ -264,6 +267,8 @@ export function coalesceApplicationsListFetch(
 export function invalidateApplicationsListCache() {
   cache.clear();
   void idbClearNamespace(IDB_NAMESPACE);
+  // Letter status (and other list fields) also live in the short-lived axios GET cache.
+  clearHttpGetCache();
   invalidateApplicationsListQueries();
   invalidateUnderwriterPipelineCounts();
 }

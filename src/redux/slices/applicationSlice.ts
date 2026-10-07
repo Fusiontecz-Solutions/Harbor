@@ -1,6 +1,10 @@
 import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
-import type { Application } from '@/types/applicationTypes';
+import type { Application, ApplicationLetterStatus } from '@/types/applicationTypes';
 import { buildDetailHydrationPayload } from '@/lib/applicationDetailCache.ts';
+import {
+    mergeLetterStatusEntry,
+    resolveApplicationLetterStatuses,
+} from '@/lib/letterStatusDisplay';
 import {
     createApplication,
     getApplications,
@@ -75,26 +79,95 @@ function extractApplicationFromUpdatePayload(payload: unknown): Application | nu
     return updated as Application;
 }
 
+function mergeLetterStatusLists(
+    prior: ApplicationLetterStatus[] | null | undefined,
+    incoming: ApplicationLetterStatus[] | null | undefined,
+): ApplicationLetterStatus[] {
+    let merged = resolveApplicationLetterStatuses({ letterStatuses: prior ?? null });
+    for (const entry of resolveApplicationLetterStatuses({ letterStatuses: incoming ?? null })) {
+        merged = mergeLetterStatusEntry(merged, entry);
+    }
+    return merged;
+}
+
+function applicationRowIdsMatch(
+    left: Application & { id?: string },
+    right: Application & { id?: string },
+): boolean {
+    const leftId = left._id ?? left.id;
+    const rightId = right._id ?? right.id;
+    const idMatch = leftId != null && rightId != null && String(leftId) === String(rightId);
+    const aidMatch =
+        left.applicationId != null &&
+        right.applicationId != null &&
+        Number(left.applicationId) === Number(right.applicationId);
+    return Boolean(idMatch || aidMatch);
+}
+
 /** Merge PATCH queue/state response into the global applications list (Kanban reads this slice). */
 function patchApplicationInList(state: ApplicationsState, payload: unknown) {
     const updated = extractApplicationFromUpdatePayload(payload);
     if (!updated || !Array.isArray(state.data)) return;
     const u = updated as Application & { _id?: string; id?: string };
-    const upId = u._id ?? u.id;
-    const upAid = u.applicationId;
-    const idx = state.data.findIndex((d) => {
-        const cur = d as Application & { id?: string };
-        const curId = cur._id ?? cur.id;
-        const curAid = cur.applicationId;
-        const idMatch = curId != null && upId != null && String(curId) === String(upId);
-        const aidMatch =
-            curAid != null &&
-            upAid != null &&
-            Number(curAid) === Number(upAid);
-        return idMatch || aidMatch;
-    });
+    const idx = state.data.findIndex((d) =>
+        applicationRowIdsMatch(d as Application & { id?: string }, u),
+    );
     if (idx >= 0) {
-        state.data[idx] = { ...state.data[idx], ...u } as Application;
+        const current = state.data[idx];
+        const incomingStatuses = resolveApplicationLetterStatuses(u);
+        if (incomingStatuses.length) {
+            const letterStatuses = mergeLetterStatusLists(
+                resolveApplicationLetterStatuses(current),
+                incomingStatuses,
+            );
+            const { letterStatus: _ls, letterStatuses: _lss, ...rest } = u;
+            state.data[idx] = {
+                ...current,
+                ...rest,
+                letterStatuses,
+                letterStatus: letterStatuses[0] ?? null,
+            } as Application;
+            return;
+        }
+        state.data[idx] = { ...current, ...u } as Application;
+    }
+}
+
+/**
+ * Merge letterStatuses from an out-of-order list response when engagement advanced
+ * (opened/clicked) even if the request lost the latestRequestId race.
+ */
+function mergeFresherLetterStatuses(
+    state: ApplicationsState,
+    payload: unknown,
+) {
+    if (!Array.isArray(state.data) || state.data.length === 0) return;
+    const body = payload as { data?: Application[] } | Application[] | null;
+    const rows = Array.isArray(body)
+        ? body
+        : Array.isArray(body?.data)
+          ? body.data
+          : null;
+    if (!rows?.length) return;
+
+    for (const row of rows) {
+        const incomingStatuses = resolveApplicationLetterStatuses(row);
+        if (!incomingStatuses.length) continue;
+        const u = row as Application & { _id?: string; id?: string };
+        const idx = state.data.findIndex((d) =>
+            applicationRowIdsMatch(d as Application & { id?: string }, u),
+        );
+        if (idx < 0) continue;
+        const current = state.data[idx];
+        const letterStatuses = mergeLetterStatusLists(
+            resolveApplicationLetterStatuses(current),
+            incomingStatuses,
+        );
+        state.data[idx] = {
+            ...current,
+            letterStatuses,
+            letterStatus: letterStatuses[0] ?? null,
+        } as Application;
     }
 }
 
@@ -112,10 +185,12 @@ export const applicationsSlice = createSlice({
     initialState: applicationsInitialState,
     reducers: {
         clearApplications: (state) => {
+            // Used when switching list keys before a fetch — keep the table in a
+            // loading state so a previous stage's rows never linger as "loaded".
             state.data = [];
             state.pagination = null;
             state.error = null;
-            state.loading = false;
+            state.loading = true;
             state.isRefreshing = false;
         },
         /**
@@ -169,11 +244,44 @@ export const applicationsSlice = createSlice({
                 // Ignore out-of-order responses: after a newer fetch completes, `latestRequestId` is
                 // null, but an older in-flight response must not overwrite fresh data.
                 if (action.meta.requestId !== state.latestRequestId) {
+                    // Still advance letter engagement badges (delivered → opened) from late polls.
+                    if (action.meta.arg?.includeLetterStatus) {
+                        mergeFresherLetterStatuses(state, action.payload);
+                    }
                     return;
                 }
                 state.loading = false;
                 state.isRefreshing = false;
-                state.data = action.payload.data || action.payload;
+                const nextRows = (action.payload.data || action.payload) as Application[];
+                // Preserve higher engagement ranks already painted via websocket.
+                if (
+                    action.meta.arg?.includeLetterStatus &&
+                    Array.isArray(state.data) &&
+                    state.data.length > 0 &&
+                    Array.isArray(nextRows)
+                ) {
+                    state.data = nextRows.map((row) => {
+                        const prior = state.data.find((d) =>
+                            applicationRowIdsMatch(
+                                d as Application & { id?: string },
+                                row as Application & { id?: string },
+                            ),
+                        );
+                        if (!prior) return row;
+                        const letterStatuses = mergeLetterStatusLists(
+                            resolveApplicationLetterStatuses(prior),
+                            resolveApplicationLetterStatuses(row),
+                        );
+                        if (!letterStatuses.length) return row;
+                        return {
+                            ...row,
+                            letterStatuses,
+                            letterStatus: letterStatuses[0] ?? null,
+                        };
+                    });
+                } else {
+                    state.data = nextRows;
+                }
                 const pagination = action.payload?.pagination;
                 state.pagination = pagination
                     ? {

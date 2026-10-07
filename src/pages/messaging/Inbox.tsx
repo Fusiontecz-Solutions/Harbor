@@ -13,7 +13,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Virtuoso } from 'react-virtuoso';
 import { toast } from 'react-toastify';
 import {
+    AlertCircle,
     Ban,
+    ThumbsDown,
+    ThumbsUp,
     Check,
     CheckCheck,
     ChevronRight,
@@ -44,11 +47,19 @@ import {
     DialogTitle,
 } from '@/components/ui/dialog';
 import { cn } from '@/lib/utils';
+import { isAgentRole } from '@/lib/agentAccess';
+import { resolveEffectiveRole } from '@/lib/sessionRole';
 import { useInbox } from '@/hooks/useInbox';
 import { ClientPicker } from '@/components/messaging/ClientPicker';
+import {
+    confirmMultiSegmentSend,
+    SmsComposeMeter,
+    useSmsSegmentInfo,
+} from '@/components/messaging/SmsComposeMeter';
 import { MessagingAvatar } from '@/components/messaging/MessagingAvatar';
 import {
     blockContact,
+    setContactDisposition,
     deleteConversation as deleteConversationRequest,
     fetchContactProfile,
     fetchMessagingConfig,
@@ -56,6 +67,7 @@ import {
     unblockContact,
     type ClientRecipient,
     type ContactProfile,
+    type ContactDisposition,
     type Conversation,
     type Message,
     type MessagingConfig,
@@ -163,10 +175,17 @@ function dayLabel(value: string): string {
     return date.toLocaleDateString([], { month: 'long', day: 'numeric', year: 'numeric' });
 }
 
+/**
+ * Delivery indicator. A failed message must never render as a tick — an agent
+ * reading a tick believes the merchant was contacted, so failure gets its own
+ * alert glyph rather than a shield (which reads as "blocked") or a check.
+ */
 function StatusTick({ status }: { status: Message['status'] }) {
     if (status === 'DELIVERED') return <CheckCheck className="h-3.5 w-3.5 text-sky-400" />;
+    if (status === 'FAILED' || status === 'UNDELIVERABLE') {
+        return <AlertCircle className="h-3.5 w-3.5 text-red-400" aria-label="Not delivered" />;
+    }
     if (status === 'SENT') return <Check className="h-3.5 w-3.5 opacity-70" />;
-    if (status === 'FAILED' || status === 'UNDELIVERABLE') return <ShieldOff className="h-3.5 w-3.5 text-red-400" />;
     return <Loader2 className="h-3.5 w-3.5 animate-spin opacity-60" />;
 }
 
@@ -182,9 +201,12 @@ export default function Inbox() {
 
     const [config, setConfig] = useState<MessagingConfig | null>(null);
     const [draft, setDraft] = useState('');
+    const draftSms = useSmsSegmentInfo(draft);
     const [isSending, setIsSending] = useState(false);
     const [newNumber, setNewNumber] = useState('');
     const [isClientPickerOpen, setIsClientPickerOpen] = useState(false);
+    // The CRM client book is admin-only; agents message their own leads.
+    const canUseClients = !isAgentRole(resolveEffectiveRole(undefined));
     const [showDetails, setShowDetails] = useState(true);
     const [contactDetail, setContactDetail] = useState<ContactProfile | null>(null);
     /** A chat the agent has opened but not yet sent on — never persisted. */
@@ -288,6 +310,7 @@ export default function Inbox() {
     const handleSend = useCallback(async () => {
         const body = draft.trim();
         if (!body || !activeConversation || isSending) return;
+        if (!confirmMultiSegmentSend(draftSms, 1)) return;
 
         setIsSending(true);
         try {
@@ -318,6 +341,7 @@ export default function Inbox() {
         activeConversation,
         draft,
         draftClientId,
+        draftSms,
         isDraft,
         isSending,
         openConversation,
@@ -382,6 +406,37 @@ export default function Inbox() {
             toast.error(error?.response?.data?.message || 'Failed to update block status');
         }
     }, [activeConversation, reloadConversations]);
+
+    /**
+     * Mark the lead Interested / Not Interested.
+     *
+     * Clicking the marker that is already set clears it back to NEW, so an
+     * agent can undo a misclick without hunting for a third button — and
+     * clearing it puts the lead back into the follow-up audience, which is the
+     * only way to reverse that exclusion.
+     */
+    const handleDisposition = useCallback(
+        async (next: ContactDisposition) => {
+            if (!activeConversation) return;
+            const current = contactDetail?.disposition ?? 'NEW';
+            const value: ContactDisposition = current === next ? 'NEW' : next;
+
+            // Optimistic: the marker is the agent's own click, and a failure
+            // re-reads the real value below.
+            setContactDetail((previous) => (previous ? { ...previous, disposition: value } : previous));
+
+            try {
+                await setContactDisposition({
+                    phoneNumber: activeConversation.contactNumber,
+                    disposition: value,
+                });
+            } catch (error) {
+                setContactDetail((previous) => (previous ? { ...previous, disposition: current } : previous));
+                console.error('[inbox] failed to set disposition:', error);
+            }
+        },
+        [activeConversation, contactDetail?.disposition],
+    );
 
     const canSend = Boolean(
         activeConversation && !activeConversation.isBlocked && !activeConversation.isOptedOut && config?.configured,
@@ -449,6 +504,24 @@ export default function Inbox() {
                         </span>
                     </div>
 
+                    {/* Users can be assigned different sending numbers, and the
+                        inbox only shows threads on their own. Stating the number
+                        up front means it is knowable before the first
+                        conversation exists, rather than only inferable from a
+                        thread header afterwards. */}
+                    {config?.defaultSender && (
+                        <p
+                            className="flex items-center gap-1.5 text-[11px] text-muted-foreground"
+                            title="Messages and broadcasts you send go out from this number"
+                        >
+                            <Phone className="h-3 w-3 shrink-0" />
+                            Sending from{' '}
+                            <span className="font-medium text-foreground">
+                                {formatPhone(config.defaultSender)}
+                            </span>
+                        </p>
+                    )}
+
                     <div className="relative">
                         <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                         <Input
@@ -488,15 +561,17 @@ export default function Inbox() {
                         <Button size="sm" variant="secondary" className="h-8 px-2" onClick={handleStartConversation}>
                             <MessageSquarePlus className="h-4 w-4" />
                         </Button>
-                        <Button
-                            size="sm"
-                            variant="outline"
-                            className="h-8 px-2"
-                            onClick={() => setIsClientPickerOpen(true)}
-                            title="Message a CRM client"
-                        >
-                            <Users className="h-4 w-4" />
-                        </Button>
+                        {canUseClients && (
+                            <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-8 px-2"
+                                onClick={() => setIsClientPickerOpen(true)}
+                                title="Message a CRM client"
+                            >
+                                <Users className="h-4 w-4" />
+                            </Button>
+                        )}
                     </div>
                 </div>
 
@@ -582,6 +657,43 @@ export default function Inbox() {
                                     </Badge>
                                 )}
                                 {activeConversation.isOptedOut && <Badge variant="destructive">Opted out</Badge>}
+
+                                {/* Interested / Not Interested. Either marker takes the lead
+                                    out of follow-up broadcasts; clicking the active one
+                                    clears it back to unmarked. */}
+                                <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className={cn(
+                                        'h-8 w-8',
+                                        contactDetail?.disposition === 'INTERESTED' && 'text-emerald-600',
+                                    )}
+                                    onClick={() => void handleDisposition('INTERESTED')}
+                                    title={
+                                        contactDetail?.disposition === 'INTERESTED'
+                                            ? 'Interested — click to clear'
+                                            : 'Mark as interested (removes from follow-up)'
+                                    }
+                                >
+                                    <ThumbsUp className="h-4 w-4" />
+                                </Button>
+                                <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className={cn(
+                                        'h-8 w-8',
+                                        contactDetail?.disposition === 'NOT_INTERESTED' && 'text-amber-600',
+                                    )}
+                                    onClick={() => void handleDisposition('NOT_INTERESTED')}
+                                    title={
+                                        contactDetail?.disposition === 'NOT_INTERESTED'
+                                            ? 'Not interested — click to clear'
+                                            : 'Mark as not interested (removes from follow-up)'
+                                    }
+                                >
+                                    <ThumbsDown className="h-4 w-4" />
+                                </Button>
+
                                 {config?.voiceEnabled && (
                                     <Button size="icon" variant="ghost" className="h-8 w-8" title="Call this contact">
                                         <Phone className="h-4 w-4" />
@@ -683,10 +795,17 @@ export default function Inbox() {
                                     )}
                                 </Button>
                             </div>
-                            <p className="mt-1 text-[11px] text-muted-foreground">
-                                Enter to send · Shift+Enter for a new line
-                                {draft.length > 0 && ` · ${draft.length} chars`}
-                            </p>
+                            {draft.trim() ? (
+                                <SmsComposeMeter
+                                    className="mt-1"
+                                    text={draft}
+                                    onTextChange={setDraft}
+                                />
+                            ) : (
+                                <p className="mt-1 text-[11px] text-muted-foreground">
+                                    Enter to send · Shift+Enter for a new line
+                                </p>
+                            )}
                         </footer>
                     </>
                 )}
@@ -887,6 +1006,7 @@ function ConversationRow({
 
 function MessageBubble({ message }: { message: Message }) {
     const isOutbound = message.direction === 'OUTBOUND';
+    const isFailed = message.status === 'FAILED' || message.status === 'UNDELIVERABLE';
     const time = new Date(message.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
     return (
@@ -898,6 +1018,7 @@ function MessageBubble({ message }: { message: Message }) {
                         ? 'rounded-br-sm bg-primary text-primary-foreground'
                         : 'rounded-bl-sm bg-background',
                     message.isStopKeyword && 'ring-1 ring-red-400',
+                    isFailed && 'ring-1 ring-red-400/70',
                 )}
             >
                 {message.broadcastId && (
@@ -925,8 +1046,11 @@ function MessageBubble({ message }: { message: Message }) {
                     {isOutbound && <StatusTick status={message.status} />}
                 </span>
 
-                {message.errorMessage && (
-                    <p className="mt-1 text-[10px] text-red-400">{message.errorMessage}</p>
+                {isFailed && (
+                    <p className="mt-1 flex items-start gap-1 text-[10px] font-medium text-red-400">
+                        <AlertCircle className="mt-px h-3 w-3 shrink-0" />
+                        <span>{message.errorMessage || 'Not delivered'}</span>
+                    </p>
                 )}
             </div>
         </div>
