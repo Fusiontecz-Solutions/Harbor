@@ -637,6 +637,11 @@ export async function resolveSupplementalRefsFromDb(filters: {
 
 export async function buildPlatformLayoutEnvelopeDefinition(options: {
   supplementalRefs?: string[];
+  /**
+   * Resolved refs (subset of `supplementalRefs`) placed before the main contract,
+   * e.g. the state disclosure. Envelope order: leading → main contract → remaining supplementals.
+   */
+  leadingSupplementalRefs?: string[];
   /** ACH / other standalone docs — envelope contains only these PDFs (no main contract). */
   standaloneDocumentRefs?: string[];
   /** When false, envelope contains only supplemental layouts (e.g. standalone ACH). */
@@ -681,6 +686,18 @@ export async function buildPlatformLayoutEnvelopeDefinition(options: {
     contractState: options.contractState,
   };
   const layouts: DocumentLayoutWithBase64[] = [];
+  const leadingRefSet = new Set(
+    hasStandaloneOnly ? [] : (options.leadingSupplementalRefs || []).map((ref) => String(ref)),
+  );
+  const leadingRefs = (options.supplementalRefs || []).filter((ref) => leadingRefSet.has(ref));
+  const trailingRefs = (options.supplementalRefs || []).filter((ref) => !leadingRefSet.has(ref));
+  if (leadingRefs.length) {
+    const leading = await Promise.all(
+      leadingRefs.map((ref) => loadSupplementalLayoutPackage(ref, funderContext)),
+    );
+    layouts.push(...leading);
+  }
+  let mainLayoutIndex = -1;
   if (includeMainContract) {
     const mainContractLayoutKey =
       String(options.mainContractLayoutKey || '').trim() || DOCUMENT_LAYOUT_KEYS.contract;
@@ -695,12 +712,10 @@ export async function buildPlatformLayoutEnvelopeDefinition(options: {
         contractId,
       );
     }
+    mainLayoutIndex = layouts.length;
     layouts.push(mainLayout);
   }
-  const allSupplementalRefs = [
-    ...(options.supplementalRefs || []),
-    ...standaloneRefs,
-  ];
+  const allSupplementalRefs = [...trailingRefs, ...standaloneRefs];
   if (allSupplementalRefs.length) {
     const supplementals = await Promise.all(
       allSupplementalRefs.map((ref) => loadSupplementalLayoutPackage(ref, funderContext)),
@@ -874,6 +889,7 @@ export async function buildPlatformLayoutEnvelopeDefinition(options: {
     ownerCount,
     guarantorCount,
     primaryDocumentName: options.documentName,
+    primaryLayoutIndex: Math.max(mainLayoutIndex, 0),
     flattenedLayoutKeys,
     lockDataTabs: options.lockDataTabs === true,
     mergedDocument,

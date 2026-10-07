@@ -1459,6 +1459,34 @@ class ContractController {
     }
   }
 
+  async reorderContractDocumentTemplateMappings(req: Request, res: Response) {
+    try {
+      const contractId = Number(req.params.id);
+      if (isNaN(contractId)) {
+        return res.status(400).json({ success: false, message: 'Invalid contract id parameter' });
+      }
+      const { documentType, mappingIds } = req.body || {};
+      if (!Array.isArray(mappingIds) || mappingIds.length === 0) {
+        return res.status(400).json({ success: false, message: 'mappingIds must be a non-empty array' });
+      }
+      const data = await contractService.reorderContractDocumentTemplateMappings(
+        contractId,
+        String(documentType || 'addendum').trim() || 'addendum',
+        mappingIds.map((id: unknown) => String(id)),
+      );
+      if (!data) {
+        return res.status(409).json({
+          success: false,
+          message: 'Template mappings changed — reload and try again',
+        });
+      }
+      return res.status(200).json({ success: true, message: 'Template mapping order updated', data });
+    } catch (error: any) {
+      console.error('Reorder contract template mappings error:', error);
+      return res.status(500).json({ success: false, message: error?.message || 'Internal server error' });
+    }
+  }
+
   async updateContractDocumentTemplateMapping(req: Request, res: Response) {
     try {
       const { mappingId } = req.params;

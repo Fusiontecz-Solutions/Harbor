@@ -518,7 +518,7 @@ export const uploadFunderAddendum = async (req: Request, res: Response) => {
       return res.status(400).json({
         success: false,
         message:
-          'coordinateLayoutKey is required (addendum_p, addendum_ca, addendum_ny, addendum_va, addendum_epa, ach_authorization).',
+          'coordinateLayoutKey is required (addendum_p, addendum_ca, addendum_ny, addendum_va, addendum_epa, addendum_epd, exhibit_a, ach_authorization).',
       });
     }
 

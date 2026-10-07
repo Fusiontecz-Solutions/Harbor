@@ -582,6 +582,8 @@ async function upsertFunderSupplementalBoldSignTemplate(
             ? 'Addendum VA'
             : supplementalType === 'addendum_epa'
               ? 'EPA Addendum'
+              : supplementalType === 'addendum_epd'
+                ? 'EPD Addendum'
               : supplementalType === 'ach_authorization' ||
                   supplementalType === 'ach_authorization_texas'
                 ? 'ACH Authorization'
@@ -934,19 +936,35 @@ export async function deleteFunderDocumentTemplate(funderId: string, templateId:
       .trim()
       .toLowerCase() === 'disclosure' || keyLower.includes('disclosure');
 
+  if (!isDisclosure) assertCanManageFunderAddendums(profile);
+
+  // Disclosures: accept the same scope listFunderDocumentTemplates shows — the
+  // funder's own uploads plus the shared Harbor View pack it consumes. Without the
+  // platform owner id, "own" funders (e.g. Clear Capital) listed rows they could
+  // not delete.
+  const allowedFunderIds = new Set<string>([fid]);
   if (isDisclosure) {
-    assertCanManageFunderDisclosures(profile);
+    const platformDisclosureFunderId = !isWoodmereFinancialFunderName(
+      profile.name,
+      profile.displayName,
+    )
+      ? await findPlatformDisclosureOwnerFunderId()
+      : null;
+    const scoped = resolveDisclosureDocumentsLayoutFunderId(profile, {
+      platformDisclosureFunderId,
+    });
+    if (scoped) allowedFunderIds.add(scoped);
   } else {
-    assertCanManageFunderAddendums(profile);
+    const scoped = resolveAddendumDocumentsLayoutFunderId(profile);
+    if (scoped) allowedFunderIds.add(scoped);
   }
 
-  const layoutFunderId =
-    (isDisclosure
-      ? resolveDisclosureDocumentsLayoutFunderId(profile)
-      : resolveAddendumDocumentsLayoutFunderId(profile)) || fid;
+  const ownerMatches = [...allowedFunderIds].some((id) =>
+    isFunderOwnedLayoutKey(layoutKey, id),
+  );
   if (
-    !isFunderOwnedLayoutKey(layoutKey, layoutFunderId) ||
-    layoutKey === funderContractLayoutKey(fid)
+    !ownerMatches ||
+    [...allowedFunderIds].some((id) => layoutKey === funderContractLayoutKey(id))
   ) {
     throw new Error('This document does not belong to the selected funder.');
   }

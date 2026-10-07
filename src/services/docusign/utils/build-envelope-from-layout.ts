@@ -7,7 +7,7 @@ import {
   CRM_ID_TO_LAYOUT_VARIABLE,
   getPrefillDisplayLabel,
 } from './prefill-layout-bridge';
-import type { PrefillFieldInput } from './docusign-prefill';
+import { normalizeFieldKey, type PrefillFieldInput } from './docusign-prefill';
 import { DOCUSIGN_DEFAULT_ROLE_NAME, DOCUSIGN_SECONDARY_ROLE_NAME } from './docusign-client';
 import {
   applyDocuSignPrefillTabStyle,
@@ -34,6 +34,7 @@ import {
   resolveDisclosureMerchantBusinessName,
   resolveDisclosureRecipientAddress,
   resolveDisclosureEstimatedPayment,
+  resolveCanonicalSupplementalLayoutKey,
   resolveSupplementalEnvelopeTabLabel,
   toDisclosureScopedPrefillId,
 } from './layout-prefill-scope';
@@ -63,6 +64,8 @@ export type BuildEnvelopeFromLayoutOptions = {
   guarantorCount?: number;
   /** Display name for the primary (first) PDF in the envelope. */
   primaryDocumentName?: string;
+  /** Index in `layouts` that receives `primaryDocumentName` (main contract; default 0). */
+  primaryLayoutIndex?: number;
   /**
    * When true, text/date values are already burned into document PDFs — only signature /
    * initial / attachment tabs are attached (visible to all recipients including CC).
@@ -235,19 +238,29 @@ const PREFILL_VALUE_ALIASES: Record<string, string[]> = {
     'client_name',
     'owner1_guarantor_name',
   ],
-  ach_authorization_concent_account_holder_name: [
-    'client_legal_name',
-    'security_business_name',
-    'business_legal_name',
-    'authorization_client_name',
-  ],
+  /**
+   * ACH consent "Name/Title of Account Holder" is Owner 1 person name — set by
+   * `normalizeAchAuthorizationNames`. Never alias business / legal names here.
+   */
   ach_authorization_concent_account_holder_name_2: [
     'ach_authorization_concent_account_holder_name',
-    'client_legal_name',
-    'security_business_name',
-    'business_legal_name',
-    'authorization_client_name',
   ],
+  ach_authorization_account_holder_bank_state: ['achauthorizationaccountholderbankstate'],
+  ach_authorization_account_holder_bank_zip: ['achauthorizationaccountholderbankzip'],
+  ach_authorization_account_holder_bank_branch_city: [
+    'achauthorizationaccountholderbankbranchcity',
+  ],
+  ach_authorization_account_holder_bank_name: ['achauthorizationaccountholderbankname'],
+  ach_authorization_account_holder_bank_routing_number: [
+    'achauthorizationaccountholderbankroutingnumber',
+  ],
+  ach_authorization_account_holder_bank_account_number: [
+    'achauthorizationaccountholderbankaccountnumber',
+  ],
+  /** ACH page-2 phone / DBA follow the business contact values (Katan client sync). */
+  client_phone: ['authorized_business_phone'],
+  authorized_business_phone: ['ach_authorization_account_holder_phone'],
+  doing_business_as: ['ach_authorization_account_holder_dba'],
   entity_type: ['typeOfEntity1', 'typeofentity1'],
   typeofentity1: ['entity_type', 'typeOfEntity1'],
   typeOfEntity1: ['entity_type', 'typeofentity1'],
@@ -532,7 +545,7 @@ function isSharedMainContractLayoutKey(layoutKey?: string): boolean {
   return isFunderContractLayoutKey(key);
 }
 
-/** P / CA / NY / VA addendums — keep layout width so short values (e.g. SWE) do not shrink into a floating box. */
+/** P / CA / NY / VA / EPA / EPD addendums and Exhibit A — keep layout width so short values (e.g. SWE) do not shrink into a floating box. */
 function isAddendumSitOnBlankLayout(layoutKey?: string): boolean {
   const key = String(layoutKey || '').trim().toLowerCase();
   if (!key) return false;
@@ -542,11 +555,14 @@ function isAddendumSitOnBlankLayout(layoutKey?: string): boolean {
     key === 'addendum_ny' ||
     key === 'addendum_va' ||
     key === 'addendum_epa' ||
+    key === 'addendum_epd' ||
     key.includes('addendum_p') ||
     key.includes('addendum_ca') ||
     key.includes('addendum_ny') ||
     key.includes('addendum_va') ||
-    key.includes('addendum_epa')
+    key.includes('addendum_epa') ||
+    key.includes('addendum_epd') ||
+    key.includes('exhibit_a')
   );
 }
 
@@ -871,6 +887,9 @@ function shouldIncludeEmptyTextPlacement(
   if (placement.type !== 'text') return false;
   if (isSignerEditableTextPlacement(layoutKey, placement)) return true;
   if (isHarborContractFillAtSigningPlacement(layoutKey, placement)) return true;
+  // ACH form pages 1–2: every field is a DocuSign tab even without CRM data (Katan
+  // reference) so missing bank / DBA / fee values can still be filled on the form.
+  if (placement.optional === true && isAchAuthorizationLayout(layoutKey)) return true;
   return includeEmptyLockedOptionalTextPlacement(placement);
 }
 
@@ -879,11 +898,197 @@ const WOODMERE_ACH_OWNER_NAME_VARIABLES = new Set([
   'ach_authorization_account_holder_name',
 ]);
 
-/** Consent / title lines on ACH pages — merchant business name (not owner). */
-const WOODMERE_ACH_CONSENT_BUSINESS_NAME_VARIABLES = new Set([
+/** ACH consent "Name/Title of Account Holder" lines — Owner 1 person name (not business). */
+const ACH_CONSENT_OWNER_NAME_VARIABLES = [
   'ach_authorization_concent_account_holder_name',
   'ach_authorization_concent_account_holder_name_2',
-]);
+] as const;
+
+/** Business / legal names that must never land on ACH person-name lines. */
+function achBusinessLikeNames(values: Record<string, string>): Set<string> {
+  return new Set(
+    [
+      values.client_legal_name,
+      values.security_business_name,
+      values.business_legal_name,
+      values.merchant_legal_name,
+      values.legal_name,
+      values.authorization_client_name,
+      values.doing_business_as,
+      values.authorization_application,
+    ]
+      .map((v) => String(v || '').trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+/** Owner 1 person name; falls back to any owner value when it equals the legal name (sole prop). */
+function resolveAchOwnerPersonName(
+  values: Record<string, string>,
+  businessLike: Set<string>,
+): string {
+  const candidates = [
+    ...PARTY1_NAME_PRIORITY.map((k) => values[k]),
+    values.exhibit_owner_name,
+    values.customer_name,
+    values.client_name_by,
+    values.ach_authorization_account_holder_name,
+  ]
+    .map((v) => String(v || '').trim())
+    .filter(Boolean);
+  return candidates.find((name) => !businessLike.has(name.toLowerCase())) || candidates[0] || '';
+}
+
+/**
+ * ACH authorization name mapping (Katan reference):
+ * - `authorization_client_name` / `_signer_name` → business legal name (via aliases)
+ * - `authorization_client_name_print` → Owner 1 person name
+ * - `ach_authorization_account_holder_name` → stored / voided-check value, else Owner 1
+ * - `ach_authorization_concent_account_holder_name` → Owner 1 person name, never business
+ *
+ * `source` supplies owner / business keys when `target` is scoped to the ACH layout only.
+ */
+function normalizeAchAuthorizationNames(
+  target: Record<string, string>,
+  source: Record<string, string> = target,
+): void {
+  const merged = source === target ? target : { ...source, ...target };
+  const businessLike = achBusinessLikeNames(merged);
+  const owner1 = resolveAchOwnerPersonName(merged, businessLike);
+  if (!owner1) return;
+  const isBusinessLike = (raw: string) => businessLike.has(raw.toLowerCase());
+
+  const printName = String(target.authorization_client_name_print || '').trim();
+  if (!printName || isBusinessLike(printName)) {
+    target.authorization_client_name_print = owner1;
+  }
+  if (!String(target.ach_authorization_account_holder_name || '').trim()) {
+    target.ach_authorization_account_holder_name = owner1;
+  }
+  for (const key of ACH_CONSENT_OWNER_NAME_VARIABLES) {
+    const current = String(target[key] || '').trim();
+    if (!current || isBusinessLike(current)) target[key] = owner1;
+  }
+}
+
+/** Street / city / state / ZIP groups for the ACH Account Holder address, in priority order. */
+const ACH_ACCOUNT_HOLDER_ADDRESS_SOURCES = [
+  [
+    'ach_authorization_account_holder_address',
+    'ach_authorization_account_holder_city',
+    'ach_authorization_account_holder_state',
+    'ach_authorization_account_holder_zip',
+  ],
+  ['business_address', 'business_address_city', 'business_address_state', 'business_address_zip'],
+  [
+    'security_business_address',
+    'security_business_address_city',
+    'security_business_address_state',
+    'security_business_address_zip',
+  ],
+  ['guarantor_address', 'guarantor_address_city', 'guarantor_address_state', 'guarantor_address_zip'],
+  [
+    'business_address_contract',
+    'business_address_contract_city',
+    'business_address_contract_state',
+    'business_address_contract_zip',
+  ],
+] as const;
+
+/**
+ * ACH Account Holder address/city/ST/ZIP: stored ACH (voided check / edit) values when the
+ * street is real, else the business address, else Owner 1 home. Placeholders such as
+ * "USA" are skipped instead of leaving the tab blank.
+ */
+function normalizeAchAccountHolderAddress(
+  target: Record<string, string>,
+  source: Record<string, string> = target,
+): void {
+  const merged = source === target ? target : { ...source, ...target };
+  const read = (key: string) => String(merged[key] || '').trim();
+  const primary = ACH_ACCOUNT_HOLDER_ADDRESS_SOURCES.find((group) =>
+    isUsableDisclosureStreetLine(read(group[0])),
+  );
+  const ordered = primary
+    ? [primary, ...ACH_ACCOUNT_HOLDER_ADDRESS_SOURCES.filter((group) => group !== primary)]
+    : [...ACH_ACCOUNT_HOLDER_ADDRESS_SOURCES];
+  const pick = (index: number, usable: (value: string) => boolean): string => {
+    for (const group of ordered) {
+      const value = read(group[index]);
+      if (usable(value)) return value;
+    }
+    return '';
+  };
+  const resolved = [
+    primary ? read(primary[0]) : '',
+    pick(1, (v) => Boolean(v) && !isAddressPlaceholderToken(v)),
+    pick(2, (v) => Boolean(toUsStateAbbreviation(v))),
+    pick(3, (v) => /^\d{5}(-?\d{4})?$/.test(v)),
+  ];
+  const targetKeys = ACH_ACCOUNT_HOLDER_ADDRESS_SOURCES[0];
+  resolved.forEach((value, index) => {
+    if (value) target[targetKeys[index]] = value;
+  });
+}
+
+function isAchAuthorizationLayout(layoutKey?: string): boolean {
+  const canonical = resolveCanonicalSupplementalLayoutKey(String(layoutKey || ''));
+  return canonical === 'ach_authorization' || canonical === 'ach_authorization_texas';
+}
+
+/** Scoped values for one layout; ACH layouts re-apply the owner-name mapping on the scoped map. */
+function scopeValuesForLayout(
+  layout: DocumentLayout,
+  values: Record<string, string>,
+): Record<string, string> {
+  const scoped = buildScopedValuesForLayout(layout, values);
+  if (isAchAuthorizationLayout(layout.key)) {
+    normalizeAchAuthorizationNames(scoped, values);
+    normalizeAchAccountHolderAddress(scoped, values);
+  }
+  return scoped;
+}
+
+const ACH_PERSON_NAME_FIELD_VARIABLES = [
+  'authorization_client_name_print',
+  ...ACH_CONSENT_OWNER_NAME_VARIABLES,
+  ...ACH_ACCOUNT_HOLDER_ADDRESS_SOURCES[0],
+] as const;
+
+/** Layout variable for an ACH person-name prefill id (`ach_form_*`, camelCase, compact). */
+function achPersonNameVariableForPrefillId(id: string): string | null {
+  let key = normalizeFieldKey(id);
+  for (const prefix of ['ach_form_texas_', 'ach_form_', 'contract_ach_']) {
+    if (key.startsWith(prefix)) {
+      key = key.slice(prefix.length);
+      break;
+    }
+  }
+  const compact = key.replace(/__instance_\d+$/, '').replace(/_/g, '');
+  return (
+    ACH_PERSON_NAME_FIELD_VARIABLES.find((v) => v.replace(/_/g, '') === compact) ?? null
+  );
+}
+
+/**
+ * Draft tab sync writes prefill ids straight onto envelope tabs (no layout build) —
+ * apply the same ACH owner-name mapping so consent / printed name never carry business names.
+ */
+export function normalizeAchAuthorizationPrefillFields<T extends { id: string; value: string }>(
+  fields: T[],
+): T[] {
+  if (!fields.some((f) => achPersonNameVariableForPrefillId(f.id))) return fields;
+  const values = prefillFieldsToValueMap(fields);
+  return fields.map((field) => {
+    const variable = achPersonNameVariableForPrefillId(field.id);
+    if (!variable) return field;
+    const next = String(values[variable] || '').trim();
+    if (!next || next.toLowerCase() === String(field.value || '').trim().toLowerCase()) {
+      return field;
+    }
+    return { ...field, value: next };
+  });
+}
 
 /** Harbor pages with explicit owner-2 signature tabs — do not auto-mirror initials here. */
 const HARBOR_CONTRACT_NO_OWNER2_INITIAL_MIRROR_PAGES = new Set(['18', '19']);
@@ -986,6 +1191,9 @@ function expandPrefillValues(
     const personal = resolvePersonalClientNameValue(out);
     if (personal) out.client_name = personal;
   }
+  // Before alias fill so a stale business name on ACH person lines never propagates.
+  normalizeAchAuthorizationNames(out);
+  normalizeAchAccountHolderAddress(out);
   mirrorIdentityFields(out, PARTY1_SS_KEYS);
   mirrorIdentityFields(out, PARTY1_DL_KEYS);
   if (ownerCount === undefined || ownerCount >= 2) {
@@ -1498,22 +1706,12 @@ function resolveTextPlacementValue(
     if (sharedDirect) return formatIfMoney(sharedDirect);
   }
 
-  if (
-    layoutKey === 'contract' &&
-    (String(placement?.pageNumber || '') === '14' ||
-      String(placement?.pageNumber || '') === '15') &&
-    WOODMERE_ACH_CONSENT_BUSINESS_NAME_VARIABLES.has(key.toLowerCase())
-  ) {
-    const business = String(
-      values.client_legal_name ||
-        values.security_business_name ||
-        values.business_legal_name ||
-        values.authorization_client_name ||
-        values.ach_authorization_concent_account_holder_name ||
-        values.ach_authorization_concent_account_holder_name_2 ||
-        '',
-    ).trim();
-    if (business) return formatIfMoney(business);
+  // ACH consent Name/Title: Owner 1 person name (never business / legal name).
+  if ((ACH_CONSENT_OWNER_NAME_VARIABLES as readonly string[]).includes(key.toLowerCase())) {
+    const normalized = { ...values };
+    normalizeAchAuthorizationNames(normalized);
+    const owner = String(normalized[key.toLowerCase()] || '').trim();
+    if (owner) return formatIfMoney(owner);
   }
 
   if (
@@ -1760,7 +1958,7 @@ export async function renderFlattenedLayoutPdf(
   const boldFont = await embedArialBoldPdfFont(pdfDoc);
   const pages = pdfDoc.getPages();
   const expanded = expandPrefillValues(values, counts.ownerCount);
-  const scopedExpanded = buildScopedValuesForLayout(layout, expanded);
+  const scopedExpanded = scopeValuesForLayout(layout, expanded);
 
   for (const placement of layout.placements) {
     if (placement.type !== 'text' && placement.type !== 'date') continue;
@@ -1925,7 +2123,7 @@ export function buildRecipientTabsByRoleForLayout(
   counts: LayoutPartyCounts,
 ): Map<string, SignerTabBuckets> {
   const signerTabs = new Map<number, SignerTabBuckets>();
-  const scopedValues = buildScopedValuesForLayout(layout, values);
+  const scopedValues = scopeValuesForLayout(layout, values);
 
   const ensureSigner = (signerIndex: number) => {
     if (!signerTabs.has(signerIndex)) {
@@ -2038,7 +2236,7 @@ export function buildEnvelopeFromLayouts(options: BuildEnvelopeFromLayoutOptions
       documents.push({
         documentId: envelopeDocId,
         name:
-          idx === 0 && options.primaryDocumentName
+          idx === (options.primaryLayoutIndex ?? 0) && options.primaryDocumentName
             ? options.primaryDocumentName
             : layout.document.originalFileName || layout.name,
         documentBase64: base64,
@@ -2060,7 +2258,7 @@ export function buildEnvelopeFromLayouts(options: BuildEnvelopeFromLayoutOptions
   for (const layout of expandedLayouts) {
     const envelopeDocId = layoutKeyToEnvelopeDocId.get(layout.key) || '1';
     const pageOffset = pageOffsetByLayoutKey.get(layout.key) ?? 0;
-    const scopedValues = buildScopedValuesForLayout(layout, values);
+    const scopedValues = scopeValuesForLayout(layout, values);
 
     for (const placement of layout.placements) {
       if (!placementAllowed(placement, counts, scopedValues, layout.key)) continue;

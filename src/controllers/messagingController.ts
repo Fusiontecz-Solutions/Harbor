@@ -25,14 +25,36 @@ import {
 } from '../services/messaging/clientRecipients.service';
 import { getDefaultSender, isInfobipConfigured } from '../services/messaging/infobip.service';
 import {
+  isPrivilegedMessagingRole,
   resolveSenderDetailForUser,
-  resolveSenderForUser,
+  resolveSenderForActor,
   visibleSendersForUser,
 } from '../services/messaging/sender.service';
+import { messagingPerformance } from '../services/messaging/performance.service';
 import { normalizePhoneNumber } from '../services/messaging/phone';
+import { analyzeSmsText } from '../services/messaging/smsSegments';
 import { dispatchOutboundMessage } from '../services/messaging/sms.service';
 
 const actorId = (req: Request): string | null => req.user?.id ?? null;
+
+const errorStatus = (err: unknown, fallback: number): number =>
+  Number((err as { statusCode?: number })?.statusCode) || fallback;
+
+/**
+ * The conversation when it is in the caller's inbox scope, else null.
+ * Every by-id route goes through this: scoping the list alone would still
+ * leave another user's thread readable, archivable or deletable by id.
+ */
+async function findVisibleConversation(req: Request, conversationId: string) {
+  const conversation = await prisma.messagingConversation.findUnique({
+    where: { id: conversationId },
+    select: { id: true, businessNumber: true, unreadCount: true },
+  });
+  if (!conversation) return null;
+  const allowed = await visibleSendersForUser(actorId(req), req.user?.role);
+  if (allowed && !allowed.includes(conversation.businessNumber)) return null;
+  return conversation;
+}
 
 class MessagingController {
   /** GET /messaging/conversations?page=&search=&filter= */
@@ -67,19 +89,7 @@ class MessagingController {
   async getMessages(req: Request, res: Response): Promise<void> {
     try {
       const conversationId = String(req.params.id);
-      const conversation = await prisma.messagingConversation.findUnique({
-        where: { id: conversationId },
-        select: { id: true, businessNumber: true },
-      });
-
-      if (!conversation) {
-        res.status(404).json({ success: false, message: 'Conversation not found' });
-        return;
-      }
-
-      // Scoping the list alone would still leave the thread readable by id.
-      const allowed = await visibleSendersForUser(actorId(req), req.user?.role);
-      if (allowed && !allowed.includes(conversation.businessNumber)) {
+      if (!(await findVisibleConversation(req, conversationId))) {
         res.status(404).json({ success: false, message: 'Conversation not found' });
         return;
       }
@@ -111,8 +121,7 @@ class MessagingController {
       }
 
       // The acting user's assigned sender, falling back to INFOBIP_SENDER.
-      const businessNumber =
-        String(req.body?.fromNumber ?? '').trim() || (await resolveSenderForUser(actorId(req)));
+      const businessNumber = await resolveSenderForActor(actorId(req), req.user?.role, req.body?.fromNumber);
       if (!businessNumber) {
         res.status(400).json({ success: false, message: 'No sender configured — set INFOBIP_SENDER' });
         return;
@@ -127,7 +136,7 @@ class MessagingController {
       res.status(201).json({ success: true, data: conversation });
     } catch (err) {
       console.error('[messaging] openConversation failed:', err);
-      res.status(500).json({ success: false, message: (err as Error)?.message || 'Failed to open conversation' });
+      res.status(errorStatus(err, 500)).json({ success: false, message: (err as Error)?.message || 'Failed to open conversation' });
     }
   }
 
@@ -151,6 +160,7 @@ class MessagingController {
         res.status(400).json({ success: false, message: 'Message body is required' });
         return;
       }
+      const sms = analyzeSmsText(body);
 
       const toNumber = normalizePhoneNumber(req.body?.toNumber);
       if (!toNumber) {
@@ -167,16 +177,18 @@ class MessagingController {
       // whatever contact exists at that moment. Done here rather than when the
       // agent picks the client so nothing is written for a chat they abandon.
       const clientId = String(req.body?.clientId ?? '').trim();
-      if (clientId) {
+      if (clientId && isPrivilegedMessagingRole(req.user?.role)) {
         const client = await findClientById(clientId);
         if (client) {
           await upsertContactFromClient(client, toNumber, actorId(req));
         }
       }
 
+      const fromNumber = await resolveSenderForActor(actorId(req), req.user?.role, req.body?.fromNumber);
+
       const result = await dispatchOutboundMessage({
         toNumber,
-        fromNumber: req.body?.fromNumber,
+        fromNumber,
         body,
         mediaUrls,
         sentById: actorId(req),
@@ -192,10 +204,10 @@ class MessagingController {
         return;
       }
 
-      res.status(201).json({ success: true, data: result });
+      res.status(201).json({ success: true, data: { ...result, sms } });
     } catch (err) {
       console.error('[messaging] sendMessage failed:', err);
-      res.status(500).json({ success: false, message: (err as Error)?.message || 'Failed to send message' });
+      res.status(errorStatus(err, 500)).json({ success: false, message: (err as Error)?.message || 'Failed to send message' });
     }
   }
 
@@ -203,6 +215,10 @@ class MessagingController {
   async markRead(req: Request, res: Response): Promise<void> {
     try {
       const conversationId = String(req.params.id);
+      if (!(await findVisibleConversation(req, conversationId))) {
+        res.status(404).json({ success: false, message: 'Conversation not found' });
+        return;
+      }
       await markConversationRead(conversationId);
 
       emitConversationUpdate({ id: conversationId, unreadCount: 0 });
@@ -220,6 +236,10 @@ class MessagingController {
     try {
       const conversationId = String(req.params.id);
       const isArchived = Boolean(req.body?.isArchived ?? true);
+      if (!(await findVisibleConversation(req, conversationId))) {
+        res.status(404).json({ success: false, message: 'Conversation not found' });
+        return;
+      }
 
       const conversation = await prisma.messagingConversation.update({
         where: { id: conversationId },
@@ -250,11 +270,7 @@ class MessagingController {
     try {
       const conversationId = String(req.params.id);
 
-      const existing = await prisma.messagingConversation.findUnique({
-        where: { id: conversationId },
-        select: { id: true, unreadCount: true },
-      });
-
+      const existing = await findVisibleConversation(req, conversationId);
       if (!existing) {
         res.status(404).json({ success: false, message: 'Conversation not found' });
         return;
@@ -276,6 +292,31 @@ class MessagingController {
     }
   }
 
+  /**
+   * GET /messaging/stats/performance?from=&to=
+   *
+   * Per-user messaging performance for the range. Admin-only: it reports on
+   * other people's activity, not the caller's own.
+   */
+  async performance(req: Request, res: Response): Promise<void> {
+    try {
+      if (!isPrivilegedMessagingRole(req.user?.role)) {
+        res.status(403).json({ success: false, message: 'Forbidden: admins only' });
+        return;
+      }
+
+      const data = await messagingPerformance({
+        from: req.query.from ? String(req.query.from) : undefined,
+        to: req.query.to ? String(req.query.to) : undefined,
+      });
+
+      res.json({ success: true, data });
+    } catch (err) {
+      console.error('[messaging] performance failed:', err);
+      res.status(400).json({ success: false, message: (err as Error)?.message || 'Failed to load performance' });
+    }
+  }
+
   /** GET /messaging/unread-count */
   async getUnreadCount(_req: Request, res: Response): Promise<void> {
     try {
@@ -290,11 +331,14 @@ class MessagingController {
   /** GET /messaging/config — what the FE needs to render the composer. */
   async getConfig(_req: Request, res: Response): Promise<void> {
     const sender = await resolveSenderDetailForUser(actorId(_req));
+    const { getPrepaidState } = await import('../services/tenantControl/prepaid');
+    const prepaid = await getPrepaidState();
     res.json({
       success: true,
       data: {
         provider: 'infobip',
         configured: isInfobipConfigured(),
+        prepaid,
         // What THIS user will send as, not the global env value.
         defaultSender: sender.phoneNumber || getDefaultSender() || null,
         /** Label of the assigned sender, null when falling back to the env default. */

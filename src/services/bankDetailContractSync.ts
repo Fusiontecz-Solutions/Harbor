@@ -36,7 +36,112 @@ function patchContractPrefillOverridesBankFields(
   for (const key of PREFILL_BANK_OVERRIDE_KEYS) {
     base[key] = next[key];
   }
-  return decryptEncryptedStringsInJson(base) as Record<string, unknown>;
+  return decryptEncryptedStringsInJson(
+    patchDocumentTemplatePrefillAchBank(base, bank),
+  ) as Record<string, unknown>;
+}
+
+const DOCUMENT_TEMPLATE_PREFILL_BY_MAPPING_ID_KEY = 'documentTemplatePrefillByMappingId';
+
+function normalizeAchMappingTabKey(key: string): string {
+  return String(key || '')
+    .toLowerCase()
+    .replace(/^ach_form_texas_/, '')
+    .replace(/^ach_form_/, '')
+    .replace(/__instance_\d+$/i, '')
+    .replace(/__p\d+_[a-z0-9]+$/i, '')
+    .replace(/__page\d+$/i, '');
+}
+
+function setAchMappingBankField(
+  fields: Record<string, string>,
+  canonicalTab: string,
+  value: string,
+): void {
+  if (!value) return;
+  const target = normalizeAchMappingTabKey(canonicalTab);
+  let matched = false;
+  for (const key of Object.keys(fields)) {
+    if (normalizeAchMappingTabKey(key) === target) {
+      matched = true;
+      fields[key] = value;
+    }
+  }
+  if (!matched) {
+    fields[canonicalTab] = value;
+  }
+}
+
+function mappingLooksLikeAch(fields: Record<string, unknown>, mappingId: string): boolean {
+  const id = String(mappingId || '').toLowerCase();
+  // Token match (`ach-template-*`, `*_ach_*`) — bare includes('ach') hits "attachment" / random ids.
+  if (id.includes('ach_authorization') || /(^|[_-])ach([_-]|$)/.test(id)) return true;
+  return Object.keys(fields).some((key) => {
+    const k = key.toLowerCase();
+    return (
+      k.includes('authorization_client') ||
+      k.includes('ach_authorization') ||
+      k.includes('authorized_business_phone')
+    );
+  });
+}
+
+/** ACH edit-modal values live per mapping id — keep their bank tabs on the latest BankDetail. */
+function patchDocumentTemplatePrefillAchBank(
+  overrides: Record<string, unknown>,
+  bank: PlainBankFields,
+): Record<string, unknown> {
+  const rawBlob = overrides[DOCUMENT_TEMPLATE_PREFILL_BY_MAPPING_ID_KEY];
+  if (rawBlob == null || typeof rawBlob !== 'object' || Array.isArray(rawBlob)) {
+    return overrides;
+  }
+  const blob = { ...(rawBlob as Record<string, unknown>) };
+  let blobChanged = false;
+  for (const [mappingId, rawFields] of Object.entries(blob)) {
+    if (rawFields == null || typeof rawFields !== 'object' || Array.isArray(rawFields)) {
+      continue;
+    }
+    const stringFields: Record<string, string> = {};
+    for (const [k, v] of Object.entries(rawFields as Record<string, unknown>)) {
+      stringFields[k] = String(v ?? '');
+    }
+    if (!mappingLooksLikeAch(stringFields, mappingId)) continue;
+
+    setAchMappingBankField(stringFields, 'authorization_client_bank_name', bank.bankName);
+    setAchMappingBankField(
+      stringFields,
+      'authorization_client_bank_routing',
+      bank.routingNumber || '',
+    );
+    setAchMappingBankField(
+      stringFields,
+      'authorization_client_bank_account',
+      bank.accountNumber,
+    );
+    setAchMappingBankField(
+      stringFields,
+      'ach_authorization_account_holder_bank_name',
+      bank.bankName,
+    );
+    setAchMappingBankField(
+      stringFields,
+      'ach_authorization_account_holder_bank_routing_number',
+      bank.routingNumber || '',
+    );
+    setAchMappingBankField(
+      stringFields,
+      'ach_authorization_account_holder_bank_account_number',
+      bank.accountNumber,
+    );
+
+    blob[mappingId] = stringFields;
+    blobChanged = true;
+  }
+  if (!blobChanged) return overrides;
+  return {
+    ...overrides,
+    [DOCUMENT_TEMPLATE_PREFILL_BY_MAPPING_ID_KEY]: blob,
+  };
 }
 
 /**

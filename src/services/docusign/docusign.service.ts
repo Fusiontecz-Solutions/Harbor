@@ -73,6 +73,7 @@ import {
   getDocusignJwtSessionForProfile,
 } from './utils/docusign-profile-jwt';
 import { getFunderWithDocuSignCredentials, resolveFunderProfile, isPersistedFunderProfileId } from '../funderProfileService';
+import { fetchCloudinaryAssetBuffer } from '../cloudinaryAssetDownload';
 import { resolveMainContractLayoutKeyForSend } from './utils/resolve-main-contract-layout';
 import {
   extractCrmApplicationIdFromWebhook,
@@ -87,6 +88,7 @@ import {
   resolveDocusignWebhookEnvelopeStatus,
 } from './utils/docusign-webhook';
 import { decryptField, isEncrypted } from '../../utils/fieldEncryption';
+import { normalizeAchAuthorizationPrefillFields } from './utils/build-envelope-from-layout';
 import {
   buildPlatformLayoutEnvelopeDefinition,
   filterSupplementalRefs,
@@ -1083,7 +1085,7 @@ export class DocusignService {
 
   /** Decrypt CRM `enc:v1:` values and drop empty fields before sending to DocuSign. */
   private sanitizePrefillFieldsForDocuSign(prefillFields?: PrefillField[]): PrefillField[] {
-    return (prefillFields || [])
+    const sanitized = (prefillFields || [])
       .map((f) => {
         const id = String(f?.id ?? '').trim();
         let value = String(f?.value ?? '').trim();
@@ -1100,6 +1102,11 @@ export class DocusignService {
         return { id, value: value.toUpperCase() };
       })
       .filter((f): f is PrefillField => f != null);
+    // ACH consent / printed name: Owner 1 person, never business legal name.
+    return normalizeAchAuthorizationPrefillFields(sanitized).map((f) => ({
+      ...f,
+      value: f.value.toUpperCase(),
+    }));
   }
 
   /**
@@ -4009,6 +4016,8 @@ export class DocusignService {
     userId: string,
     options: {
       supplementalRefs?: string[];
+      /** Resolved refs (subset of supplementalRefs) placed before the main contract. */
+      leadingSupplementalRefs?: string[];
       standaloneDocumentRefs?: string[];
       includeMainContract?: boolean;
       mainContractLayoutKey?: string;
@@ -4105,6 +4114,7 @@ export class DocusignService {
 
       built = await buildPlatformLayoutEnvelopeDefinition({
         supplementalRefs,
+        leadingSupplementalRefs: options.leadingSupplementalRefs,
         standaloneDocumentRefs: standaloneRefs,
         includeMainContract: options.includeMainContract,
         mainContractLayoutKey: layoutKeyForSend,
@@ -4262,6 +4272,11 @@ export class DocusignService {
       templates?: Array<{ templateId: string }>;
       templateIds?: string[];
       supplementalDocumentRefs?: string[];
+      /**
+       * Refs from `supplementalDocumentRefs` placed before the main contract (state disclosure
+       * when "Place state disclosure first" is on). Envelope: leading → contract → addenda.
+       */
+      leadingSupplementalDocumentRefs?: string[];
       /** ACH / other standalone docs — envelope contains only these PDFs (no main contract). */
       standaloneDocumentRefs?: string[];
       contractTemplateFilters?: {
@@ -4330,8 +4345,17 @@ export class DocusignService {
       }
     }
 
+    let leadingSupplementalRefs: string[] = [];
+    if (options.leadingSupplementalDocumentRefs?.length && supplementalRefs.length) {
+      const resolvedLeading = await filterSupplementalRefs(
+        options.leadingSupplementalDocumentRefs.map((id) => String(id).trim()).filter(Boolean),
+      );
+      leadingSupplementalRefs = resolvedLeading.filter((ref) => supplementalRefs.includes(ref));
+    }
+
     return this.sendEnvelopeFromPlatformLayouts(userId, {
       supplementalRefs,
+      leadingSupplementalRefs,
       standaloneDocumentRefs: standaloneRefs,
       includeMainContract: options.includeMainContract,
       mainContractLayoutKey: options.mainContractLayoutKey,
@@ -5218,6 +5242,12 @@ export class DocusignService {
     }
 
     let crmPdfUrl = await this.findCrmTemplatePdfUrl(resolvedRef);
+    // Resolution trace for template lookups (ids / keys only — no document contents).
+    console.log(
+      `[DocuSign] template resolve: requested="${rawRef}" resolved="${resolvedRef}" ` +
+        `funderProfileId="${funderProfileId || '-'}" funder="${funderName || '-'}" ` +
+        `state="${state || '-'}" found=${Boolean(crmPdfUrl)}`,
+    );
     // Funder uses the platform template (no own PDF for this document) — fall back
     // to the original layout key so the preview still resolves the platform PDF.
     if (!crmPdfUrl && resolvedRef !== rawRef) {
@@ -5227,13 +5257,25 @@ export class DocusignService {
       }
     }
     if (crmPdfUrl) {
-      const res = await fetch(crmPdfUrl);
-      if (!res.ok) {
+      // Cloudinary blocks anonymous PDF delivery (401) on this account, so a bare
+      // fetch fails even though the upload is valid. `fetchCloudinaryAssetBuffer`
+      // falls back to a signed / private download — it is the same helper the send
+      // path already uses in merge-template-resolve, so preview and send agree.
+      let buf: Buffer;
+      try {
+        buf = await fetchCloudinaryAssetBuffer(crmPdfUrl);
+      } catch (err: any) {
         throw new BadRequestException(
-          `Failed to download CRM template PDF (${res.status}) for "${resolvedRef}"`,
+          `Failed to download CRM template PDF for "${resolvedRef}": ${
+            err?.message || 'unknown error'
+          }`,
         );
       }
-      const buf = Buffer.from(await res.arrayBuffer());
+      if (!buf?.length) {
+        throw new BadRequestException(
+          `CRM template PDF for "${resolvedRef}" is empty.`,
+        );
+      }
       const stampKey = [resolvedRef, rawRef].find((k) =>
         String(k || '').toLowerCase().includes('case_takeover'),
       );
@@ -5318,8 +5360,14 @@ export class DocusignService {
     const looksLikeDocusignUuid =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(resolvedRef);
     if (!looksLikeDocusignUuid) {
+      const isAch = /ach_authorization/i.test(rawRef);
+      const funderLabel = String(options?.funderName || '').trim();
       throw new BadRequestException(
-        `No CRM PDF found for template "${resolvedRef}". Upload the funder contract PDF or set BoldSignTemplate.pdfUrl.`,
+        isAch
+          ? `No ACH form is configured${funderLabel ? ` for ${funderLabel}` : ''}. ` +
+            `Upload an ACH Authorization PDF in Settings → Funders → ${funderLabel || 'this funder'} → ACH Form, ` +
+            `or point the funder at another funder's ACH form using "Same as another funder".`
+          : `No CRM PDF found for template "${resolvedRef}". Upload the funder contract PDF or set BoldSignTemplate.pdfUrl.`,
       );
     }
 
@@ -5366,7 +5414,6 @@ export class DocusignService {
 
     const {
       resolveFunderSupplementalStorageType,
-      funderSupplementalLayoutKeyForDocument,
       FUNDER_SUPPLEMENTAL_LAYOUT_TYPES,
     } = await import('../../utils/funderContractLayout');
     const supplementalType = resolveFunderSupplementalStorageType(rawRef);
@@ -5380,38 +5427,20 @@ export class DocusignService {
       const { resolveDocumentsLayoutFunderId } = await import(
         '../../utils/funderDocumentSource'
       );
+      // `platform` source → null → keep the platform layout key. The source field
+      // (not the funder's brand name) decides this: a funder named "Harbor View
+      // Capital" with documentsSource `own` and its own uploaded ACH PDF must use
+      // that upload, which an earlier name-based Woodmere short-circuit prevented.
       const layoutFunderId = resolveDocumentsLayoutFunderId(profile);
-      // Platform-document funders (or Woodmere) keep the platform layout key —
-      // Woodmere ACH lives on layoutKey `ach_authorization`, not funder_<id>_….
       if (!layoutFunderId) return rawRef;
-      const nameTokens = [
-        profile.name,
-        (profile as { displayName?: string | null }).displayName,
-        (profile as { organization?: string | null }).organization,
-        (profile as { legalName?: string | null }).legalName,
-      ]
-        .map((v) =>
-          String(v || '')
-            .trim()
-            .toLowerCase()
-            .replace(/\s+/g, ' '),
-        )
-        .filter(Boolean);
-      const isWoodmere = nameTokens.some(
-        (t) =>
-          t === 'woodmere' ||
-          t === 'woodmere financial' ||
-          t === 'harbor view' ||
-          t === 'harbor view capital' ||
-          (t.includes('harbor view') && !t.includes('texas')) ||
-          (t.includes('woodmere') && !t.includes('texas')),
-      );
-      if (isWoodmere) return rawRef;
 
-      const scoped = funderSupplementalLayoutKeyForDocument(layoutFunderId, rawRef);
+      const scoped = await this.findFunderSupplementalTemplateRef(
+        layoutFunderId,
+        supplementalType,
+        rawRef,
+      );
       // Only switch to the funder-scoped key when that PDF actually exists.
-      const scopedPdf = await this.findCrmTemplatePdfUrlExact(scoped);
-      return scopedPdf ? scoped : rawRef;
+      return scoped ?? rawRef;
     }
 
     const { resolveMainContractLayoutKeyForSend } = await import(
@@ -5423,6 +5452,54 @@ export class DocusignService {
       funderName: nameForResolve || undefined,
       state,
     });
+  }
+
+  /**
+   * Funder-scoped supplemental template ref (ACH / addendum), or null when the
+   * funder has no own upload for this document.
+   *
+   * Mirrors `loadSupplementalLayoutPackage` (the send path) so the preview and the
+   * sent envelope always resolve to the same PDF. Uploads land under two different
+   * key shapes depending on which Settings uploader was used:
+   *   - dedicated supplemental upload → `funder_<id>_<type>`
+   *   - named addendum upload         → `funder_<id>_addendum_<slug>`
+   * so an exact-key probe alone misses the latter; the typed query below catches it.
+   */
+  private async findFunderSupplementalTemplateRef(
+    layoutFunderId: string,
+    supplementalType: string,
+    rawRef: string,
+  ): Promise<string | null> {
+    const { funderSupplementalLayoutKeyForDocument, funderNamedAddendumLayoutKey } =
+      await import('../../utils/funderContractLayout');
+
+    const candidates = [
+      funderSupplementalLayoutKeyForDocument(layoutFunderId, rawRef),
+      funderNamedAddendumLayoutKey(layoutFunderId, supplementalType),
+    ].filter(Boolean);
+
+    for (const key of candidates) {
+      const pdf = await this.findCrmTemplatePdfUrlExact(key);
+      if (pdf) return key;
+    }
+
+    // Fall back to a typed lookup scoped to this funder's keys — same query the
+    // send path uses, so legacy / differently-slugged uploads still resolve.
+    const typedRow = await prisma.boldSignTemplate.findFirst({
+      where: {
+        type: supplementalType,
+        OR: [
+          { layoutKey: { startsWith: `funder_${layoutFunderId}_` } },
+          { templateId: { startsWith: `funder_${layoutFunderId}_` } },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { layoutKey: true, templateId: true, pdfUrl: true },
+    });
+    const url = String(typedRow?.pdfUrl || '').trim();
+    if (!url || url.startsWith('platform://') || !/^https?:\/\//i.test(url)) return null;
+    const ref = String(typedRow?.layoutKey || typedRow?.templateId || '').trim();
+    return ref || null;
   }
 
   /** Exact BoldSignTemplate.pdfUrl match (no platform-layout aliasing). */
@@ -5466,6 +5543,17 @@ export class DocusignService {
     );
     if (isDocumentLayoutKey(ref)) {
       return findBoldSignTemplatePdfUrlForLayout(ref);
+    }
+
+    // Standalone ACH aliases onto the shared `ach_authorization` storage type, which
+    // is how platform ACH rows are keyed. Without this, `ach_authorization_standalone`
+    // never matched anything despite this method's contract.
+    const { resolveFunderSupplementalStorageType } = await import(
+      '../../utils/funderContractLayout'
+    );
+    const storageType = resolveFunderSupplementalStorageType(ref);
+    if (storageType && storageType !== ref) {
+      return this.findCrmTemplatePdfUrlExact(storageType);
     }
     return null;
   }
@@ -5561,6 +5649,38 @@ export class DocusignService {
       authHints,
     );
     const { client, accountId } = await this.getAuthContextForEnvelope(userId, eid, authHints);
+    const url = await this.createSenderViewUrl(client, accountId, eid, returnUrl);
+    return { url };
+  }
+
+  /**
+   * Fresh sender-view URL for an envelope whose recipients/CC are already in sync.
+   *
+   * Backs `GET /docusign/open-sender-view/:token`. DocuSign sender-view codes are
+   * single use, so the redirect mints a new one on every navigation — that must stay
+   * cheap, hence no `syncEnvelopeCcEmails` round trip here (the handoff token is only
+   * issued right after a path that already synced).
+   */
+  async openSenderViewUrl(
+    userId: string,
+    envelopeId: string,
+    returnUrl: string,
+    hints?: {
+      applicationId?: string;
+      contractId?: number;
+      funderName?: string | null;
+      funderProfileId?: string | null;
+      contractState?: string | null;
+    },
+  ) {
+    const eid = String(envelopeId || '').trim();
+    const { client, accountId } = await this.getAuthContextForEnvelope(userId, eid, {
+      applicationId: hints?.applicationId,
+      contractId: hints?.contractId,
+      funderName: hints?.funderName,
+      funderProfileId: hints?.funderProfileId,
+      contractState: hints?.contractState,
+    });
     const url = await this.createSenderViewUrl(client, accountId, eid, returnUrl);
     return { url };
   }

@@ -19,6 +19,8 @@ import { isClearCapitalFunderName } from './utils/clear-capital-contract-layout'
  *   pay up to=REFI balance, agreement to=label name, print name/title=merchant/OWNER
  * - Addendum CA / NY / VA: agreement dated=today, merchant blank=business name,
  *   CA APR %=APR, print name/title=merchant/OWNER (repeat on later pages)
+ * - EPD: contract dated=today, tier 1–4 "paid within" / "discount rate"=typed
+ *   per deal in the prefill editor, print name=merchant, date=today
  */
 
 export type AddendumDocumentTabParty = 'primary' | 'secondary';
@@ -342,22 +344,124 @@ const ADDENDUM_EPA_CLEAR_CAPITAL: AddendumDocumentFieldConfig = {
   ...ADDENDUM_EPA_HARBOR_VIEW,
 };
 
+/** Early-prepay tiers printed on the EPD addendum ("If paid in full within ___ … rate of ___"). */
+export const ADDENDUM_EPD_TIER_COUNT = 4;
+
+/**
+ * EPD Pre-Payment Addendum — measured from `EPD- ADDENDUM- Harbor.pdf`
+ * (letter 612×792). Unlike EPA, the funder ("HARBOR VIEW CAPITAL") and
+ * "Title: OWNER" are printed, and the four tier rows are blank. Every blank is
+ * a FreeText annotation (Arial). y follows the Addendum P calibration:
+ * inline blanks = underscore baseline − 6.5, signature-row blanks = baseline − 9.5.
+ *
+ * - Contract dated blank: x 291–361, baseline 168.6
+ * - Tier rows (baselines 253.5 / 279.4 / 304.2 / 330.4): "within" blank
+ *   x 180–280, "discounted rate of" blank x 494–534
+ * - By: line x 91–326 @ 430 · Name: blank x 107–347 · Date: blank x 100–220
+ */
+const ADDENDUM_EPD_TIER_ROW_Y = [247, 273, 298, 324] as const;
+
+const ADDENDUM_EPD_HARBOR_VIEW: AddendumDocumentFieldConfig = {
+  documentId: '1',
+  pageNumber: '1',
+  textTabs: [
+    lockedInlineText('agreement_dated', 292, 162, { width: 68 }),
+    // Tiers are optional — deals often list fewer than four.
+    ...ADDENDUM_EPD_TIER_ROW_Y.flatMap((y, i) => [
+      lockedInlineText(`tier_${i + 1}_paid_within`, 181, y, { width: 98, optional: true }),
+      lockedInlineText(`tier_${i + 1}_discount_rate`, 494, y, { width: 40, optional: true }),
+    ]),
+    lockedText('print_name', 108, 448, { width: 238 }),
+    lockedText('signature_date', 101, 505, { width: 118 }),
+  ],
+  dateTabs: [],
+  signHere: [signHereTab(91, 410)],
+};
+
+const ADDENDUM_EPD_CLEAR_CAPITAL: AddendumDocumentFieldConfig = {
+  ...ADDENDUM_EPD_HARBOR_VIEW,
+};
+
+/** Company rows available on Exhibit A — matches CRM `exhibit_a_value_1` … `_10`. */
+export const EXHIBIT_A_COMPANY_ROW_COUNT = 10;
+
+/**
+ * Exhibit A — Blanket Security Interest additional parties. Measured from
+ * `Exhibit_A_Word-1.pdf` (A4 595×842, top-left origin).
+ *
+ * The list area is blank space between the intro line (bottom y=83) and the
+ * UCC-1 paragraph (top y=661), left margin x=84. Company rows are stacked from
+ * y=104 at a 30px pitch (last row y=374) in three columns — legal name,
+ * entity type, EIN — and every tab is optional because most deals list fewer
+ * than ten entities.
+ *
+ * Signature area: only the Sign tab on the By: line (x 314–497, y 764).
+ * "Title: Owner" is printed on the PDF.
+ */
+const EXHIBIT_A_COMPANY_ROW_TOP_Y = 104;
+const EXHIBIT_A_COMPANY_ROW_PITCH_Y = 30;
+
+/** Column x / width for each company row. */
+const EXHIBIT_A_COMPANY_COLUMNS = [
+  { tabPrefix: 'company_name', x: 84, width: 250 },
+  { tabPrefix: 'company_entity_type', x: 340, width: 80 },
+  { tabPrefix: 'company_ein', x: 425, width: 110 },
+] as const;
+
+const exhibitAText = (
+  tabLabel: string,
+  x: number,
+  y: number,
+  width: number,
+): AddendumDocumentFieldConfig['textTabs'][number] => ({
+  tabLabel,
+  x: String(x),
+  y: String(y),
+  width: String(width),
+  height: '14',
+  optional: true,
+  lockedForSigner: true,
+});
+
+const EXHIBIT_A: AddendumDocumentFieldConfig = {
+  documentId: '1',
+  pageNumber: '1',
+  textTabs: [
+    ...Array.from({ length: EXHIBIT_A_COMPANY_ROW_COUNT }, (_, i) =>
+      EXHIBIT_A_COMPANY_COLUMNS.map((col) =>
+        exhibitAText(
+          `${col.tabPrefix}_${i + 1}`,
+          col.x,
+          EXHIBIT_A_COMPANY_ROW_TOP_Y + i * EXHIBIT_A_COMPANY_ROW_PITCH_Y,
+          col.width,
+        ),
+      ),
+    ).flat(),
+  ],
+  dateTabs: [],
+  signHere: [signHereTab(318, 745)],
+};
+
 export const ADDENDUM_DOCUMENT_CONFIG: Record<string, AddendumDocumentFieldConfig> = {
   addendum_p: ADDENDUM_P_HARBOR_VIEW,
   addendum_ca: ADDENDUM_CA_HARBOR_VIEW,
   addendum_ny: ADDENDUM_NY_HARBOR_VIEW,
   addendum_va: ADDENDUM_VA_HARBOR_VIEW,
   addendum_epa: ADDENDUM_EPA_HARBOR_VIEW,
+  addendum_epd: ADDENDUM_EPD_HARBOR_VIEW,
   addendum_p_harbor_view: ADDENDUM_P_HARBOR_VIEW,
   addendum_ny_harbor_view: ADDENDUM_NY_HARBOR_VIEW,
   addendum_ca_harbor_view: ADDENDUM_CA_HARBOR_VIEW,
   addendum_va_harbor_view: ADDENDUM_VA_HARBOR_VIEW,
   addendum_epa_harbor_view: ADDENDUM_EPA_HARBOR_VIEW,
+  addendum_epd_harbor_view: ADDENDUM_EPD_HARBOR_VIEW,
   addendum_p_clear_capital: ADDENDUM_P_CLEAR_CAPITAL,
   addendum_ny_clear_capital: ADDENDUM_NY_CLEAR_CAPITAL,
   addendum_ca_clear_capital: ADDENDUM_CA_CLEAR_CAPITAL,
   addendum_va_clear_capital: ADDENDUM_VA_CLEAR_CAPITAL,
   addendum_epa_clear_capital: ADDENDUM_EPA_CLEAR_CAPITAL,
+  addendum_epd_clear_capital: ADDENDUM_EPD_CLEAR_CAPITAL,
+  exhibit_a: EXHIBIT_A,
   // Legacy guarantor multi-entity form (kept for BoldSign / older paths).
   guarantorAddendum: {
     documentId: '1',
@@ -409,6 +513,8 @@ export const ADDENDUM_LAYOUT_DISPLAY_NAMES: Record<string, string> = {
   addendum_ny: 'Addendum NY',
   addendum_va: 'Addendum VA',
   addendum_epa: 'EPA Addendum',
+  addendum_epd: 'EPD Addendum',
+  exhibit_a: 'Exhibit A',
 };
 
 const ADDENDUM_CANONICAL_KEYS = [
@@ -417,6 +523,8 @@ const ADDENDUM_CANONICAL_KEYS = [
   'addendum_ny',
   'addendum_va',
   'addendum_epa',
+  'addendum_epd',
+  'exhibit_a',
 ] as const;
 export type CanonicalAddendumLayoutKey = (typeof ADDENDUM_CANONICAL_KEYS)[number];
 
@@ -459,7 +567,7 @@ export function resolveAddendumPdfVariant(hints?: {
   return 'harbor_view';
 }
 
-/** Map funder / variant keys (`funder_<id>_addendum_ca`, `addendum_ca_clear_capital`) to P/CA/NY/VA. */
+/** Map funder / variant keys (`funder_<id>_addendum_ca`, `addendum_ca_clear_capital`) to P/CA/NY/VA/EPA/EPD. */
 export function canonicalAddendumLayoutKey(
   layoutKeyOrType?: string | null,
 ): CanonicalAddendumLayoutKey | null {
@@ -468,6 +576,20 @@ export function canonicalAddendumLayoutKey(
     .toLowerCase();
   if (!raw) return null;
 
+  // Named funder upload stores `funder_<id>_addendum_exhibit_a` (type `exhibit_a`).
+  // Check first so the `addendum_` prefix never falls into the P/CA/NY/VA matchers.
+  if (raw === 'exhibit_a' || raw.includes('exhibit_a')) {
+    return 'exhibit_a';
+  }
+  if (
+    raw === 'addendum_epd' ||
+    raw === 'addendum_epd_harbor_view' ||
+    raw === 'addendum_epd_clear_capital' ||
+    raw.endsWith('_addendum_epd') ||
+    raw.includes('addendum_epd_')
+  ) {
+    return 'addendum_epd';
+  }
   if (
     raw === 'addendum_epa' ||
     raw === 'addendum_epa_harbor_view' ||
@@ -534,6 +656,9 @@ function configForKeyAndVariant(
   key: string,
   variant: AddendumPdfVariant,
 ): AddendumDocumentFieldConfig | null {
+  if (key === 'addendum_epd' || key === 'addendum_epd_harbor_view' || key === 'addendum_epd_clear_capital') {
+    return variant === 'clear_capital' ? ADDENDUM_EPD_CLEAR_CAPITAL : ADDENDUM_EPD_HARBOR_VIEW;
+  }
   if (key === 'addendum_epa' || key === 'addendum_epa_harbor_view' || key === 'addendum_epa_clear_capital') {
     return variant === 'clear_capital' ? ADDENDUM_EPA_CLEAR_CAPITAL : ADDENDUM_EPA_HARBOR_VIEW;
   }

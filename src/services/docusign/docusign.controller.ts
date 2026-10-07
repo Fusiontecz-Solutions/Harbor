@@ -1,6 +1,11 @@
 import type { Request, Response } from 'express';
 import { DocusignService } from './docusign.service';
 import { formatDocusignRouteError } from './utils/docusign-client';
+import {
+  buildSenderViewHandoffUrl,
+  createSenderViewHandoffToken,
+  verifySenderViewHandoffToken,
+} from './utils/sender-view-handoff';
 
 const docusignService = new DocusignService();
 
@@ -17,6 +22,51 @@ function sendDocusignRouteError(
     message: message || fallbackMessage,
     ...(retryAfterSeconds != null ? { retryAfterSeconds } : {}),
   });
+}
+
+/**
+ * A DocuSign sender-view URL can only be opened once: the first GET burns the code
+ * and every later GET 400s, which DocuSign renders as "An error has occurred"
+ * (`/error?cause=initialization&widget_path=/send/authentication`). A tab reload, a
+ * duplicated `window.open`, a link prefetch or an extension touching the URL first is
+ * enough to break the tab the user is actually looking at.
+ *
+ * So `url` / `sendUrl` are rewritten to point at our own redirect, which mints a fresh
+ * DocuSign URL on every navigation — callers keep opening the same field they always
+ * did and become reload-safe. The raw single-use DocuSign URL stays available as
+ * `docusignUrl` for callers that genuinely need it.
+ */
+function withSenderViewHandoff<T extends Record<string, unknown>>(
+  req: Request,
+  result: T,
+  claims: {
+    userId: string;
+    envelopeId?: string | null;
+    returnUrl: string;
+    applicationId?: string;
+    contractId?: number;
+    funderName?: string;
+    funderProfileId?: string;
+    contractState?: string;
+  },
+): T & { openUrl?: string; docusignUrl?: string } {
+  const envelopeId = String(claims.envelopeId || '').trim();
+  if (!envelopeId) return result;
+
+  const rawUrl = String(result.url || result.sendUrl || '').trim();
+  if (!rawUrl) return result;
+
+  const token = createSenderViewHandoffToken({ ...claims, envelopeId });
+  if (!token) return result;
+
+  const openUrl = buildSenderViewHandoffUrl(req, token);
+  return {
+    ...result,
+    ...(result.url ? { url: openUrl } : {}),
+    ...(result.sendUrl ? { sendUrl: openUrl } : {}),
+    openUrl,
+    docusignUrl: rawUrl,
+  };
 }
 
 export const getDocusignAuthStatus = async (_req: Request, res: Response) => {
@@ -451,6 +501,7 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
       templateIds,
       supplementalLayoutKeys,
       supplementalDocumentRefs,
+      leadingSupplementalDocumentRefs,
       standaloneDocumentRefs,
       contractTemplateFilters,
       roles,
@@ -482,6 +533,9 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
       templateIds,
       supplementalLayoutKeys,
       supplementalDocumentRefs,
+      leadingSupplementalDocumentRefs: Array.isArray(leadingSupplementalDocumentRefs)
+        ? leadingSupplementalDocumentRefs.map((ref: unknown) => String(ref))
+        : undefined,
       standaloneDocumentRefs,
       contractTemplateFilters,
       roles,
@@ -519,7 +573,26 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
           : undefined,
     });
 
-    return res.json(result);
+    // Draft sender view: hand out the reload-safe redirect instead of the raw single-use
+    // DocuSign URL, minted lazily when the tab actually navigates.
+    const contractIdNum = Number(contractId);
+    return res.json(
+      withSenderViewHandoff(req, result as unknown as Record<string, unknown>, {
+        userId,
+        envelopeId: String((result as { envelopeId?: string })?.envelopeId || ''),
+        returnUrl: typeof redirectUrl === 'string' ? redirectUrl : '',
+        applicationId: applicationId ? String(applicationId) : undefined,
+        contractId:
+          Number.isFinite(contractIdNum) && contractIdNum > 0 ? contractIdNum : undefined,
+        funderName: typeof funderName === 'string' ? funderName.trim() : undefined,
+        funderProfileId:
+          typeof funderProfileId === 'string' && funderProfileId.trim()
+            ? funderProfileId.trim()
+            : undefined,
+        contractState:
+          typeof contractState === 'string' ? contractState.trim() : undefined,
+      }),
+    );
   } catch (error: any) {
     const { status, message } = formatDocusignRouteError(error);
     return res.status(status).json({
@@ -612,11 +685,63 @@ export const getSenderView = async (req: Request, res: Response) => {
       funderName: typeof funderName === 'string' ? funderName.trim() : undefined,
       contractState: typeof contractState === 'string' ? contractState.trim() : undefined,
     });
-    return res.json(result);
+    return res.json(
+      withSenderViewHandoff(req, result as unknown as Record<string, unknown>, {
+        userId,
+        envelopeId: String(envelopeId),
+        returnUrl: String(returnUrl),
+        applicationId: applicationId ? String(applicationId) : undefined,
+        contractId:
+          Number.isFinite(contractIdNum) && contractIdNum > 0 ? contractIdNum : undefined,
+        funderName: typeof funderName === 'string' ? funderName.trim() : undefined,
+        contractState:
+          typeof contractState === 'string' ? contractState.trim() : undefined,
+      }),
+    );
   } catch (error: unknown) {
     const { message } = formatDocusignRouteError(error);
     console.error('[DocuSign] sender-view failed:', message);
     return sendDocusignRouteError(res, error, 'Failed to create sender view');
+  }
+};
+
+/**
+ * Top-level navigation target for the CRM's "open in DocuSign" tab.
+ *
+ * Mints a brand new single-use DocuSign sender-view URL per request and 302s to it,
+ * so reloading the tab, opening the link twice or a prefetch can never land the user
+ * on DocuSign's consumed-code error page. The signed token is the credential here —
+ * a navigation cannot carry the CRM Authorization header.
+ */
+export const openSenderView = async (req: Request, res: Response) => {
+  const claims = verifySenderViewHandoffToken(String(req.params.token || ''));
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+  if (!claims) {
+    return res
+      .status(410)
+      .send(
+        'This DocuSign link has expired. Reopen the document from the CRM to get a new one.',
+      );
+  }
+  try {
+    const { url } = await docusignService.openSenderViewUrl(
+      claims.userId,
+      claims.envelopeId,
+      claims.returnUrl,
+      {
+        applicationId: claims.applicationId,
+        contractId: claims.contractId,
+        funderName: claims.funderName,
+        funderProfileId: claims.funderProfileId,
+        contractState: claims.contractState,
+      },
+    );
+    return res.redirect(302, url);
+  } catch (error: unknown) {
+    const { message } = formatDocusignRouteError(error);
+    console.error('[DocuSign] open-sender-view failed:', message);
+    return sendDocusignRouteError(res, error, 'Failed to open DocuSign sender view');
   }
 };
 

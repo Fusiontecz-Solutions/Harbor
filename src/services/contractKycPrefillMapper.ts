@@ -130,25 +130,22 @@ export function mapDriverLicenseKeyDataToPrefill(
     set('guarantySsDriverLicense', dlNumber);
   }
 
+  // Owner home address — ACH account-holder address comes from the voided check / business.
   if (street) {
     set('guarantorAddress', street);
     set('businessAddressContract', street);
-    set('achAuthorizationAccountHolderAddress', street);
   }
   if (city) {
     set('guarantorAddressCity', city);
     set('businessAddressContractCity', city);
-    set('achAuthorizationAccountHolderCity', city);
   }
   if (state) {
     set('guarantorAddressState', state);
     set('businessAddressContractState', state);
-    set('achAuthorizationAccountHolderState', state);
   }
   if (zip) {
     set('guarantorAddressZip', zip);
     set('businessAddressContractZip', zip);
-    set('achAuthorizationAccountHolderZip', zip);
   }
 
   return {
@@ -184,9 +181,8 @@ export function mapVoidedCheckKeyDataToPrefill(
     str(keyData.account_holder_name) ||
     str(keyData.member_name) ||
     str(keyData.payee_name);
-  const { legalName, dba } = parseLegalNameAndDba(
-    str(keyData.legal_business_name) || accountHolder,
-  );
+  const legalBusinessRaw = str(keyData.legal_business_name);
+  const { legalName, dba } = parseLegalNameAndDba(legalBusinessRaw || accountHolder);
   const dbaName = str(keyData.dba_name) || dba;
   const bankName = str(keyData.bank_name);
   const routing = routingDigits(
@@ -208,13 +204,16 @@ export function mapVoidedCheckKeyDataToPrefill(
     if (str(val)) contractPrefill[key] = val;
   };
 
-  if (legalName) {
-    set('legalName', legalName);
-    set('authorizationClientName', legalName);
-    set('authorizationClientNamePrint', legalName);
-    set('achAuthorizationAccountHolderName', legalName);
-    set('achAuthorizationConcentAccountHolderName', legalName);
-    set('securityBusinessName', legalName);
+  // Business fields only when the check prints a legal business name — never the payee person.
+  // Printed name / consent Name-Title stay Owner 1 (DocuSign build maps them from owner).
+  const businessName = legalBusinessRaw ? legalName : '';
+  if (businessName) {
+    set('legalName', businessName);
+    set('authorizationApplication', businessName);
+    set('securityBusinessName', businessName);
+  }
+  if (accountHolder) {
+    set('achAuthorizationAccountHolderName', accountHolder);
   }
   if (dbaName) {
     set('doingBusinessAs', dbaName);
@@ -247,13 +246,11 @@ export function mapVoidedCheckKeyDataToPrefill(
     set('businessAddressState', state);
     set('securityBusinessAddressState', state);
     set('achAuthorizationAccountHolderState', state);
-    set('achAuthorizationAccountHolderBankState', state);
   }
   if (zip) {
     set('businessAddressZip', zip);
     set('securityBusinessAddressZip', zip);
     set('achAuthorizationAccountHolderZip', zip);
-    set('achAuthorizationAccountHolderBankZip', zip);
   }
 
   const bankCity = str(keyData.bank_city);
@@ -270,7 +267,7 @@ export function mapVoidedCheckKeyDataToPrefill(
     panels: {
       ach: {
         bankName,
-        fullNameOnAccount: legalName || accountHolder,
+        fullNameOnAccount: accountHolder,
         accountNumber: account,
         routingNumber: routing,
         dba: dbaName,

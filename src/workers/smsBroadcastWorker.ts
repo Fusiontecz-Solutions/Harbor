@@ -78,6 +78,7 @@ async function processChunk(data: SmsBroadcastJobData): Promise<void> {
       mediaUrls: true,
       status: true,
       throttlePerSecond: true,
+      createdById: true,
     },
   });
 
@@ -131,6 +132,10 @@ async function processChunk(data: SmsBroadcastJobData): Promise<void> {
       body,
       mediaUrls: broadcast.mediaUrls,
       broadcastId: broadcast.id,
+      // Attribute campaign messages to whoever created the campaign, so
+      // per-user stats count them. Without this every broadcast message is
+      // sent by nobody.
+      sentById: broadcast.createdById ?? null,
       bulkId: broadcast.campaignKey,
       broadcastThrottlePerSecond: broadcast.throttlePerSecond,
       rateLimitWaitMs: 60_000,

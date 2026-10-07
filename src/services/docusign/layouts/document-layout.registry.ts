@@ -9,32 +9,53 @@ import { buildAddendumDocumentLayout } from '../utils/addendum-document-layout';
  * A static `import` is frozen until Node restarts, so JSON edits were ignored
  * until nodemon recycled — and existing DocuSign envelopes never update.
  */
-function loadContractLayoutFromDisk(): DocumentLayout {
+function readLayoutFromDisk(fileName: string): DocumentLayout | null {
   const srcPath = path.join(
     process.cwd(),
     'src',
     'services',
     'docusign',
     'layouts',
-    'contract.layout.json',
+    fileName,
   );
-  const nextToModule = path.join(__dirname, 'contract.layout.json');
+  const nextToModule = path.join(__dirname, fileName);
   const filePath = fs.existsSync(srcPath) ? srcPath : nextToModule;
   try {
-    const raw = fs.readFileSync(filePath, 'utf8');
-    const layout = JSON.parse(raw) as DocumentLayout;
-    const p12 = (layout.placements || []).find(
-      (p) => p.id === 'p12' || p.variable === 'purchase_percent',
+    return JSON.parse(fs.readFileSync(filePath, 'utf8')) as DocumentLayout;
+  } catch {
+    return null;
+  }
+}
+
+function loadContractLayoutFromDisk(): DocumentLayout {
+  const layout = readLayoutFromDisk('contract.layout.json');
+  if (!layout) return contractLayoutFallback as DocumentLayout;
+  const p12 = (layout.placements || []).find(
+    (p) => p.id === 'p12' || p.variable === 'purchase_percent',
+  );
+  if (p12) {
+    console.log(
+      `[DocuSign] contract.layout.json ${p12.variable || p12.id} x=${p12.x} y=${p12.y}`,
     );
-    if (p12) {
-      console.log(
-        `[DocuSign] contract.layout.json ${p12.variable || p12.id} x=${p12.x} y=${p12.y} from ${filePath}`,
-      );
+  }
+  return layout;
+}
+
+/**
+ * ACH authorization coordinates live in JSON next to contract.layout.json and are
+ * read per lookup for the same reason: a static import freezes until Node restarts.
+ * `ach_authorization` is the variant merged into a contract package;
+ * `ach_authorization_standalone` is the same placements plus
+ * `skipOwner2InitialMirror`, used when the ACH form is sent on its own.
+ */
+function loadAchLayoutFromDisk(fileName: string, key: DocumentLayoutKey) {
+  return (): DocumentLayout => {
+    const layout = readLayoutFromDisk(fileName);
+    if (!layout) {
+      throw new Error(`Missing ACH layout file for key: ${key} (${fileName})`);
     }
     return layout;
-  } catch {
-    return contractLayoutFallback as DocumentLayout;
-  }
+  };
 }
 
 /** Document type keys used with BoldSignTemplate.type and merge order. */
@@ -45,6 +66,10 @@ export const DOCUMENT_LAYOUT_KEYS = {
   addendum_ny: 'addendum_ny',
   addendum_va: 'addendum_va',
   addendum_epa: 'addendum_epa',
+  addendum_epd: 'addendum_epd',
+  exhibit_a: 'exhibit_a',
+  ach_authorization: 'ach_authorization',
+  ach_authorization_standalone: 'ach_authorization_standalone',
 } as const;
 
 export type DocumentLayoutKey =
@@ -58,6 +83,10 @@ export const BOLD_SIGN_TYPE_TO_LAYOUT_KEY: Record<string, DocumentLayoutKey> = {
   addendum_ny: DOCUMENT_LAYOUT_KEYS.addendum_ny,
   addendum_va: DOCUMENT_LAYOUT_KEYS.addendum_va,
   addendum_epa: DOCUMENT_LAYOUT_KEYS.addendum_epa,
+  addendum_epd: DOCUMENT_LAYOUT_KEYS.addendum_epd,
+  exhibit_a: DOCUMENT_LAYOUT_KEYS.exhibit_a,
+  ach_authorization: DOCUMENT_LAYOUT_KEYS.ach_authorization,
+  ach_authorization_standalone: DOCUMENT_LAYOUT_KEYS.ach_authorization_standalone,
 };
 
 function requireAddendumLayout(key: DocumentLayoutKey): DocumentLayout {
@@ -80,6 +109,18 @@ const REGISTRY: Record<DocumentLayoutKey, () => DocumentLayout> = {
     requireAddendumLayout(DOCUMENT_LAYOUT_KEYS.addendum_va),
   [DOCUMENT_LAYOUT_KEYS.addendum_epa]: () =>
     requireAddendumLayout(DOCUMENT_LAYOUT_KEYS.addendum_epa),
+  [DOCUMENT_LAYOUT_KEYS.addendum_epd]: () =>
+    requireAddendumLayout(DOCUMENT_LAYOUT_KEYS.addendum_epd),
+  [DOCUMENT_LAYOUT_KEYS.exhibit_a]: () =>
+    requireAddendumLayout(DOCUMENT_LAYOUT_KEYS.exhibit_a),
+  [DOCUMENT_LAYOUT_KEYS.ach_authorization]: loadAchLayoutFromDisk(
+    'ach_authorization.layout.json',
+    DOCUMENT_LAYOUT_KEYS.ach_authorization,
+  ),
+  [DOCUMENT_LAYOUT_KEYS.ach_authorization_standalone]: loadAchLayoutFromDisk(
+    'ach_authorization_standalone.layout.json',
+    DOCUMENT_LAYOUT_KEYS.ach_authorization_standalone,
+  ),
 };
 
 export function getDocumentLayout(key: DocumentLayoutKey): DocumentLayout {

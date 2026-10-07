@@ -8,6 +8,13 @@ export const FUNDER_SUPPLEMENTAL_LAYOUT_TYPES = [
   'addendum_ny',
   'addendum_va',
   'addendum_epa',
+  'addendum_epd',
+  // ACH forms are funder-scoped supplemental uploads too — stored as
+  // `funder_<id>_ach_authorization` by upsertFunderSupplementalBoldSignTemplate.
+  // Omitting them made resolveTemplateRefForFunder fall through to the main
+  // contract resolver, so the ACH preview served the funder's contract PDF.
+  'ach_authorization',
+  'ach_authorization_texas',
 ] as const;
 
 export type FunderSupplementalLayoutType = string;

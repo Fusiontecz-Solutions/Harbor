@@ -44,6 +44,16 @@ export interface CreateBroadcastInput {
   throttlePerSecond?: number | null;
   scheduledAt?: Date | null;
   createdById?: string | null;
+  /** The lead upload this audience came from, recorded for the campaign list. */
+  leadBatchId?: string | null;
+  /** The campaign this one chases. */
+  parentBroadcastId?: string | null;
+  /**
+   * Park the campaign in PENDING_APPROVAL instead of releasing it. Set for
+   * agent-created broadcasts: they build against their own leads, a Super
+   * Admin decides whether it sends.
+   */
+  requiresApproval?: boolean;
 }
 
 /** Recipients inserted per statement. Large enough to be fast, small enough to not blow the parameter limit. */
@@ -123,13 +133,19 @@ export async function createBroadcast(input: CreateBroadcastInput): Promise<{
       body,
       fromNumber,
       mediaUrls: input.mediaUrls ?? [],
-      status: input.scheduledAt ? 'QUEUED' : 'DRAFT',
+      /**
+       * QUEUED is what the scheduler picks up, so it means "released to send".
+       * An unapproved campaign must never reach it, however it was scheduled.
+       */
+      status: input.requiresApproval ? 'PENDING_APPROVAL' : input.scheduledAt ? 'QUEUED' : 'DRAFT',
       totalRecipients: uniqueNumbers.length,
       queuedCount: uniqueNumbers.length - suppressed.size,
       suppressedCount: suppressed.size,
       throttlePerSecond: input.throttlePerSecond ?? null,
       scheduledAt: input.scheduledAt ?? null,
       createdById: input.createdById ?? null,
+      leadBatchId: input.leadBatchId ?? null,
+      parentBroadcastId: input.parentBroadcastId ?? null,
     },
     select: { id: true, campaignKey: true },
   });
@@ -194,6 +210,11 @@ export async function startBroadcast(broadcastId: string): Promise<{ chunks: num
   if (!broadcast) throw new Error('Broadcast not found');
   if (broadcast.status === 'RUNNING') throw new Error('Broadcast is already running');
   if (broadcast.status === 'COMPLETED') throw new Error('Broadcast has already completed');
+  // The last line of defence: approval is also checked in the controller, but
+  // the scheduler and any future caller come through here.
+  if (broadcast.status === 'PENDING_APPROVAL') {
+    throw new Error('Broadcast is waiting for approval and cannot be started');
+  }
 
   const pending = await prisma.smsBroadcastRecipient.findMany({
     where: { broadcastId, status: 'QUEUED' },

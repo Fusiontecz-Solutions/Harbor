@@ -27,6 +27,9 @@
  */
 import axios, { AxiosError, type AxiosInstance } from 'axios';
 import { toInfobipDestination, toInfobipSender } from './phone';
+import { getSendingState, SENDING_DISABLED_CODE } from '../tenantControl/state';
+import { isOverQuota, LIMIT_REACHED_CODE, recordQuotaUse } from '../tenantControl/quota';
+import { assertPrepaidBalance, deductPrepaidAfterSend, PrepaidExhaustedError } from '../tenantControl/prepaid';
 
 export type NormalizedStatus =
   | 'QUEUED'
@@ -210,12 +213,46 @@ function classifyHttpFailure(status: number, body: unknown): InfobipRequestError
  * the DLR handler can find the row without a secondary lookup table.
  */
 export async function sendSms(input: SendSmsInput): Promise<SendSmsResult> {
+  const sending = await getSendingState();
+  if (!sending.enabled) {
+    throw new InfobipRequestError(
+      sending.reason
+        ? `SMS sending is paused by the platform administrator: ${sending.reason}`
+        : 'SMS sending is paused by the platform administrator.',
+      423,
+      SENDING_DISABLED_CODE,
+      false,
+    );
+  }
+  if (await isOverQuota()) {
+    throw new InfobipRequestError(
+      'The message limit set by the platform administrator has been reached.',
+      429,
+      LIMIT_REACHED_CODE,
+      false,
+    );
+  }
+  try {
+    await assertPrepaidBalance(null);
+  } catch (err) {
+    if (err instanceof PrepaidExhaustedError) {
+      throw new InfobipRequestError(err.message, 429, LIMIT_REACHED_CODE, false);
+    }
+    throw err;
+  }
+
   const from = toInfobipSender(input.from?.trim() || getDefaultSender());
   if (!from) throw new InfobipNotConfiguredError(['INFOBIP_SENDER']);
 
-  if (input.mediaUrls && input.mediaUrls.length > 0) {
-    return sendMms({ ...input, from });
+  const result = input.mediaUrls && input.mediaUrls.length > 0 ? await sendMms({ ...input, from }) : await sendText(input, from);
+  if (result.status !== 'FAILED') {
+    recordQuotaUse(result.segmentCount);
+    await deductPrepaidAfterSend(result.segmentCount);
   }
+  return result;
+}
+
+async function sendText(input: SendSmsInput, from: string): Promise<SendSmsResult> {
 
   const payload: Record<string, unknown> = {
     messages: [
@@ -481,6 +518,38 @@ export async function createOutboundCall(input: {
 
   const body = response.data as { id?: string; state?: string };
   return { providerCallId: body?.id ?? null, status: String(body?.state ?? 'ringing').toLowerCase() };
+}
+
+export interface AccountBalance {
+  amount: number;
+  currency: string;
+  monthlyLimit: number | null;
+  monthlyBalance: number | null;
+}
+
+/**
+ * Account balance for the configured API key. Needs the
+ * `account-management:manage` scope; a key without it gets a 403.
+ */
+export async function getAccountBalance(): Promise<AccountBalance> {
+  const response = await client().get('/account/1/total-balance');
+  if (response.status < 200 || response.status >= 300) {
+    throw classifyHttpFailure(response.status, response.data);
+  }
+  const body = response.data as {
+    balance?: number;
+    monthlyLimit?: number | null;
+    monthlyBalance?: number | null;
+    currency?: string | { code?: string };
+  };
+  if (typeof body?.balance !== 'number') throw new Error('Infobip returned no balance');
+  const currency = typeof body.currency === 'string' ? body.currency : body.currency?.code;
+  return {
+    amount: body.balance,
+    currency: currency || 'USD',
+    monthlyLimit: typeof body.monthlyLimit === 'number' ? body.monthlyLimit : null,
+    monthlyBalance: typeof body.monthlyBalance === 'number' ? body.monthlyBalance : null,
+  };
 }
 
 /** Network-level failures never reach classifyHttpFailure — normalize them here. */

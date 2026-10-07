@@ -60,21 +60,7 @@ export interface DispatchInput {
   rateLimitWaitMs?: number;
 }
 
-/**
- * Substitute `{{token}}` merge fields.
- *
- * Unknown tokens collapse to an empty string rather than being left in the
- * body — shipping a literal "Hi {{firstName}}," to a merchant is worse than
- * shipping "Hi ,".
- */
-export function renderTemplate(body: string, mergeData?: Record<string, unknown> | null): string {
-  if (!mergeData) return body.replace(/\{\{\s*[\w.]+\s*\}\}/g, '');
-
-  return body.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, token: string) => {
-    const value = mergeData[token];
-    return value === null || value === undefined ? '' : String(value);
-  });
-}
+export { renderTemplate } from './mergeTemplate';
 
 export async function dispatchOutboundMessage(input: DispatchInput): Promise<DispatchResult> {
   const toNumber = normalizePhoneNumber(input.toNumber);
