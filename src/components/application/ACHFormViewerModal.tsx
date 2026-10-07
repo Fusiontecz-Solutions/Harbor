@@ -1872,6 +1872,13 @@ export default function ACHFormViewerModal({
         try {
             docuSignTab = window.open("about:blank", "_blank");
             if (docuSignTab) {
+                // Sever the opener link: DocuSign's sending console treats a tab with a live
+                // `window.opener` as an embedded popup and never finishes loading.
+                try {
+                    docuSignTab.opener = null;
+                } catch {
+                    /* ignore */
+                }
                 try {
                     writeDocuSignLoadingTab(docuSignTab.document);
                 } catch {

@@ -41,6 +41,7 @@ import { getTermsOffers } from "@/redux/actions/termsOfferActions";
 import { getBankDetails } from "@/redux/actions/bankDetailActions";
 import { clearBankDetails } from "@/redux/slices/bankDetailSlice";
 import { resolveOfferDecisionFundedAmount } from "@/lib/offerDecisionFees";
+import { resolveApplicationDealId } from "@/lib/paymentDealApplicationId";
 import { cn, formatCurrency } from "@/lib/utils";
 import { Download, FileText, Mail, RotateCcw, Send } from "lucide-react";
 import type { TermsOffer } from "@/types/termsOfferTypes";
@@ -504,6 +505,8 @@ function buildDefaultValues(
     merchantName.split(/\s+/).filter(Boolean)[0] ||
     merchantName;
   const goodThroughDate = addDaysUsShortDate(7, d);
+  // Prefixed deal ID (e.g. HB166) as shown in the deals list; numeric id fallback.
+  const displayDealId = resolveApplicationDealId(application) || dealLabel;
 
   return {
     merchant_name: merchantName,
@@ -516,7 +519,7 @@ function buildDefaultValues(
     daily_payment: totalRepay ? formatCurrency(Math.round(totalRepay / 120)) : "",
     term_months: "",
     owner_ssn_last4: "",
-    deal_id: dealLabel,
+    deal_id: displayDealId,
     as_of_date: today,
     original_funded: loan ? formatCurrency(loan) : "",
     total_repayment: totalRepay ? formatCurrency(totalRepay) : "",
@@ -530,7 +533,7 @@ function buildDefaultValues(
     default_date: today,
     outstanding_balance: payoff ? formatCurrency(payoff) : "",
     __recipient_email: email,
-    customer_id: dealLabel,
+    customer_id: displayDealId,
     beneficiary_name: DEFAULT_PAYOFF_WIRE_DETAILS.beneficiary_name,
     bank_name: DEFAULT_PAYOFF_WIRE_DETAILS.bank_name,
     bank_address_line1: DEFAULT_PAYOFF_WIRE_DETAILS.bank_address_line1,

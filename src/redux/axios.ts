@@ -63,8 +63,44 @@ axiosInstance.interceptors.request.use(
     (error: AxiosError) => Promise.reject(error)
   );
 
+/**
+ * The backend builds DocuSign handoff links (`…/docusign/open-sender-view/<token>`) from the
+ * request's Host + path. Behind a reverse proxy that strips a path prefix (e.g. `/backend`)
+ * that link loses the prefix and lands on the SPA instead of the API. Re-anchor every such
+ * link onto the API base URL this client actually talks to.
+ */
+const SENDER_VIEW_HANDOFF_RE = /^https?:\/\/[^\s]*?\/docusign\/open-sender-view\/([^/?#\s]+)/i;
+
+function resolvedApiBaseUrl(): string {
+    const base = API_BASE_URL.replace(/\/+$/, '');
+    if (/^https?:\/\//i.test(base)) return base;
+    return typeof window !== 'undefined' ? `${window.location.origin}${base.startsWith('/') ? '' : '/'}${base}` : base;
+}
+
+function rewriteSenderViewHandoffUrls(value: unknown, depth = 0): unknown {
+    if (typeof value === 'string') {
+        const match = SENDER_VIEW_HANDOFF_RE.exec(value);
+        return match ? `${resolvedApiBaseUrl()}/docusign/open-sender-view/${match[1]}` : value;
+    }
+    if (depth > 4 || !value || typeof value !== 'object') return value;
+    if (Array.isArray(value)) {
+        value.forEach((item, i) => {
+            value[i] = rewriteSenderViewHandoffUrls(item, depth + 1);
+        });
+        return value;
+    }
+    const record = value as Record<string, unknown>;
+    for (const key of Object.keys(record)) {
+        record[key] = rewriteSenderViewHandoffUrls(record[key], depth + 1);
+    }
+    return record;
+}
+
 axiosInstance.interceptors.response.use(
     (response: AxiosResponse) => {
+        if ((response.config?.url ?? '').includes('docusign') && response.data) {
+            response.data = rewriteSenderViewHandoffUrls(response.data);
+        }
         return response;
     },
     (error: AxiosError) => {
