@@ -294,6 +294,7 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
                                         text={body}
                                         recipientCount={step >= 2 ? audienceCount : null}
                                         onTextChange={setBody}
+                                        showCampaignCreditHint
                                     />
                                 </div>
 
