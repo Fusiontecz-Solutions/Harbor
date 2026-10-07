@@ -21,6 +21,8 @@ model User {
   docusignRefreshToken       String?
   docusignTokenExpiry        DateTime?
   googleRefreshToken         String?
+  /// Number this user sends from. Null falls back to INFOBIP_SENDER.
+  messagingSenderId          String?                       @db.Uuid
   accessTokens               AccessToken[]
   underwriterApprovedApps    Application[]                 @relation("ApplicationApprovedByUnderwriter")
   underwriterAssignedApps    Application[]                 @relation("ApplicationAssignedUnderwriter")
@@ -39,29 +41,27 @@ model User {
   complianceChecks           ComplianceCheck[]
   createdContracts           Contract[]                    @relation("ContractCreatedBy")
   contractTemplates          ContractTemplate[]
+  messagingCalls             MessagingCall[]               @relation("MessagingCallUser")
+  messagingDispositions      MessagingContact[]            @relation("MessagingContactDispositionBy")
+  messagingContacts          MessagingContact[]            @relation("MessagingContactOwner")
+  messagingConversations     MessagingConversation[]       @relation("MessagingConversationOwner")
+  messagingDncChecks         MessagingDncCheck[]           @relation("MessagingDncCheckedBy")
+  messagingLeadBatches       MessagingLeadBatch[]          @relation("MessagingLeadBatchCreatedBy")
+  messagingMessagesSent      MessagingMessage[]            @relation("MessagingMessageSentBy")
+  messagingSuppressions      MessagingSuppression[]        @relation("MessagingSuppressionCreatedBy")
+  messagingTemplates         MessagingTemplate[]           @relation("MessagingTemplateCreatedBy")
   months                     Month[]
   notes                      Note[]
   notificationsSent          Notification[]                @relation("NotificationCreatedBy")
   notificationsTo            Notification[]                @relation("NotificationRecipient")
   offerDecisions             OfferDecision[]
   positions                  Position[]
+  smsBroadcastsApproved      SmsBroadcast[]                @relation("SmsBroadcastApprovedBy")
+  smsBroadcasts              SmsBroadcast[]                @relation("SmsBroadcastCreatedBy")
   termsOffers                TermsOffer[]
+  messagingSender            MessagingSender?              @relation("UserMessagingSender", fields: [messagingSenderId], references: [id])
   verificationTokens         VerificationToken[]
   outbound_communications    outbound_communications[]
-  /// Number this user sends from. Null falls back to INFOBIP_SENDER.
-  messagingSenderId          String?                       @db.Uuid
-  messagingSender            MessagingSender?              @relation("UserMessagingSender", fields: [messagingSenderId], references: [id], onDelete: SetNull)
-  messagingContacts          MessagingContact[]            @relation("MessagingContactOwner")
-  messagingConversations     MessagingConversation[]       @relation("MessagingConversationOwner")
-  messagingMessagesSent      MessagingMessage[]            @relation("MessagingMessageSentBy")
-  smsBroadcasts              SmsBroadcast[]                @relation("SmsBroadcastCreatedBy")
-  smsBroadcastsApproved      SmsBroadcast[]                @relation("SmsBroadcastApprovedBy")
-  messagingLeadBatches       MessagingLeadBatch[]          @relation("MessagingLeadBatchCreatedBy")
-  messagingDispositions      MessagingContact[]            @relation("MessagingContactDispositionBy")
-  messagingSuppressions      MessagingSuppression[]        @relation("MessagingSuppressionCreatedBy")
-  messagingDncChecks         MessagingDncCheck[]           @relation("MessagingDncCheckedBy")
-  messagingTemplates         MessagingTemplate[]           @relation("MessagingTemplateCreatedBy")
-  messagingCalls             MessagingCall[]               @relation("MessagingCallUser")
 }
 
 model AccessToken {
@@ -92,8 +92,8 @@ model VerificationToken {
 }
 
 model Client {
-  id                         String           @id @default(uuid()) @db.Uuid
-  clientId                   Int              @unique @default(autoincrement())
+  id                         String             @id @default(uuid()) @db.Uuid
+  clientId                   Int                @unique @default(autoincrement())
   businessName               String
   businessEmail              String?
   businessNumber             String?
@@ -124,18 +124,18 @@ model Client {
   ownerCity                  String?
   ownerState                 String?
   ownerZipCode               String?
-  status                     String           @default("Pending")
+  status                     String             @default("Pending")
   notes                      String?
-  createdById                String?          @db.Uuid
-  assignedToId               String?          @db.Uuid
-  createdAt                  DateTime         @default(now())
-  updatedAt                  DateTime         @updatedAt
+  createdById                String?            @db.Uuid
+  assignedToId               String?            @db.Uuid
+  createdAt                  DateTime           @default(now())
+  updatedAt                  DateTime           @updatedAt
   driverLicense              String?
   achs                       ACH[]
   addendums                  Addendum[]
   applications               Application[]
-  assignedTo                 User?            @relation("ClientAssignedTo", fields: [assignedToId], references: [id])
-  createdBy                  User?            @relation("ClientCreatedBy", fields: [createdById], references: [id])
+  assignedTo                 User?              @relation("ClientAssignedTo", fields: [assignedToId], references: [id])
+  createdBy                  User?              @relation("ClientCreatedBy", fields: [createdById], references: [id])
   ClientBankInfo             ClientBankInfo[]
   owners                     ClientOwner[]
   contracts                  Contract[]
@@ -532,32 +532,32 @@ model Position {
 }
 
 model TermsOffer {
-  id                  String               @id @default(uuid()) @db.Uuid
-  termsOfferId        Int                  @unique @default(autoincrement())
-  approvedAmount      Float
-  factorRate          Float
-  paybackAmount       Float
-  numberOfPayments    Int
-  offerExpiryDate     DateTime
-  termLength          Int
-  commissionPercent   Float
-  paymentAmount       Float
-  percentOfGross      Float
-  frequency           String
-  buyRate             Float
-  commissionAmount    Float
-  position            String
-  paymentSchedule     String
-  paymentDays         String[]             @default([])
-  applicationId       String               @db.Uuid
-  createdById         String?              @db.Uuid
-  createdAt           DateTime             @default(now())
-  updatedAt           DateTime             @updatedAt
-  contractId          Int?
-  docuSignEnvelopes   DocuSignEnvelope[]
-  application         Application          @relation(fields: [applicationId], references: [id])
-  contracts           Contract?            @relation(fields: [contractId], references: [id])
-  createdBy           User?                @relation(fields: [createdById], references: [id])
+  id                String             @id @default(uuid()) @db.Uuid
+  termsOfferId      Int                @unique @default(autoincrement())
+  approvedAmount    Float
+  factorRate        Float
+  paybackAmount     Float
+  numberOfPayments  Int
+  offerExpiryDate   DateTime
+  termLength        Int
+  commissionPercent Float
+  paymentAmount     Float
+  percentOfGross    Float
+  frequency         String
+  buyRate           Float
+  commissionAmount  Float
+  position          String
+  paymentSchedule   String
+  paymentDays       String[]           @default([])
+  applicationId     String             @db.Uuid
+  createdById       String?            @db.Uuid
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  contractId        Int?
+  docuSignEnvelopes DocuSignEnvelope[]
+  application       Application        @relation(fields: [applicationId], references: [id])
+  contracts         Contract?          @relation(fields: [contractId], references: [id])
+  createdBy         User?              @relation(fields: [createdById], references: [id])
 
   @@index([applicationId])
   @@index([createdById])
@@ -705,23 +705,23 @@ model ACH {
 }
 
 model Iso {
-  id                   String       @id @default(uuid()) @db.Uuid
+  id                   String        @id @default(uuid()) @db.Uuid
   name                 String
   email                String?
   phone                String?
   bankAccountNo        String
   routingNumber        String
-  createdAt            DateTime     @default(now())
-  updatedAt            DateTime     @updatedAt
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
   commissionPercentage Float
   /// Uploaded ISO portal documents: [{ id, url, originalName?, publicId?, uploadedAt, category? }]
-  documents            Json         @default("[]")
+  documents            Json          @default("[]")
   /// When the ISO accepted the portal agreement (persisted; replaces localStorage-only flow).
   agreementAcceptedAt  DateTime?
   /// Lifecycle status: active | inactive | suspended
-  status               String       @default("active") @db.VarChar(16)
+  status               String        @default("active") @db.VarChar(16)
   /// Assigned commission tier (see IsoTier). Null = legacy/flat commissionPercentage.
-  tierId               String?      @db.Uuid
+  tierId               String?       @db.Uuid
   applications         Application[]
 }
 
@@ -743,9 +743,3 @@ enum RequestStatus {
   RECEIVED
   VERIFIED
 }
-
-
-
-
-
-

@@ -5669,6 +5669,7 @@ export class DocusignService {
       applicationId?: string;
       contractId?: number;
       funderName?: string | null;
+      funderProfileId?: string | null;
       contractState?: string | null;
     },
   ) {
@@ -5677,6 +5678,7 @@ export class DocusignService {
       applicationId: hints?.applicationId,
       contractId: hints?.contractId,
       funderName: hints?.funderName,
+      funderProfileId: hints?.funderProfileId,
       contractState: hints?.contractState,
     });
     const url = await this.createSenderViewUrl(client, accountId, eid, returnUrl);

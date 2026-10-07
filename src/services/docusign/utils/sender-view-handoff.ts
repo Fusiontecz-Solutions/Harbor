@@ -37,6 +37,7 @@ export type SenderViewHandoffClaims = {
   applicationId?: string;
   contractId?: number;
   funderName?: string;
+  funderProfileId?: string;
   contractState?: string;
 };
 
@@ -70,6 +71,9 @@ export function createSenderViewHandoffToken(
       ? { contractId: Number(claims.contractId) }
       : {}),
     ...(claims.funderName ? { funderName: String(claims.funderName).trim() } : {}),
+    ...(claims.funderProfileId
+      ? { funderProfileId: String(claims.funderProfileId).trim() }
+      : {}),
     ...(claims.contractState ? { contractState: String(claims.contractState).trim() } : {}),
   };
 
@@ -94,6 +98,7 @@ export function verifySenderViewHandoffToken(
       applicationId: decoded.applicationId,
       contractId: decoded.contractId,
       funderName: decoded.funderName,
+      funderProfileId: decoded.funderProfileId,
       contractState: decoded.contractState,
     };
   } catch {
@@ -103,7 +108,20 @@ export function verifySenderViewHandoffToken(
 
 /** Absolute link the browser can navigate to, derived from the request that asked for it. */
 export function buildSenderViewHandoffUrl(req: Request, token: string): string {
-  const path = `${req.baseUrl.replace(/\/+$/, '')}${SENDER_VIEW_HANDOFF_PATH}/${token}`;
+  /**
+   * Behind a reverse proxy that strips a path prefix (e.g. `/backend`), Host + baseUrl
+   * points at the frontend instead of the API. `PUBLIC_API_BASE_URL` (e.g.
+   * `https://harbor.fusiontecz.com/backend/api/v1`) or `X-Forwarded-Prefix` restores it.
+   */
+  const publicApiBase = String(process.env.PUBLIC_API_BASE_URL || '').trim().replace(/\/+$/, '');
+  if (publicApiBase) {
+    return `${publicApiBase}/docusign${SENDER_VIEW_HANDOFF_PATH}/${token}`;
+  }
+  const forwardedPrefix = String(req.headers['x-forwarded-prefix'] || '')
+    .split(',')[0]
+    .trim()
+    .replace(/\/+$/, '');
+  const path = `${forwardedPrefix}${req.baseUrl.replace(/\/+$/, '')}${SENDER_VIEW_HANDOFF_PATH}/${token}`;
   const forwardedProto = String(req.headers['x-forwarded-proto'] || '')
     .split(',')[0]
     .trim();

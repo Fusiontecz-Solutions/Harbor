@@ -104,8 +104,36 @@ function isOurCloudinaryCloud(cloud: string): boolean {
   return Boolean(ours) && ours === cloud;
 }
 
+const FETCH_RETRY_DELAYS_MS = [300, 1000, 2500];
+
+/**
+ * `fetch` that retries network-level failures (undici "fetch failed": ECONNRESET,
+ * connect timeout, DNS blips). HTTP error statuses are returned, not retried.
+ */
+export async function fetchWithRetry(
+  url: string,
+  init?: RequestInit,
+): Promise<Response> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= FETCH_RETRY_DELAYS_MS.length; attempt++) {
+    try {
+      return await fetch(url, init);
+    } catch (error) {
+      lastError = error;
+      const delay = FETCH_RETRY_DELAYS_MS[attempt];
+      if (delay === undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+  const cause = (lastError as { cause?: { code?: string; message?: string } })
+    ?.cause;
+  const detail = cause?.code || cause?.message;
+  const base = lastError instanceof Error ? lastError.message : String(lastError);
+  throw new Error(detail ? `${base} (${detail})` : base);
+}
+
 async function fetchOkBuffer(url: string): Promise<Buffer | null> {
-  const res = await fetch(url, { redirect: 'follow' });
+  const res = await fetchWithRetry(url, { redirect: 'follow' });
   if (!res.ok) return null;
   const buf = Buffer.from(await res.arrayBuffer());
   return buf.length ? buf : null;
@@ -230,13 +258,67 @@ export async function fetchCloudinaryAssetBuffer(rawUrl: string): Promise<Buffer
     throw new Error('Cloudinary URL is required');
   }
 
+  const cached = assetCache.get(url);
+  if (cached) {
+    // Re-insert to mark as most recently used.
+    assetCache.delete(url);
+    assetCache.set(url, cached);
+    return cached;
+  }
+
+  // Preview + send often request the same template PDF concurrently — share one download.
+  const pending = inFlightDownloads.get(url);
+  if (pending) return pending;
+
+  const download = downloadCloudinaryAssetBuffer(url)
+    .then((buf) => {
+      if (isImmutableCloudinaryUrl(url)) cacheAsset(url, buf);
+      return buf;
+    })
+    .finally(() => {
+      inFlightDownloads.delete(url);
+    });
+  inFlightDownloads.set(url, download);
+  return download;
+}
+
+const ASSET_CACHE_MAX_BYTES = 150 * 1024 * 1024;
+const assetCache = new Map<string, Buffer>();
+let assetCacheBytes = 0;
+const inFlightDownloads = new Map<string, Promise<Buffer>>();
+
+/** Versioned delivery URLs (`/v123/`) never change content, so their bytes are safe to cache. */
+function isImmutableCloudinaryUrl(url: string): boolean {
+  return /^https:\/\/res\.cloudinary\.com\/[^/]+\/(image|raw|video)\/[^?#]*\/v\d+\//i.test(
+    url,
+  );
+}
+
+function cacheAsset(url: string, buf: Buffer): void {
+  if (!buf.length || buf.length > ASSET_CACHE_MAX_BYTES) return;
+  const existing = assetCache.get(url);
+  if (existing) {
+    assetCache.delete(url);
+    assetCacheBytes -= existing.length;
+  }
+  assetCache.set(url, buf);
+  assetCacheBytes += buf.length;
+  for (const [key, value] of assetCache) {
+    if (assetCacheBytes <= ASSET_CACHE_MAX_BYTES) break;
+    assetCache.delete(key);
+    assetCacheBytes -= value.length;
+  }
+}
+
+async function downloadCloudinaryAssetBuffer(url: string): Promise<Buffer> {
+
   const publicCandidates = [url];
   const pdfUrl = withPdfExtension(url);
   if (pdfUrl) publicCandidates.push(pdfUrl);
 
   let lastPublicStatus = 0;
   for (const candidate of publicCandidates) {
-    const publicRes = await fetch(candidate, { redirect: 'follow' });
+    const publicRes = await fetchWithRetry(candidate, { redirect: 'follow' });
     if (publicRes.ok) {
       return Buffer.from(await publicRes.arrayBuffer());
     }

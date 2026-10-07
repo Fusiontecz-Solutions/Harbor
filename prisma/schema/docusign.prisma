@@ -87,17 +87,17 @@ model DocuSignAccountProfile {
   integrationKey     String
   clientSecret       String?
   impersonatedUserId String
-  rsaPrivateKey      String          @db.Text
+  rsaPrivateKey      String
   accountId          String?
   baseUri            String?
   defaultRoleName    String          @default("Signer")
-  /// Default contract CC address(es) when a funder is linked to this DocuSign account.
-  defaultCcEmail     String?
   webhookUser        String?
   webhookPassword    String?
   isActive           Boolean         @default(true)
   createdAt          DateTime        @default(now())
   updatedAt          DateTime        @updatedAt
+  /// Default contract CC address(es) when a funder is linked to this DocuSign account.
+  defaultCcEmail     String?
   funders            FunderProfile[]
 
   @@index([name])
@@ -106,36 +106,36 @@ model DocuSignAccountProfile {
 
 /// Funder configuration: contract layout, state rules, linked DocuSign account.
 model FunderProfile {
-  id                       String                  @id @default(uuid()) @db.Uuid
-  name                     String                  @unique
-  displayName              String?
-  dealIdPrefix             String?
-  assignsDealId            Boolean                 @default(false)
-  mainContractLayoutKey    String                  @default("contract")
-  contractPdfFileName      String?
+  id                        String                  @id @default(uuid()) @db.Uuid
+  name                      String                  @unique
+  displayName               String?
+  dealIdPrefix              String?
+  assignsDealId             Boolean                 @default(false)
+  mainContractLayoutKey     String                  @default("contract")
+  contractPdfFileName       String?
   /// Cloudinary image shown on funder-branded generated pages.
-  logoUrl                  String?
-  logoPublicId             String?
+  logoUrl                   String?
+  logoPublicId              String?
   /// State codes/names when this funder appears in dropdown; empty = all states.
-  allowedStates            Json?
+  allowedStates             Json?
   /// State codes/names where this funder is hidden; empty = no exclusions.
-  excludedStates           Json?
-  organization             String?
-  legalName                String?
-  contactEmail             String?
-  contactPhone             String?
+  excludedStates            Json?
+  organization              String?
+  legalName                 String?
+  contactEmail              String?
+  contactPhone              String?
   /// DocuSign carbon-copy address included on every contract envelope for this funder.
-  defaultCcEmail           String?
-  addressLine1             String?
-  addressCity              String?
-  addressState             String?
-  addressZip               String?
-  docusignAccountProfileId String?                 @db.Uuid
-  sortOrder                Int                     @default(0)
-  isActive                 Boolean                 @default(true)
+  defaultCcEmail            String?
+  addressLine1              String?
+  addressCity               String?
+  addressState              String?
+  addressZip                String?
+  docusignAccountProfileId  String?                 @db.Uuid
+  sortOrder                 Int                     @default(0)
+  isActive                  Boolean                 @default(true)
   /// Legacy combined addendum/disclosure PDF source: platform | own | shared.
   /// Prefer addendumDocumentsSource / disclosureDocumentsSource when set.
-  documentsSource          String                  @default("own")
+  documentsSource           String                  @default("own")
   /// When documentsSource / addendumDocumentsSource is shared (legacy shared id).
   sharedDocumentsFunderId   String?                 @db.Uuid
   /// Addendum/ACH PDF source: platform | own | shared (null = use documentsSource).
@@ -160,9 +160,9 @@ model FunderProfile {
   letterWireCityStateZip    String?
   letterWireRoutingNumber   String?
   letterWireAccountNumber   String?
-  createdAt                DateTime                @default(now())
-  updatedAt                DateTime                @updatedAt
-  docusignAccountProfile   DocuSignAccountProfile? @relation(fields: [docusignAccountProfileId], references: [id], onDelete: SetNull)
+  createdAt                 DateTime                @default(now())
+  updatedAt                 DateTime                @updatedAt
+  docusignAccountProfile    DocuSignAccountProfile? @relation(fields: [docusignAccountProfileId], references: [id])
 
   @@index([docusignAccountProfileId])
   @@index([isActive])

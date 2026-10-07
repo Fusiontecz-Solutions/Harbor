@@ -46,6 +46,7 @@ function withSenderViewHandoff<T extends Record<string, unknown>>(
     applicationId?: string;
     contractId?: number;
     funderName?: string;
+    funderProfileId?: string;
     contractState?: string;
   },
 ): T & { openUrl?: string; docusignUrl?: string } {
@@ -572,7 +573,26 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
           : undefined,
     });
 
-    return res.json(result);
+    // Draft sender view: hand out the reload-safe redirect instead of the raw single-use
+    // DocuSign URL, minted lazily when the tab actually navigates.
+    const contractIdNum = Number(contractId);
+    return res.json(
+      withSenderViewHandoff(req, result as unknown as Record<string, unknown>, {
+        userId,
+        envelopeId: String((result as { envelopeId?: string })?.envelopeId || ''),
+        returnUrl: typeof redirectUrl === 'string' ? redirectUrl : '',
+        applicationId: applicationId ? String(applicationId) : undefined,
+        contractId:
+          Number.isFinite(contractIdNum) && contractIdNum > 0 ? contractIdNum : undefined,
+        funderName: typeof funderName === 'string' ? funderName.trim() : undefined,
+        funderProfileId:
+          typeof funderProfileId === 'string' && funderProfileId.trim()
+            ? funderProfileId.trim()
+            : undefined,
+        contractState:
+          typeof contractState === 'string' ? contractState.trim() : undefined,
+      }),
+    );
   } catch (error: any) {
     const { status, message } = formatDocusignRouteError(error);
     return res.status(status).json({
@@ -713,6 +733,7 @@ export const openSenderView = async (req: Request, res: Response) => {
         applicationId: claims.applicationId,
         contractId: claims.contractId,
         funderName: claims.funderName,
+        funderProfileId: claims.funderProfileId,
         contractState: claims.contractState,
       },
     );

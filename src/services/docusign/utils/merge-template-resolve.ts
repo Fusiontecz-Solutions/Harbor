@@ -23,7 +23,10 @@ import {
   parseFunderSupplementalLayoutKey,
   resolveFunderSupplementalStorageType,
 } from '../../../utils/funderContractLayout';
-import { fetchCloudinaryAssetBuffer } from '../../cloudinaryAssetDownload';
+import {
+  fetchCloudinaryAssetBuffer,
+  fetchWithRetry,
+} from '../../cloudinaryAssetDownload';
 
 export type ResolvedMergeTemplate = {
   sourceRef: string;
@@ -184,7 +187,7 @@ export async function fetchPdfAsBase64(
     if (/^https:\/\/res\.cloudinary\.com\//i.test(trimmed)) {
       buf = await fetchCloudinaryAssetBuffer(trimmed);
     } else {
-      const res = await fetch(trimmed);
+      const res = await fetchWithRetry(trimmed);
       if (!res.ok) {
         throw new Error(
           `Failed to download PDF (${res.status})${context ? ` for "${context}"` : ''}`,
