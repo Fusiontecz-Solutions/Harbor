@@ -1,4 +1,9 @@
-import { analyzeSmsText, analyzeSmsTemplate, convertToSmsSafeText } from './smsSegments';
+import {
+  analyzeSmsText,
+  analyzeSmsTemplate,
+  canConvertToSmsSafeText,
+  convertToSmsSafeText,
+} from './smsSegments';
 
 describe('smsSegments', () => {
   it('counts GSM-7 single segment at 160 septets', () => {
@@ -31,12 +36,22 @@ describe('smsSegments', () => {
     expect(info.unicodeTriggers.length).toBeGreaterThan(0);
   });
 
-  it('convertToSmsSafeText fixes quotes without removing emoji', () => {
-    const safe = convertToSmsSafeText('Hi “there” — ok 😊');
-    expect(safe).toContain('"there"');
-    expect(safe).toContain('-');
-    expect(safe).toContain('😊');
-    expect(analyzeSmsText(safe).encoding).toBe('ucs-2');
+  it('convertToSmsSafeText fixes smart punctuation to GSM-7', () => {
+    const safe = convertToSmsSafeText('Hi “there” — ok');
+    expect(safe).toBe('Hi "there" - ok');
+    expect(analyzeSmsText(safe).encoding).toBe('gsm-7');
+    expect(analyzeSmsText(safe).segments).toBe(1);
+  });
+
+  it('convertToSmsSafeText strips emoji for lower cost', () => {
+    const safe = convertToSmsSafeText('Deal closed 😊');
+    expect(safe).toBe('Deal closed');
+    expect(analyzeSmsText(safe).encoding).toBe('gsm-7');
+  });
+
+  it('canConvertToSmsSafeText is true when conversion helps', () => {
+    expect(canConvertToSmsSafeText('Hello “world”')).toBe(true);
+    expect(canConvertToSmsSafeText('Plain GSM text')).toBe(false);
   });
 
   it('uses merged bodies for template worst case', () => {
