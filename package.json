@@ -9,6 +9,7 @@
     "postinstall": "npx prisma generate",
     "start": "node dist/index.js",
     "seed:payoff-template": "npx ts-node src/scripts/seedPayoffWireTemplate.ts",
+    "clear:agent-leads": "npx ts-node scripts/clear-agent-leads.ts",
     "test": "jest",
     "lint": "eslint . --ext .ts"
   },
