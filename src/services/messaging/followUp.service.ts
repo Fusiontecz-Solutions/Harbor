@@ -28,15 +28,23 @@ export const MIN_FOLLOW_UP_GAP_MS = Number(
   process.env.BROADCAST_FOLLOW_UP_MIN_GAP_MS ?? String(60 * 60 * 1000),
 );
 
-/**
- * Recipient rows included when building a follow-up audience.
- *
- * SENT/DELIVERED are the usual non-responders. FAILED is included so operators
- * can retry quota/transient errors from the original blast without a separate
- * campaign. UNDELIVERABLE and suppressed rows stay out — a second send rarely
- * fixes a bad number.
- */
-const FOLLOW_UP_CANDIDATE_STATUSES = ['SENT', 'DELIVERED', 'FAILED'] as const;
+export type FollowUpAudience = 'unreplied' | 'failed' | 'all';
+
+export function parseFollowUpAudience(value: unknown): FollowUpAudience {
+  if (value === 'unreplied' || value === 'failed' || value === 'all') return value;
+  return 'all';
+}
+
+function statusesForAudience(audience: FollowUpAudience): readonly string[] {
+  switch (audience) {
+    case 'unreplied':
+      return ['SENT', 'DELIVERED'];
+    case 'failed':
+      return ['FAILED'];
+    case 'all':
+      return ['SENT', 'DELIVERED', 'FAILED'];
+  }
+}
 
 /** Contacts an agent has already judged are out of every automated audience. */
 const UNHANDLED_ONLY = { disposition: 'NEW' as const };
@@ -137,6 +145,7 @@ async function respondedNumbers(
 export interface FollowUpPreview {
   parentId: string;
   parentName: string;
+  audience: FollowUpAudience;
   /** Earliest instant a follow-up may be scheduled for. */
   earliestSendAt: Date;
   eligibleCount: number;
@@ -150,7 +159,10 @@ export interface FollowUpPreview {
  * replied" before committing to a second send — the same preflight idea the
  * original broadcast already uses.
  */
-export async function previewFollowUpAudience(parentId: string): Promise<FollowUpPreview> {
+export async function previewFollowUpAudience(
+  parentId: string,
+  audience: FollowUpAudience = 'all',
+): Promise<FollowUpPreview> {
   const parent = await prisma.smsBroadcast.findUnique({
     where: { id: parentId },
     select: { id: true, name: true, startedAt: true, finishedAt: true, createdAt: true },
@@ -159,20 +171,22 @@ export async function previewFollowUpAudience(parentId: string): Promise<FollowU
 
   const since = parent.startedAt ?? parent.createdAt;
 
+  const statuses = statusesForAudience(audience);
   const candidates = await prisma.smsBroadcastRecipient.findMany({
-    where: { broadcastId: parentId, status: { in: [...FOLLOW_UP_CANDIDATE_STATUSES] } },
+    where: { broadcastId: parentId, status: { in: [...statuses] } },
     select: { phoneNumber: true },
   });
   const candidateNumbers = candidates.map((row) => row.phoneNumber);
 
   const notDelivered = await prisma.smsBroadcastRecipient.count({
-    where: { broadcastId: parentId, status: { notIn: [...FOLLOW_UP_CANDIDATE_STATUSES] } },
+    where: { broadcastId: parentId, status: { notIn: [...statuses] } },
   });
 
   if (candidateNumbers.length === 0) {
     return {
       parentId: parent.id,
       parentName: parent.name,
+      audience,
       earliestSendAt: new Date((parent.finishedAt ?? since).getTime() + MIN_FOLLOW_UP_GAP_MS),
       eligibleCount: 0,
       excluded: { replied: 0, disposed: 0, notDelivered },
@@ -196,6 +210,7 @@ export async function previewFollowUpAudience(parentId: string): Promise<FollowU
   return {
     parentId: parent.id,
     parentName: parent.name,
+    audience,
     earliestSendAt: new Date((parent.finishedAt ?? since).getTime() + MIN_FOLLOW_UP_GAP_MS),
     eligibleCount: eligible.length,
     excluded: {
@@ -218,6 +233,7 @@ export async function createFollowUpBroadcast(input: {
   name?: string;
   body: string;
   scheduledAt: Date;
+  audience?: FollowUpAudience;
   createdById?: string | null;
   requiresApproval?: boolean;
   fromNumber?: string;
@@ -247,7 +263,8 @@ export async function createFollowUpBroadcast(input: {
     );
   }
 
-  const preview = await previewFollowUpAudience(input.parentId);
+  const audience = parseFollowUpAudience(input.audience);
+  const preview = await previewFollowUpAudience(input.parentId, audience);
   if (preview.eligibleCount === 0) {
     throw new Error(
       'Nobody is left to follow up: everyone replied, was marked, or is excluded (undeliverable / suppressed)',
@@ -256,8 +273,9 @@ export async function createFollowUpBroadcast(input: {
 
   // Re-resolve the audience rather than trusting the preview's count: minutes
   // may have passed, and a reply that arrived in between must still exclude.
+  const statuses = statusesForAudience(audience);
   const candidates = await prisma.smsBroadcastRecipient.findMany({
-    where: { broadcastId: input.parentId, status: { in: [...FOLLOW_UP_CANDIDATE_STATUSES] } },
+    where: { broadcastId: input.parentId, status: { in: [...statuses] } },
     select: { phoneNumber: true, mergeData: true },
   });
   const responded = await respondedNumbers(

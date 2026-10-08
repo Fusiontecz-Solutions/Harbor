@@ -70,7 +70,7 @@ class MessagingController {
         userId,
         page: Number(req.query.page) || 1,
         search: String(req.query.search ?? ''),
-        filter: String(req.query.filter ?? 'all'),
+        filter: String(req.query.filter ?? 'regular'),
         senderNumbers: await visibleSendersForUser(userId, req.user?.role),
       });
 

@@ -132,6 +132,8 @@ model MessagingConversation {
   /// True once any message on this thread came from a broadcast — this is what
   /// makes broadcast replies surface in the normal chat inbox.
   hasBroadcastMessage  Boolean             @default(false)
+  /// True after any inbound — broadcast-only threads stay hidden until this is set.
+  hasInboundReply      Boolean             @default(false)
   /// Set when the contact replied with STOP/UNSUBSCRIBE et al.
   isOptedOut           Boolean             @default(false)
   isArchived           Boolean             @default(false)

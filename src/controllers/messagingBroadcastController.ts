@@ -28,6 +28,7 @@ import { resolveClientsAsRecipients } from '../services/messaging/clientRecipien
 import {
   approveBroadcast,
   createFollowUpBroadcast,
+  parseFollowUpAudience,
   previewFollowUpAudience,
   rejectBroadcast,
   resolveBatchAudience,
@@ -404,7 +405,8 @@ class MessagingBroadcastController {
   async followUpPreview(req: Request, res: Response): Promise<void> {
     try {
       if (!(await ensureBroadcastAccess(req, res))) return;
-      res.json({ success: true, data: await previewFollowUpAudience(String(req.params.id)) });
+      const audience = parseFollowUpAudience(req.query.audience);
+      res.json({ success: true, data: await previewFollowUpAudience(String(req.params.id), audience) });
     } catch (err) {
       console.error('[messaging:broadcast] follow-up preview failed:', err);
       res.status(400).json({ success: false, message: (err as Error)?.message || 'Failed to preview follow-up' });
@@ -433,6 +435,7 @@ class MessagingBroadcastController {
         name: req.body?.name ? String(req.body.name) : undefined,
         body: String(req.body?.body ?? req.body?.message ?? ''),
         scheduledAt,
+        audience: parseFollowUpAudience(req.body?.audience),
         createdById: actorId(req),
         requiresApproval: !isAdmin(req),
       });

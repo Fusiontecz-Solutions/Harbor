@@ -20,6 +20,7 @@ import {
 } from './cache.service';
 import { normalizePhoneNumber, normalizeSender } from './phone';
 import { isStartKeyword, isStopKeyword } from './suppression.service';
+import { normalizeInboxTab, tabSkipsBroadcastVisibility } from './inboxTabs';
 
 /** Short TTL: the inbox is realtime via sockets, the cache only absorbs bursts. */
 const CONVERSATION_LIST_TTL_SECONDS = 15;
@@ -27,6 +28,13 @@ const MESSAGE_PAGE_TTL_SECONDS = 10;
 
 export const CONVERSATION_PAGE_SIZE = 30;
 export const MESSAGE_PAGE_SIZE = 50;
+
+/** Broadcast threads stay out of the inbox until the contact has replied (incl. STOP). */
+function inboxVisibilityWhere(): Prisma.MessagingConversationWhereInput {
+  return {
+    OR: [{ hasBroadcastMessage: false }, { hasInboundReply: true }],
+  };
+}
 
 export interface ConversationListParams {
   userId: string;
@@ -159,6 +167,7 @@ export async function recordInboundMessage(input: {
         ...(isStop ? { isOptedOut: true } : {}),
         ...(isStart ? { isOptedOut: false } : {}),
         ...(input.broadcastId ? { hasBroadcastMessage: true } : {}),
+        hasInboundReply: true,
       },
     });
 
@@ -348,12 +357,12 @@ export async function listConversations(params: ConversationListParams): Promise
 }> {
   const page = Math.max(1, Number(params.page) || 1);
   const search = String(params.search ?? '').trim();
-  const filter = String(params.filter ?? 'all');
+  const tab = normalizeInboxTab(String(params.filter ?? 'regular'));
 
   const scopeKey = Array.isArray(params.senderNumbers)
     ? params.senderNumbers.slice().sort().join(',')
     : 'all';
-  const cacheKey = cacheKeys.conversationList(params.userId, page, search, `${filter}:${scopeKey}`);
+  const cacheKey = cacheKeys.conversationList(params.userId, page, search, `${tab}:${scopeKey}`);
   const cached = await cacheGet<{ items: ConversationListItem[]; page: number; hasMore: boolean }>(cacheKey);
   if (cached) return cached;
 
@@ -366,20 +375,59 @@ export async function listConversations(params: ConversationListParams): Promise
     where.businessNumber = { in: params.senderNumbers };
   }
 
-  if (filter === 'unread') where.unreadCount = { gt: 0 };
-  if (filter === 'broadcast') where.hasBroadcastMessage = true;
-  if (filter === 'opted-out') where.isOptedOut = true;
+  const andParts: Prisma.MessagingConversationWhereInput[] = Array.isArray(where.AND)
+    ? [...where.AND]
+    : [];
+
+  if (!tabSkipsBroadcastVisibility(tab)) {
+    andParts.push(inboxVisibilityWhere());
+  }
+
+  const dispositionNew: Prisma.MessagingConversationWhereInput = {
+    OR: [{ contact: { is: null } }, { contact: { disposition: 'NEW' } }],
+  };
+
+  switch (tab) {
+    case 'opt-out':
+      andParts.push({ isOptedOut: true });
+      break;
+    case 'interested':
+      andParts.push({ isOptedOut: false, contact: { disposition: 'INTERESTED' } });
+      break;
+    case 'not-interested':
+      andParts.push({ isOptedOut: false, contact: { disposition: 'NOT_INTERESTED' } });
+      break;
+    case 'unreplied':
+      andParts.push({
+        isOptedOut: false,
+        hasInboundReply: false,
+        ...dispositionNew,
+      });
+      break;
+    case 'regular':
+    default:
+      andParts.push({
+        isOptedOut: false,
+        hasInboundReply: true,
+        ...dispositionNew,
+      });
+      break;
+  }
 
   if (search) {
     const normalizedSearch = normalizePhoneNumber(search);
-    where.OR = [
-      { contactNumber: { contains: normalizedSearch ?? search } },
-      { lastMessageText: { contains: search, mode: 'insensitive' } },
-      { contact: { firstName: { contains: search, mode: 'insensitive' } } },
-      { contact: { lastName: { contains: search, mode: 'insensitive' } } },
-      { contact: { company: { contains: search, mode: 'insensitive' } } },
-    ];
+    andParts.push({
+      OR: [
+        { contactNumber: { contains: normalizedSearch ?? search } },
+        { lastMessageText: { contains: search, mode: 'insensitive' } },
+        { contact: { firstName: { contains: search, mode: 'insensitive' } } },
+        { contact: { lastName: { contains: search, mode: 'insensitive' } } },
+        { contact: { company: { contains: search, mode: 'insensitive' } } },
+      ],
+    });
   }
+
+  where.AND = andParts;
 
   // Fetch one extra row to answer hasMore without a second COUNT query.
   const rows = await prisma.messagingConversation.findMany({
@@ -397,7 +445,9 @@ export async function listConversations(params: ConversationListParams): Promise
       unreadCount: true,
       hasBroadcastMessage: true,
       isOptedOut: true,
-      contact: { select: { firstName: true, lastName: true, company: true, status: true } },
+      contact: {
+        select: { firstName: true, lastName: true, company: true, status: true, disposition: true },
+      },
     },
   });
 
@@ -482,6 +532,7 @@ export async function getTotalUnread(senderNumbers?: string[] | null): Promise<n
       // Same scoping as the list: the badge must not count threads the user
       // cannot open.
       ...(Array.isArray(senderNumbers) ? { businessNumber: { in: senderNumbers } } : {}),
+      AND: [inboxVisibilityWhere()],
     },
   });
   return result._sum.unreadCount ?? 0;
