@@ -114,9 +114,21 @@ export default function MessagingContacts() {
             setLastImport(summary);
             setFile(null);
             toast.success(`Imported ${summary.imported} new, updated ${summary.updated}`);
-            await load();
+            void load().catch(() => {
+                toast.info('Import saved — refresh if the list looks stale.');
+            });
         } catch (error: any) {
-            toast.error(error?.response?.data?.message || 'Import failed');
+            const timedOut =
+                error?.code === 'ECONNABORTED' ||
+                String(error?.message ?? '').toLowerCase().includes('timeout');
+            if (timedOut) {
+                toast.warn(
+                    'Upload took too long to confirm. Refresh — contacts may already be imported.',
+                );
+                void load();
+            } else {
+                toast.error(error?.response?.data?.message || error?.message || 'Import failed');
+            }
         } finally {
             setIsImporting(false);
         }

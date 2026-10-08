@@ -99,10 +99,23 @@ export default function LeadDistribution() {
             setSummary(result);
             setFile(null);
             if (fileInputRef.current) fileInputRef.current.value = '';
-            await load();
-            toast.success(`${result.imported + result.updated} leads distributed`);
+            const count = (result.imported ?? 0) + (result.updated ?? 0);
+            toast.success(`${count} leads distributed`);
+            void load().catch(() => {
+                toast.info('Leads saved — refresh the page if counts look stale.');
+            });
         } catch (error: any) {
-            toast.error(error?.response?.data?.message || 'Import failed');
+            const timedOut =
+                error?.code === 'ECONNABORTED' ||
+                String(error?.message ?? '').toLowerCase().includes('timeout');
+            if (timedOut) {
+                toast.warn(
+                    'Upload took too long to confirm. Refresh this page — leads are often already distributed.',
+                );
+                void load();
+            } else {
+                toast.error(error?.response?.data?.message || error?.message || 'Import failed');
+            }
         } finally {
             setIsUploading(false);
         }

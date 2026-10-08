@@ -339,8 +339,15 @@ export async function importContacts(
     if (assigneeUserIds?.length) formData.append('assigneeUserIds', assigneeUserIds.join(','));
     if (batchName?.trim()) formData.append('batchName', batchName.trim());
 
-    const response = await axiosPostFormData(`${BASE}/contacts/import`, formData);
-    return response.data.data;
+    const response = await axiosPostFormData(`${BASE}/contacts/import`, formData, {
+        // Large sheets can run 1–2 minutes server-side; stay above typical proxy limits.
+        timeout: 300_000,
+    });
+    const summary = (response.data?.data ?? response.data) as ImportSummary | undefined;
+    if (!summary || typeof summary.totalRows !== 'number') {
+        throw new Error('Unexpected import response from server');
+    }
+    return summary;
 }
 
 /** Lead counts per owner, for the distribution screen. */
