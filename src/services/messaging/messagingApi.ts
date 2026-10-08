@@ -240,7 +240,7 @@ export async function fetchConversations(params: {
         params: {
             page: params.page ?? 1,
             ...(params.search ? { search: params.search } : {}),
-            ...(params.filter && params.filter !== 'all' ? { filter: params.filter } : {}),
+            filter: params.filter ?? 'regular',
         },
     });
     return response.data;
@@ -805,9 +805,12 @@ export async function rejectBroadcast(id: string) {
     return response.data.data;
 }
 
+export type FollowUpAudience = 'unreplied' | 'failed' | 'all';
+
 export interface FollowUpPreview {
     parentId: string;
     parentName: string;
+    audience: FollowUpAudience;
     /** Earliest instant a follow-up may be scheduled for — an hour after the original. */
     earliestSendAt: string;
     eligibleCount: number;
@@ -815,15 +818,26 @@ export interface FollowUpPreview {
 }
 
 /** Who a follow-up would reach, without creating anything. */
-export async function fetchFollowUpPreview(id: string): Promise<FollowUpPreview> {
-    const response = await axiosGet(`${BASE}/broadcasts/${id}/follow-up`);
+export async function fetchFollowUpPreview(
+    id: string,
+    audience: FollowUpAudience = 'all',
+): Promise<FollowUpPreview> {
+    const response = await axiosGet(`${BASE}/broadcasts/${id}/follow-up`, {
+        params: { audience },
+    });
     return response.data.data;
 }
 
 /** Chase a campaign's non-responders. Needs a window or a time — never immediate. */
 export async function createFollowUp(
     id: string,
-    input: { body: string; name?: string; sendWindowId?: string; scheduledAt?: string },
+    input: {
+        body: string;
+        name?: string;
+        sendWindowId?: string;
+        scheduledAt?: string;
+        audience?: FollowUpAudience;
+    },
 ): Promise<CreateBroadcastResult & { awaitingApproval: boolean; scheduledAt: string }> {
     const response = await axiosPost(`${BASE}/broadcasts/${id}/follow-up`, input);
     return response.data.data;

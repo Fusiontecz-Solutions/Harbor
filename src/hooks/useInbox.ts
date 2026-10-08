@@ -55,7 +55,7 @@ interface UseInboxOptions {
     filter?: string;
 }
 
-export function useInbox({ userScope, search = '', filter = 'all' }: UseInboxOptions) {
+export function useInbox({ userScope, search = '', filter = 'regular' }: UseInboxOptions) {
     const { socket, isConnected } = useSocket();
 
     const [conversations, setConversations] = useState<Conversation[]>([]);

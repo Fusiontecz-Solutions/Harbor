@@ -74,10 +74,11 @@ import {
 } from '@/services/messaging/messagingApi';
 
 const FILTERS = [
-    { id: 'all', label: 'All' },
-    { id: 'unread', label: 'Unread' },
-    { id: 'broadcast', label: 'Broadcast' },
-    { id: 'opted-out', label: 'Opted out' },
+    { id: 'regular', label: 'Regular' },
+    { id: 'interested', label: 'Interested' },
+    { id: 'not-interested', label: 'Uninterested' },
+    { id: 'unreplied', label: 'Unreplied' },
+    { id: 'opt-out', label: 'Opt-out' },
 ] as const;
 
 /**
@@ -193,7 +194,7 @@ export default function Inbox() {
     );
 
     const [searchInput, setSearchInput] = useState('');
-    const [filter, setFilter] = useState<string>('all');
+    const [filter, setFilter] = useState<string>('regular');
     const search = useDebounced(searchInput);
 
     const [config, setConfig] = useState<MessagingConfig | null>(null);
