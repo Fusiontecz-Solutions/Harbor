@@ -15,6 +15,11 @@ import * as XLSX from 'xlsx';
 import prisma from '../../config/prismaClient';
 import { normalizePhoneNumber } from './phone';
 
+/** Prisma defaults to a 5s interactive transaction timeout — import batches exceed that. */
+const PRISMA_TX = { maxWait: 15_000, timeout: 120_000 };
+const IMPORT_UPSERT_BATCH = 75;
+const DISTRIBUTE_UPDATE_BATCH = 75;
+
 export interface ImportedRow {
   phoneNumber: string;
   firstName?: string | null;
@@ -265,9 +270,8 @@ export async function importContacts(input: {
       })
     : null;
 
-  const BATCH = 500;
-  for (let i = 0; i < valid.length; i += BATCH) {
-    const slice = valid.slice(i, i + BATCH);
+  for (let i = 0; i < valid.length; i += IMPORT_UPSERT_BATCH) {
+    const slice = valid.slice(i, i + IMPORT_UPSERT_BATCH);
 
     await prisma.$transaction(
       slice.map((row, offset) => {
@@ -313,6 +317,7 @@ export async function importContacts(input: {
           },
         });
       }),
+      PRISMA_TX,
     );
   }
 
@@ -477,6 +482,8 @@ export async function distributeLeads(input: {
   let moved = 0;
   let skipped = 0;
 
+  const pending: Array<{ id: string; ownerUserId: string; phoneNumber: string }> = [];
+
   for (let index = 0; index < contacts.length; index += 1) {
     const contact = contacts[index];
     const owner = assignees[index % assignees.length];
@@ -487,12 +494,22 @@ export async function distributeLeads(input: {
       continue;
     }
 
-    await prisma.messagingContact.update({
-      where: { id: contact.id },
-      data: { ownerUserId: owner },
-    });
+    pending.push({ id: contact.id, ownerUserId: owner, phoneNumber: contact.phoneNumber });
     taken.add(`${owner}:${contact.phoneNumber}`);
-    moved += 1;
+  }
+
+  for (let i = 0; i < pending.length; i += DISTRIBUTE_UPDATE_BATCH) {
+    const slice = pending.slice(i, i + DISTRIBUTE_UPDATE_BATCH);
+    await prisma.$transaction(
+      slice.map((row) =>
+        prisma.messagingContact.update({
+          where: { id: row.id },
+          data: { ownerUserId: row.ownerUserId },
+        }),
+      ),
+      PRISMA_TX,
+    );
+    moved += slice.length;
   }
 
   return { moved, skipped };
