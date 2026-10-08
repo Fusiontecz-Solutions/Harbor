@@ -36,14 +36,18 @@ export function parseFollowUpAudience(value: unknown): FollowUpAudience {
   return 'all';
 }
 
-function statusesForAudience(audience: FollowUpAudience): readonly MessagingMessageStatus[] {
+const FOLLOW_UP_UNREPLIED: MessagingMessageStatus[] = ['SENT', 'DELIVERED'];
+const FOLLOW_UP_FAILED: MessagingMessageStatus[] = ['FAILED'];
+const FOLLOW_UP_ALL: MessagingMessageStatus[] = ['SENT', 'DELIVERED', 'FAILED'];
+
+function statusesForAudience(audience: FollowUpAudience): MessagingMessageStatus[] {
   switch (audience) {
     case 'unreplied':
-      return ['SENT', 'DELIVERED'];
+      return FOLLOW_UP_UNREPLIED;
     case 'failed':
-      return ['FAILED'];
+      return FOLLOW_UP_FAILED;
     case 'all':
-      return ['SENT', 'DELIVERED', 'FAILED'];
+      return FOLLOW_UP_ALL;
   }
 }
 
@@ -174,13 +178,13 @@ export async function previewFollowUpAudience(
 
   const statuses = statusesForAudience(audience);
   const candidates = await prisma.smsBroadcastRecipient.findMany({
-    where: { broadcastId: parentId, status: { in: [...statuses] } },
+    where: { broadcastId: parentId, status: { in: statuses } },
     select: { phoneNumber: true },
   });
   const candidateNumbers = candidates.map((row) => row.phoneNumber);
 
   const notDelivered = await prisma.smsBroadcastRecipient.count({
-    where: { broadcastId: parentId, status: { notIn: [...statuses] } },
+    where: { broadcastId: parentId, status: { notIn: statuses } },
   });
 
   if (candidateNumbers.length === 0) {
@@ -276,7 +280,7 @@ export async function createFollowUpBroadcast(input: {
   // may have passed, and a reply that arrived in between must still exclude.
   const statuses = statusesForAudience(audience);
   const candidates = await prisma.smsBroadcastRecipient.findMany({
-    where: { broadcastId: input.parentId, status: { in: [...statuses] } },
+    where: { broadcastId: input.parentId, status: { in: statuses } },
     select: { phoneNumber: true, mergeData: true },
   });
   const responded = await respondedNumbers(
