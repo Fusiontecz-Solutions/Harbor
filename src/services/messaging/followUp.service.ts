@@ -13,6 +13,7 @@
  * hand, and a second automated nudge would either undo their work or annoy
  * someone who already said no.
  */
+import type { MessagingMessageStatus } from '@prisma/client';
 import prisma from '../../config/prismaClient';
 import { createBroadcast, type BroadcastRecipientInput } from './broadcast.service';
 import { analyzeSmsTemplate, estimatedCampaignCredits } from './smsSegments';
@@ -35,7 +36,7 @@ export function parseFollowUpAudience(value: unknown): FollowUpAudience {
   return 'all';
 }
 
-function statusesForAudience(audience: FollowUpAudience): readonly string[] {
+function statusesForAudience(audience: FollowUpAudience): readonly MessagingMessageStatus[] {
   switch (audience) {
     case 'unreplied':
       return ['SENT', 'DELIVERED'];
