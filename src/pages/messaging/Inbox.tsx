@@ -90,9 +90,6 @@ const FILTERS = [
  */
 const DRAFT_CONVERSATION_ID = '__draft__';
 
-/** Stable empty array, so a draft chat does not re-render on every pass. */
-const EMPTY_MESSAGES: Message[] = [];
-
 /** Client-side E.164 normalization, so a draft can be validated without a round-trip. */
 function normalizeNumberInput(raw: string): string | null {
     const input = raw.trim();
