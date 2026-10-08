@@ -17,7 +17,8 @@ import { normalizePhoneNumber } from './phone';
 
 /** Prisma defaults to a 5s interactive transaction timeout — import batches exceed that. */
 const PRISMA_TX = { maxWait: 15_000, timeout: 120_000 };
-const IMPORT_UPSERT_BATCH = 75;
+/** Larger batches = fewer round trips so imports finish before proxy/client timeouts. */
+const IMPORT_UPSERT_BATCH = 100;
 const DISTRIBUTE_UPDATE_BATCH = 75;
 
 export interface ImportedRow {
