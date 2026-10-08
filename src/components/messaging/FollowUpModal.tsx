@@ -133,8 +133,8 @@ export default function FollowUpModal({ broadcastId, open, onOpenChange, onCreat
                 <DialogHeader>
                     <DialogTitle>Follow up</DialogTitle>
                     <DialogDescription>
-                        Sends a second message to everyone who was reached by this campaign and
-                        never replied.
+                        Sends a second message to non-responders, including leads whose first
+                        send failed (for example quota or transient errors).
                     </DialogDescription>
                 </DialogHeader>
 
@@ -158,8 +158,8 @@ export default function FollowUpModal({ broadcastId, open, onOpenChange, onCreat
                                     Not Interested, or blocked
                                 </li>
                                 <li>
-                                    {preview.excluded.notDelivered.toLocaleString()} were never
-                                    reached by the original
+                                    {preview.excluded.notDelivered.toLocaleString()} excluded
+                                    (undeliverable, suppressed, or still queued)
                                 </li>
                             </ul>
                         </div>
@@ -167,7 +167,7 @@ export default function FollowUpModal({ broadcastId, open, onOpenChange, onCreat
                         {preview.eligibleCount === 0 ? (
                             <p className="text-sm text-muted-foreground">
                                 Nobody is left to chase. Every recipient either answered, was
-                                marked, or was never reached.
+                                marked, or is excluded from follow-up.
                             </p>
                         ) : (
                             <>
