@@ -14,8 +14,9 @@ import { isRedisAvailable } from '../config/redis';
  *
  * BullMQ has no such coupling. Jobs from different broadcasts interleave freely
  * across the worker's concurrency slots, so N campaigns genuinely run in
- * parallel. Fairness between them is enforced by the per-broadcast Redis token
- * buckets (see services/messaging/tokenBucket.ts), not by the transport.
+ * parallel. At most one chunk per broadcastId runs at a time (see
+ * broadcastInflightLock.ts). Fairness between campaigns is enforced by the
+ * per-broadcast Redis token buckets (see services/messaging/tokenBucket.ts).
  *
  * Jobs carry a CHUNK of recipients rather than a single one. At 50k recipients,
  * per-recipient jobs mean 50k Redis round-trips of queue bookkeeping; chunks of

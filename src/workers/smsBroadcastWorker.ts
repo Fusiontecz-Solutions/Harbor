@@ -1,4 +1,4 @@
-import { Worker, type ConnectionOptions } from 'bullmq';
+import { DelayedError, Worker, type ConnectionOptions } from 'bullmq';
 import Redis from 'ioredis';
 import prisma from '../config/prismaClient';
 import {
@@ -12,21 +12,21 @@ import {
   recordBroadcastCounter,
 } from '../services/messaging/broadcast.service';
 import { dispatchOutboundMessage, renderTemplate } from '../services/messaging/sms.service';
+import {
+  acquireBroadcastChunkLock,
+  broadcastChunkLockRetryDelayMs,
+  releaseBroadcastChunkLock,
+} from '../services/messaging/broadcastInflightLock';
 
 /* ============================================================================
  * SMS Broadcast Worker
  * ----------------------------------------------------------------------------
  * Runs inside the API process, alongside the application-approval worker.
  *
- * Concurrency here is the number of chunks in flight, NOT the send rate — the
- * send rate is governed entirely by the Redis token buckets. Raising
- * concurrency lets more campaigns progress simultaneously; it does not make
- * Harbor exceed the provider limit, because every send still has to take a
- * token from the shared account bucket.
- *
- * Because these are I/O-bound HTTPS calls that spend most of their time parked
- * on a bucket or awaiting Infobip, concurrency well above the core count is
- * appropriate.
+ * Concurrency is how many chunk jobs may run at once across *different*
+ * campaigns. A Redis lock ensures at most one chunk per broadcastId is active
+ * (same single-flight model as DMS). Send rate is still governed by the token
+ * buckets, not by this concurrency number.
  * ==========================================================================*/
 
 let workerInstance: Worker<SmsBroadcastJobData> | null = null;
@@ -211,8 +211,21 @@ export const startSmsBroadcastWorker = (): void => {
   try {
     workerInstance = new Worker<SmsBroadcastJobData>(
       SMS_BROADCAST_QUEUE_NAME,
-      async (job) => {
-        await processChunk(job.data);
+      async (job, token) => {
+        const lockToken = await acquireBroadcastChunkLock(job.data.broadcastId);
+        if (!lockToken) {
+          const delayMs = broadcastChunkLockRetryDelayMs();
+          await job.moveToDelayed(Date.now() + delayMs, token);
+          throw new DelayedError(
+            `broadcast ${job.data.broadcastId} chunk already in flight; retry in ${delayMs}ms`,
+          );
+        }
+
+        try {
+          await processChunk(job.data);
+        } finally {
+          await releaseBroadcastChunkLock(job.data.broadcastId, lockToken);
+        }
       },
       {
         connection: createRedisConnection(),
