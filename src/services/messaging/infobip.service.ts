@@ -28,7 +28,7 @@
 import axios, { AxiosError, type AxiosInstance } from 'axios';
 import { toInfobipDestination, toInfobipSender } from './phone';
 import { getSendingState, SENDING_DISABLED_CODE } from '../tenantControl/state';
-import { isOverQuota, LIMIT_REACHED_CODE, recordQuotaUse } from '../tenantControl/quota';
+import { LIMIT_REACHED_CODE } from '../tenantControl/quota';
 import { assertPrepaidBalance, deductPrepaidAfterSend, PrepaidExhaustedError } from '../tenantControl/prepaid';
 
 export type NormalizedStatus =
@@ -224,14 +224,6 @@ export async function sendSms(input: SendSmsInput): Promise<SendSmsResult> {
       false,
     );
   }
-  if (await isOverQuota()) {
-    throw new InfobipRequestError(
-      'The message limit set by the platform administrator has been reached.',
-      429,
-      LIMIT_REACHED_CODE,
-      false,
-    );
-  }
   try {
     await assertPrepaidBalance(null);
   } catch (err) {
@@ -246,7 +238,6 @@ export async function sendSms(input: SendSmsInput): Promise<SendSmsResult> {
 
   const result = input.mediaUrls && input.mediaUrls.length > 0 ? await sendMms({ ...input, from }) : await sendText(input, from);
   if (result.status !== 'FAILED') {
-    recordQuotaUse(result.segmentCount);
     await deductPrepaidAfterSend(result.segmentCount);
   }
   return result;

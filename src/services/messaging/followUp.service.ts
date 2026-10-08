@@ -28,6 +28,16 @@ export const MIN_FOLLOW_UP_GAP_MS = Number(
   process.env.BROADCAST_FOLLOW_UP_MIN_GAP_MS ?? String(60 * 60 * 1000),
 );
 
+/**
+ * Recipient rows included when building a follow-up audience.
+ *
+ * SENT/DELIVERED are the usual non-responders. FAILED is included so operators
+ * can retry quota/transient errors from the original blast without a separate
+ * campaign. UNDELIVERABLE and suppressed rows stay out — a second send rarely
+ * fixes a bad number.
+ */
+const FOLLOW_UP_CANDIDATE_STATUSES = ['SENT', 'DELIVERED', 'FAILED'] as const;
+
 /** Contacts an agent has already judged are out of every automated audience. */
 const UNHANDLED_ONLY = { disposition: 'NEW' as const };
 
@@ -149,22 +159,17 @@ export async function previewFollowUpAudience(parentId: string): Promise<FollowU
 
   const since = parent.startedAt ?? parent.createdAt;
 
-  /**
-   * Only people we actually reached. Chasing a number whose first message was
-   * rejected repeats a send that already failed, and if the failure was the
-   * number being invalid it will fail again identically.
-   */
-  const reached = await prisma.smsBroadcastRecipient.findMany({
-    where: { broadcastId: parentId, status: { in: ['SENT', 'DELIVERED'] } },
+  const candidates = await prisma.smsBroadcastRecipient.findMany({
+    where: { broadcastId: parentId, status: { in: [...FOLLOW_UP_CANDIDATE_STATUSES] } },
     select: { phoneNumber: true },
   });
-  const reachedNumbers = reached.map((row) => row.phoneNumber);
+  const candidateNumbers = candidates.map((row) => row.phoneNumber);
 
   const notDelivered = await prisma.smsBroadcastRecipient.count({
-    where: { broadcastId: parentId, status: { notIn: ['SENT', 'DELIVERED'] } },
+    where: { broadcastId: parentId, status: { notIn: [...FOLLOW_UP_CANDIDATE_STATUSES] } },
   });
 
-  if (reachedNumbers.length === 0) {
+  if (candidateNumbers.length === 0) {
     return {
       parentId: parent.id,
       parentName: parent.name,
@@ -174,8 +179,8 @@ export async function previewFollowUpAudience(parentId: string): Promise<FollowU
     };
   }
 
-  const responded = await respondedNumbers(parentId, since, reachedNumbers);
-  const silent = reachedNumbers.filter((number) => !responded.has(number));
+  const responded = await respondedNumbers(parentId, since, candidateNumbers);
+  const silent = candidateNumbers.filter((number) => !responded.has(number));
 
   const handled = await prisma.messagingContact.findMany({
     where: {
@@ -194,7 +199,7 @@ export async function previewFollowUpAudience(parentId: string): Promise<FollowU
     earliestSendAt: new Date((parent.finishedAt ?? since).getTime() + MIN_FOLLOW_UP_GAP_MS),
     eligibleCount: eligible.length,
     excluded: {
-      replied: reachedNumbers.length - silent.length,
+      replied: candidateNumbers.length - silent.length,
       disposed: handledNumbers.size,
       notDelivered,
     },
@@ -244,22 +249,24 @@ export async function createFollowUpBroadcast(input: {
 
   const preview = await previewFollowUpAudience(input.parentId);
   if (preview.eligibleCount === 0) {
-    throw new Error('Nobody is left to follow up: everyone replied, was marked, or was never reached');
+    throw new Error(
+      'Nobody is left to follow up: everyone replied, was marked, or is excluded (undeliverable / suppressed)',
+    );
   }
 
   // Re-resolve the audience rather than trusting the preview's count: minutes
   // may have passed, and a reply that arrived in between must still exclude.
-  const reached = await prisma.smsBroadcastRecipient.findMany({
-    where: { broadcastId: input.parentId, status: { in: ['SENT', 'DELIVERED'] } },
+  const candidates = await prisma.smsBroadcastRecipient.findMany({
+    where: { broadcastId: input.parentId, status: { in: [...FOLLOW_UP_CANDIDATE_STATUSES] } },
     select: { phoneNumber: true, mergeData: true },
   });
   const responded = await respondedNumbers(
     input.parentId,
     since,
-    reached.map((row) => row.phoneNumber),
+    candidates.map((row) => row.phoneNumber),
   );
 
-  const silent = reached.filter((row) => !responded.has(row.phoneNumber));
+  const silent = candidates.filter((row) => !responded.has(row.phoneNumber));
   const handled = await prisma.messagingContact.findMany({
     where: {
       phoneNumber: { in: silent.map((row) => row.phoneNumber) },
@@ -277,7 +284,9 @@ export async function createFollowUpBroadcast(input: {
     }));
 
   if (recipients.length === 0) {
-    throw new Error('Nobody is left to follow up: everyone replied, was marked, or was never reached');
+    throw new Error(
+      'Nobody is left to follow up: everyone replied, was marked, or is excluded (undeliverable / suppressed)',
+    );
   }
 
   const bodyText = String(input.body ?? '').trim();
