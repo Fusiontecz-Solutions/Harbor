@@ -40,6 +40,7 @@ import {
     markConversationRead as markReadRequest,
     type Conversation,
     type Message,
+    type MessageStatus,
 } from '@/services/messaging/messagingApi';
 
 /** How often to poll when the socket is DOWN. Never used while connected. */
@@ -231,10 +232,16 @@ export function useInbox({ userScope, search = '', filter = 'all' }: UseInboxOpt
 
                 if (conversationId === activeConversationRef.current) {
                     setMessages((prev) => {
-                        // The optimistic copy of our own send is already in the
-                        // list — replace rather than duplicate.
                         if (prev.some((m) => m.id === message.id)) return prev;
-                        return [...prev, message];
+                        const withoutPendingDup = prev.filter(
+                            (m) =>
+                                !(
+                                    m.id.startsWith('pending-') &&
+                                    m.direction === 'OUTBOUND' &&
+                                    m.body === message.body
+                                ),
+                        );
+                        return [...withoutPendingDup, message];
                     });
                     memoryInvalidate(memoryKeys.messagesPrefix(conversationId));
                 }
@@ -354,6 +361,84 @@ export function useInbox({ userScope, search = '', filter = 'all' }: UseInboxOpt
         void loadConversations(1, { force: true });
     }, [loadConversations, loadMessages]);
 
+    /** Show an outbound bubble immediately; reconcile when the send API returns. */
+    const pushOptimisticOutbound = useCallback(
+        (input: { body: string; fromNumber: string; toNumber: string }): string => {
+            const tempId = `pending-${globalThis.crypto?.randomUUID?.() ?? String(Date.now())}`;
+            const now = new Date().toISOString();
+            const optimistic: Message = {
+                id: tempId,
+                direction: 'OUTBOUND',
+                fromNumber: input.fromNumber,
+                toNumber: input.toNumber,
+                body: input.body,
+                mediaUrls: [],
+                status: 'SENT',
+                errorMessage: null,
+                broadcastId: null,
+                isStopKeyword: false,
+                sentAt: now,
+                deliveredAt: null,
+                createdAt: now,
+            };
+
+            setMessages((prev) => [...prev, optimistic]);
+
+            const conversationId = activeConversationRef.current;
+            if (conversationId) {
+                setConversations((prev) =>
+                    prev.map((conv) =>
+                        conv.id === conversationId
+                            ? {
+                                  ...conv,
+                                  lastMessageText: input.body.slice(0, 500),
+                                  lastMessageAt: now,
+                                  lastMessageDirection: 'OUTBOUND',
+                              }
+                            : conv,
+                    ),
+                );
+                memoryInvalidate(memoryKeys.messagesPrefix(conversationId));
+            }
+
+            memoryInvalidate(memoryKeys.conversationsPrefix);
+            return tempId;
+        },
+        [],
+    );
+
+    const reconcileOptimisticOutbound = useCallback(
+        (
+            tempId: string,
+            result: { messageId?: string | null; status?: MessageStatus } | null,
+            errorMessage?: string | null,
+        ) => {
+            setMessages((prev) =>
+                prev.map((message) => {
+                    if (message.id !== tempId) return message;
+                    if (errorMessage) {
+                        return {
+                            ...message,
+                            status: 'FAILED',
+                            errorMessage,
+                        };
+                    }
+                    const nextId = result?.messageId?.trim() || message.id;
+                    const nextStatus =
+                        result?.status && result.status !== 'QUEUED'
+                            ? result.status
+                            : message.status;
+                    return {
+                        ...message,
+                        id: nextId,
+                        status: nextStatus,
+                    };
+                }),
+            );
+        },
+        [],
+    );
+
     return {
         conversations,
         isLoadingConversations,
@@ -368,6 +453,8 @@ export function useInbox({ userScope, search = '', filter = 'all' }: UseInboxOpt
         messages,
         isLoadingMessages,
         refreshAfterSend,
+        pushOptimisticOutbound,
+        reconcileOptimisticOutbound,
 
         isRealtime: isConnected,
     };

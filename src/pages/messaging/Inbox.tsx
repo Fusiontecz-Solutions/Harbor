@@ -202,7 +202,7 @@ export default function Inbox() {
     const [config, setConfig] = useState<MessagingConfig | null>(null);
     const [draft, setDraft] = useState('');
     const draftSms = useSmsSegmentInfo(draft);
-    const [isSending, setIsSending] = useState(false);
+    const [draftMessages, setDraftMessages] = useState<Message[]>([]);
     const [newNumber, setNewNumber] = useState('');
     const [isClientPickerOpen, setIsClientPickerOpen] = useState(false);
     // The CRM client book is admin-only; agents message their own leads.
@@ -231,13 +231,15 @@ export default function Inbox() {
         messages: loadedMessages,
         isLoadingMessages,
         refreshAfterSend,
+        pushOptimisticOutbound,
+        reconcileOptimisticOutbound,
         isRealtime,
     } = useInbox({ userScope, search, filter });
 
     /* A draft takes over the chat pane; it has no id, so no history to load. */
     const activeConversation = draftConversation ?? selectedConversation;
     const isDraft = Boolean(draftConversation);
-    const messages = isDraft ? EMPTY_MESSAGES : loadedMessages;
+    const messages = isDraft ? draftMessages : loadedMessages;
 
     /** Open a real thread, discarding any unsent draft. */
     const selectConversation = useCallback(
@@ -269,6 +271,7 @@ export default function Inbox() {
             openConversation(null);
             setDraftConversation(makeDraftConversation(contactNumber, businessNumber, contactName));
             setDraftClientId(clientId);
+            setDraftMessages([]);
             setDraft('');
             return true;
         },
@@ -307,44 +310,92 @@ export default function Inbox() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [activeConversation?.contactNumber]);
 
-    const handleSend = useCallback(async () => {
+    const handleSend = useCallback(() => {
         const body = draft.trim();
-        if (!body || !activeConversation || isSending) return;
+        if (!body || !activeConversation) return;
         if (!confirmMultiSegmentSend(draftSms, 1)) return;
 
-        setIsSending(true);
-        try {
-            const result = await sendMessage({
-                toNumber: activeConversation.contactNumber,
-                fromNumber: activeConversation.businessNumber || undefined,
-                body,
-                ...(isDraft && draftClientId ? { clientId: draftClientId } : {}),
-            });
-            setDraft('');
+        const fromNumber =
+            activeConversation.businessNumber || config?.defaultSender || '';
+        const toNumber = activeConversation.contactNumber;
+        setDraft('');
 
-            if (isDraft) {
-                // The send is what created the thread — swap the placeholder for
-                // the real one so ticks, history and delete all work from here.
-                setDraftConversation(null);
-                setDraftClientId(null);
-                await reloadConversations();
-                if (result?.conversationId) openConversation(result.conversationId);
-            } else {
-                refreshAfterSend();
-            }
-        } catch (error: any) {
-            toast.error(error?.response?.data?.message || 'Failed to send message');
-        } finally {
-            setIsSending(false);
+        let optimisticId: string | null = null;
+        if (isDraft) {
+            const tempId = `pending-${globalThis.crypto?.randomUUID?.() ?? String(Date.now())}`;
+            const now = new Date().toISOString();
+            setDraftMessages((prev) => [
+                ...prev,
+                {
+                    id: tempId,
+                    direction: 'OUTBOUND',
+                    fromNumber,
+                    toNumber,
+                    body,
+                    mediaUrls: [],
+                    status: 'SENT',
+                    errorMessage: null,
+                    broadcastId: null,
+                    isStopKeyword: false,
+                    sentAt: now,
+                    deliveredAt: null,
+                    createdAt: now,
+                },
+            ]);
+            optimisticId = tempId;
+        } else if (activeConversation.id) {
+            optimisticId = pushOptimisticOutbound({ body, fromNumber, toNumber });
         }
+
+        void (async () => {
+            try {
+                const result = await sendMessage({
+                    toNumber,
+                    fromNumber: fromNumber || undefined,
+                    body,
+                    ...(isDraft && draftClientId ? { clientId: draftClientId } : {}),
+                });
+
+                if (isDraft) {
+                    setDraftConversation(null);
+                    setDraftClientId(null);
+                    setDraftMessages([]);
+                    void reloadConversations();
+                    if (result?.conversationId) openConversation(result.conversationId);
+                } else if (optimisticId) {
+                    reconcileOptimisticOutbound(optimisticId, {
+                        messageId: result?.messageId ?? null,
+                        status: result?.status,
+                    });
+                    void refreshAfterSend();
+                }
+            } catch (error: any) {
+                const message =
+                    error?.response?.data?.message || 'Failed to send message';
+                toast.error(message);
+                if (isDraft && optimisticId) {
+                    setDraftMessages((prev) =>
+                        prev.map((row) =>
+                            row.id === optimisticId
+                                ? { ...row, status: 'FAILED', errorMessage: message }
+                                : row,
+                        ),
+                    );
+                } else if (optimisticId) {
+                    reconcileOptimisticOutbound(optimisticId, null, message);
+                }
+            }
+        })();
     }, [
         activeConversation,
+        config?.defaultSender,
         draft,
         draftClientId,
         draftSms,
         isDraft,
-        isSending,
         openConversation,
+        pushOptimisticOutbound,
+        reconcileOptimisticOutbound,
         refreshAfterSend,
         reloadConversations,
     ]);
@@ -786,13 +837,9 @@ export default function Inbox() {
                                     size="icon"
                                     className="h-9 w-9 shrink-0"
                                     onClick={handleSend}
-                                    disabled={!canSend || !draft.trim() || isSending}
+                                    disabled={!canSend || !draft.trim()}
                                 >
-                                    {isSending ? (
-                                        <Loader2 className="h-4 w-4 animate-spin" />
-                                    ) : (
-                                        <Send className="h-4 w-4" />
-                                    )}
+                                    <Send className="h-4 w-4" />
                                 </Button>
                             </div>
                             {draft.trim() ? (
