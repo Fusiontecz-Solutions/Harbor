@@ -1,6 +1,15 @@
 import { Prisma, type SmsBroadcastStatus } from '@prisma/client';
 import prisma from '../../config/prismaClient';
-import { COUNTED_SQL, DAY_MS, dayKey, FAILED_SQL, REFUSED_SQL, resolveRange, SEGMENTS_SQL } from './counting';
+import {
+  COUNTED_SQL,
+  DAY_MS,
+  dayKey,
+  FAILED_SQL,
+  INBOUND_COUNTED_SQL,
+  REFUSED_SQL,
+  resolveRange,
+  SEGMENTS_SQL,
+} from './counting';
 
 export const CONTRACT = 'tenant-control/v2' as const;
 
@@ -13,23 +22,46 @@ interface UsageDay {
   failed: number;
   segments: number;
   blocked: number;
+  /**
+   * Inbound replies (MO) received that day, and how many of those were an
+   * opt-out. Both are inbound, so neither is part of `sent` — they are
+   * reported alongside it so the console can show reply and opt-out rates
+   * without a second round trip.
+   */
+  replied: number;
+  optOut: number;
 }
 
 // ── GET /usage ──────────────────────────────────────────────────────────────
 
 export async function collectUsage(query: Query, now = new Date()) {
   const { from, to, start, end } = resolveRange(query, now);
+  // Inbound is read in the same pass, so the direction filter widens to both.
+  // Every outbound aggregate still carries its own COUNTED/REFUSED filter, so
+  // adding inbound rows to the scan cannot change them.
   const rows = await prisma.$queryRaw<
-    { day: string; sent: bigint; delivered: bigint; failed: bigint; segments: bigint; blocked: bigint }[]
+    {
+      day: string;
+      sent: bigint;
+      delivered: bigint;
+      failed: bigint;
+      segments: bigint;
+      blocked: bigint;
+      replied: bigint;
+      optOut: bigint;
+    }[]
   >`
     SELECT to_char(date_trunc('day', "createdAt"), 'YYYY-MM-DD') AS day,
            count(*) FILTER (WHERE ${COUNTED_SQL}) AS sent,
            count(*) FILTER (WHERE ${COUNTED_SQL} AND "status"::text = 'DELIVERED') AS delivered,
            count(*) FILTER (WHERE ${COUNTED_SQL} AND ${FAILED_SQL}) AS failed,
            COALESCE(SUM(${SEGMENTS_SQL}) FILTER (WHERE ${COUNTED_SQL}), 0)::bigint AS segments,
-           count(*) FILTER (WHERE ${REFUSED_SQL}) AS blocked
+           count(*) FILTER (WHERE ${REFUSED_SQL}) AS blocked,
+           count(*) FILTER (WHERE ${INBOUND_COUNTED_SQL}) AS replied,
+           count(*) FILTER (WHERE ${INBOUND_COUNTED_SQL} AND "isStopKeyword") AS "optOut"
       FROM "MessagingMessage"
-     WHERE "direction"::text = 'OUTBOUND' AND "createdAt" >= ${start} AND "createdAt" < ${end}
+     WHERE "direction"::text IN ('OUTBOUND', 'INBOUND')
+       AND "createdAt" >= ${start} AND "createdAt" < ${end}
      GROUP BY 1`;
 
   const byDay = new Map(rows.map((r) => [r.day, r]));
@@ -44,6 +76,8 @@ export async function collectUsage(query: Query, now = new Date()) {
       failed: Number(r?.failed ?? 0),
       segments: Number(r?.segments ?? 0),
       blocked: Number(r?.blocked ?? 0),
+      replied: Number(r?.replied ?? 0),
+      optOut: Number(r?.optOut ?? 0),
     });
   }
   const sum = (key: Exclude<keyof UsageDay, 'date'>) => daily.reduce((a, d) => a + d[key], 0);
@@ -52,7 +86,15 @@ export async function collectUsage(query: Query, now = new Date()) {
     contract: CONTRACT,
     from,
     to,
-    totals: { sent: sum('sent'), delivered: sum('delivered'), failed: sum('failed'), segments: sum('segments'), blocked: sum('blocked') },
+    totals: {
+      sent: sum('sent'),
+      delivered: sum('delivered'),
+      failed: sum('failed'),
+      segments: sum('segments'),
+      blocked: sum('blocked'),
+      replied: sum('replied'),
+      optOut: sum('optOut'),
+    },
     daily,
     generatedAt: now.toISOString(),
   };
