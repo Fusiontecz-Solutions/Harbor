@@ -23,10 +23,13 @@ interface UsageDay {
   segments: number;
   blocked: number;
   /**
-   * Inbound replies (MO) received that day, and how many of those were an
-   * opt-out. Both are inbound, so neither is part of `sent` — they are
-   * reported alongside it so the console can show reply and opt-out rates
-   * without a second round trip.
+   * ALL inbound (MO) messages received that day — not only replies attributed
+   * to a campaign — and how many of those were an opt-out. Both are inbound,
+   * so neither is part of `sent`; they are reported alongside it so the console
+   * can show inbound and opt-out rates without a second round trip.
+   *
+   * The field is named `replied` because that is what the contract shipped as;
+   * the console surfaces it as "Messages Received".
    */
   replied: number;
   optOut: number;
