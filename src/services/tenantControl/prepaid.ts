@@ -15,6 +15,7 @@ export class PrepaidExhaustedError extends Error {
 export interface PrepaidState {
   balance: number;
   pricePerUnit: number;
+  inboundPricePerUnit: number | null;
   currency: string;
   chargeBy: 'messages' | 'segments';
   updatedAt: string | null;
@@ -30,14 +31,20 @@ const money = (v: Prisma.Decimal | number | null | undefined): number =>
 function rowToPrepaid(row: {
   prepaidBalance: Prisma.Decimal | null;
   prepaidUnitPrice: Prisma.Decimal | null;
+  prepaidInboundUnitPrice?: Prisma.Decimal | null;
   prepaidCurrency: string | null;
   prepaidChargeBy: string | null;
   prepaidUpdatedAt: Date | null;
 }): PrepaidState | null {
   if (row.prepaidUnitPrice === null) return null;
+  const inbound =
+    row.prepaidInboundUnitPrice === null || row.prepaidInboundUnitPrice === undefined
+      ? null
+      : money(row.prepaidInboundUnitPrice);
   return {
     balance: money(row.prepaidBalance),
     pricePerUnit: money(row.prepaidUnitPrice),
+    inboundPricePerUnit: inbound,
     currency: row.prepaidCurrency?.trim() || 'USD',
     chargeBy: row.prepaidChargeBy === 'segments' ? 'segments' : 'messages',
     updatedAt: row.prepaidUpdatedAt?.toISOString() ?? null,
@@ -60,11 +67,20 @@ export async function getPrepaidState(options: { fresh?: boolean } = {}): Promis
 export async function setPrepaidState(input: {
   balance: number;
   pricePerUnit: number;
+  inboundPricePerUnit?: number | null;
   currency?: string;
   chargeBy?: 'messages' | 'segments';
   updatedBy?: string | null;
 }): Promise<PrepaidState> {
-  const data = {
+  const data: {
+    prepaidBalance: Prisma.Decimal;
+    prepaidUnitPrice: Prisma.Decimal;
+    prepaidInboundUnitPrice?: Prisma.Decimal | null;
+    prepaidCurrency: string;
+    prepaidChargeBy: string;
+    prepaidUpdatedBy: string | null;
+    prepaidUpdatedAt: Date;
+  } = {
     prepaidBalance: new Prisma.Decimal(Math.max(0, input.balance).toFixed(4)),
     prepaidUnitPrice: new Prisma.Decimal(input.pricePerUnit.toFixed(6)),
     prepaidCurrency: (input.currency ?? 'USD').trim().slice(0, 8) || 'USD',
@@ -72,6 +88,12 @@ export async function setPrepaidState(input: {
     prepaidUpdatedBy: input.updatedBy?.trim().slice(0, 200) || null,
     prepaidUpdatedAt: new Date(),
   };
+  if (input.inboundPricePerUnit !== undefined) {
+    data.prepaidInboundUnitPrice =
+      input.inboundPricePerUnit === null
+        ? null
+        : new Prisma.Decimal(input.inboundPricePerUnit.toFixed(6));
+  }
   const row = await prisma.tenantControl.upsert({
     where: { id: ROW_ID },
     create: { id: ROW_ID, ...data },
@@ -83,16 +105,18 @@ export async function setPrepaidState(input: {
   return state;
 }
 
-function sendCost(state: PrepaidState, segments: number | null): number {
+function unitCost(state: PrepaidState, segments: number | null, direction: 'outbound' | 'inbound'): number {
   const units = state.chargeBy === 'segments' ? Math.max(1, segments ?? 1) : 1;
-  return units * state.pricePerUnit;
+  const rate =
+    direction === 'inbound' ? state.inboundPricePerUnit ?? state.pricePerUnit : state.pricePerUnit;
+  return units * rate;
 }
 
 /** Refuses the send when prepaid is configured and balance is too low. */
 export async function assertPrepaidBalance(segments: number | null): Promise<void> {
   const state = await getPrepaidState();
   if (!state || state.pricePerUnit <= 0) return;
-  const cost = sendCost(state, segments);
+  const cost = unitCost(state, segments, 'outbound');
   if (state.balance + 1e-9 < cost) throw new PrepaidExhaustedError();
 }
 
@@ -100,7 +124,7 @@ export async function assertPrepaidBalance(segments: number | null): Promise<voi
 export async function deductPrepaidAfterSend(segments: number | null): Promise<void> {
   const state = await getPrepaidState({ fresh: true });
   if (!state || state.pricePerUnit <= 0) return;
-  const cost = sendCost(state, segments);
+  const cost = unitCost(state, segments, 'outbound');
   try {
     await prisma.$executeRaw`
       UPDATE "TenantControl"
@@ -110,6 +134,22 @@ export async function deductPrepaidAfterSend(segments: number | null): Promise<v
     cache = null;
   } catch (err) {
     console.error('[tenant-control] prepaid deduct failed:', (err as Error)?.message);
+  }
+}
+
+export async function deductPrepaidAfterInbound(segments: number | null): Promise<void> {
+  const state = await getPrepaidState({ fresh: true });
+  if (!state || state.pricePerUnit <= 0) return;
+  const cost = unitCost(state, segments, 'inbound');
+  try {
+    await prisma.$executeRaw`
+      UPDATE "TenantControl"
+         SET "prepaidBalance" = GREATEST(0, COALESCE("prepaidBalance", 0) - ${cost}),
+             "prepaidUpdatedAt" = NOW()
+       WHERE "id" = ${ROW_ID}`;
+    cache = null;
+  } catch (err) {
+    console.error('[tenant-control] prepaid inbound deduct failed:', (err as Error)?.message);
   }
 }
 

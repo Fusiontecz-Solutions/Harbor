@@ -25,6 +25,10 @@ export const COUNTED_SQL = Prisma.sql`("direction"::text = 'OUTBOUND'
   AND "status"::text NOT IN ('QUEUED', 'SENDING')
   AND ("errorCode" IS NULL OR "errorCode" NOT IN (${Prisma.join(REFUSED_CODES)})))`;
 
+/** Inbound MO — same billing unit as outbound in the tenant console. */
+export const INBOUND_COUNTED_SQL = Prisma.sql`("direction"::text = 'INBOUND'
+  AND "status"::text NOT IN ('QUEUED', 'SENDING'))`;
+
 export const REFUSED_SQL = Prisma.sql`("direction"::text = 'OUTBOUND' AND "errorCode" IN (${Prisma.join(REFUSED_CODES)}))`;
 
 export const FAILED_SQL = Prisma.sql`"status"::text IN ('FAILED', 'UNDELIVERABLE')`;

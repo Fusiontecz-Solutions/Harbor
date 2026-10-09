@@ -21,6 +21,7 @@ import {
 import { normalizePhoneNumber, normalizeSender } from './phone';
 import { isStartKeyword, isStopKeyword } from './suppression.service';
 import { normalizeInboxTab, tabSkipsBroadcastVisibility } from './inboxTabs';
+import { deductPrepaidAfterInbound } from '../tenantControl/prepaid';
 
 /** Short TTL: the inbox is realtime via sockets, the cache only absorbs bursts. */
 const CONVERSATION_LIST_TTL_SECONDS = 15;
@@ -186,6 +187,8 @@ export async function recordInboundMessage(input: {
   });
 
   await invalidateConversationCaches(result.conversationId);
+
+  void deductPrepaidAfterInbound(1);
 
   return { ...result, duplicate: false, isStop };
 }

@@ -1,6 +1,6 @@
 import prisma from '../../config/prismaClient';
 import { getAccountBalance, isInfobipConfigured, toInfobipError } from '../messaging/infobip.service';
-import { COUNTED_SQL, countedWhere, DAY_MS, FAILED_SQL, REFUSED_CODES, SEGMENTS_SQL } from './counting';
+import { COUNTED_SQL, countedWhere, DAY_MS, FAILED_SQL, INBOUND_COUNTED_SQL, REFUSED_CODES, SEGMENTS_SQL } from './counting';
 import { getLimitState, type LimitState } from './quota';
 import { getPrepaidState, type PrepaidState } from './prepaid';
 import { getSendingState, type SendingState } from './state';
@@ -24,6 +24,14 @@ export interface TenantStatus {
     segments30d: number;
     blocked30d: number;
     daily: { date: string; sent: number; failed: number }[];
+    inbound: {
+      total: number;
+      segmentsTotal: number;
+      last24h: number;
+      last7d: number;
+      last30d: number;
+      segments30d: number;
+    };
   };
   balance:
     | { available: true; amount: number; currency: string; monthlyLimit: number | null; monthlyBalance: number | null }
@@ -67,7 +75,7 @@ export async function collectStatus(now = new Date()): Promise<TenantStatus> {
   const d30 = new Date(now.getTime() - 30 * DAY_MS);
   const seriesStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - 29 * DAY_MS);
 
-  const [sending, balance, limit, prepaid, totals, last24h, last7d, window30, blocked30d, dailyRows] = await Promise.all([
+  const [sending, balance, limit, prepaid, totals, inboundTotals, inbound24h, inbound7d, inbound30, last24h, last7d, window30, blocked30d, dailyRows] = await Promise.all([
     getSendingState({ fresh: true }),
     readBalance(),
     getLimitState(now),
@@ -75,6 +83,16 @@ export async function collectStatus(now = new Date()): Promise<TenantStatus> {
     prisma.$queryRaw<{ total: bigint; segments: bigint }[]>`
       SELECT count(*) AS total, COALESCE(SUM(${SEGMENTS_SQL}), 0)::bigint AS segments
         FROM "MessagingMessage" WHERE ${COUNTED_SQL}`,
+    prisma.$queryRaw<{ total: bigint; segments: bigint }[]>`
+      SELECT count(*) AS total, COALESCE(SUM(${SEGMENTS_SQL}), 0)::bigint AS segments
+        FROM "MessagingMessage" WHERE ${INBOUND_COUNTED_SQL}`,
+    prisma.$queryRaw<{ n: bigint }[]>`
+      SELECT count(*) AS n FROM "MessagingMessage" WHERE ${INBOUND_COUNTED_SQL} AND "createdAt" >= ${d1}`,
+    prisma.$queryRaw<{ n: bigint }[]>`
+      SELECT count(*) AS n FROM "MessagingMessage" WHERE ${INBOUND_COUNTED_SQL} AND "createdAt" >= ${d7}`,
+    prisma.$queryRaw<{ total: bigint; segments: bigint }[]>`
+      SELECT count(*) AS total, COALESCE(SUM(${SEGMENTS_SQL}), 0)::bigint AS segments
+        FROM "MessagingMessage" WHERE ${INBOUND_COUNTED_SQL} AND "createdAt" >= ${d30}`,
     prisma.messagingMessage.count({ where: countedWhere({ gte: d1 }) }),
     prisma.messagingMessage.count({ where: countedWhere({ gte: d7 }) }),
     prisma.$queryRaw<{ total: bigint; delivered: bigint; failed: bigint; segments: bigint }[]>`
@@ -119,6 +137,14 @@ export async function collectStatus(now = new Date()): Promise<TenantStatus> {
       segments30d: Number(w?.segments ?? 0),
       blocked30d,
       daily,
+      inbound: {
+        total: Number(inboundTotals[0]?.total ?? 0),
+        segmentsTotal: Number(inboundTotals[0]?.segments ?? 0),
+        last24h: Number(inbound24h[0]?.n ?? 0),
+        last7d: Number(inbound7d[0]?.n ?? 0),
+        last30d: Number(inbound30[0]?.total ?? 0),
+        segments30d: Number(inbound30[0]?.segments ?? 0),
+      },
     },
     balance,
     generatedAt: now.toISOString(),
