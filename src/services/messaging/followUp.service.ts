@@ -130,6 +130,8 @@ async function respondedNumbers(
   broadcastId: string,
   since: Date,
   numbers: string[],
+  /** The number this campaign sent from; replies arrive back on it. */
+  businessNumber: string | null,
 ): Promise<Set<string>> {
   if (numbers.length === 0) return new Set();
 
@@ -137,9 +139,24 @@ async function respondedNumbers(
     where: {
       direction: 'INBOUND',
       fromNumber: { in: numbers },
-      // Either attributed to this campaign, or simply anything they have said
-      // to us since it went out — both mean they answered.
-      OR: [{ broadcastId }, { createdAt: { gte: since } }],
+      OR: [
+        // Attributed to this campaign.
+        { broadcastId },
+        /**
+         * Or simply anything they said to us on this campaign's own number
+         * since it went out — a reply that arrived before attribution was
+         * fixed, or one the provider never echoed a campaign for, still means
+         * they answered.
+         *
+         * Scoped to `toNumber` so two campaigns running from different senders
+         * at the same time cannot absorb each other's replies, which would
+         * silently drop real leads out of a follow-up.
+         */
+        {
+          createdAt: { gte: since },
+          ...(businessNumber ? { toNumber: businessNumber } : {}),
+        },
+      ],
     },
     select: { fromNumber: true },
   });
@@ -170,7 +187,7 @@ export async function previewFollowUpAudience(
 ): Promise<FollowUpPreview> {
   const parent = await prisma.smsBroadcast.findUnique({
     where: { id: parentId },
-    select: { id: true, name: true, startedAt: true, finishedAt: true, createdAt: true },
+    select: { id: true, name: true, fromNumber: true, startedAt: true, finishedAt: true, createdAt: true },
   });
   if (!parent) throw new Error('Broadcast not found');
 
@@ -198,7 +215,7 @@ export async function previewFollowUpAudience(
     };
   }
 
-  const responded = await respondedNumbers(parentId, since, candidateNumbers);
+  const responded = await respondedNumbers(parentId, since, candidateNumbers, parent.fromNumber);
   const silent = candidateNumbers.filter((number) => !responded.has(number));
 
   const handled = await prisma.messagingContact.findMany({
@@ -287,6 +304,7 @@ export async function createFollowUpBroadcast(input: {
     input.parentId,
     since,
     candidates.map((row) => row.phoneNumber),
+    parent.fromNumber,
   );
 
   const silent = candidates.filter((row) => !responded.has(row.phoneNumber));

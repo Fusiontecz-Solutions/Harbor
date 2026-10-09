@@ -24,6 +24,7 @@ import {
   recordInboundMessage,
 } from '../services/messaging/conversation.service';
 import { recordBroadcastCounter } from '../services/messaging/broadcast.service';
+import { normalizePhoneNumber, normalizeSender } from '../services/messaging/phone';
 import { applyStartKeyword, applyStopKeyword, isStartKeyword } from '../services/messaging/suppression.service';
 import {
   emitConversationUpdate,
@@ -230,16 +231,29 @@ class MessagingWebhookController {
  * Looks for the most recent outbound broadcast message this number received in
  * the last 30 days. Older than that and a reply is far more likely to be a new
  * conversation than a late campaign response.
+ *
+ * Both numbers are normalized first. Infobip reports MO numbers as bare digits
+ * ("19176151235") while every number we store went through
+ * normalizePhoneNumber ("+19176151235"), so matching the raw callback values
+ * against stored columns never found a row: every reply was recorded with a
+ * null broadcastId, campaign reply counts sat at zero however many people
+ * answered, and follow-ups could not tell a responder from a silent lead.
  */
-async function inferBroadcastId(fromNumber: string, toNumber: string): Promise<string | null> {
+async function inferBroadcastId(rawFrom: string, rawTo: string): Promise<string | null> {
   const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+
+  const contactNumber = normalizePhoneNumber(rawFrom);
+  const businessNumber = normalizeSender(rawTo);
+  if (!contactNumber || !businessNumber) return null;
 
   const lastBroadcastMessage = await prisma.messagingMessage.findFirst({
     where: {
       direction: 'OUTBOUND',
       broadcastId: { not: null },
-      toNumber: fromNumber,
-      fromNumber: toNumber,
+      // Scoped to the number the reply arrived on, so two campaigns running
+      // from different senders cannot steal each other's replies.
+      toNumber: contactNumber,
+      fromNumber: businessNumber,
       createdAt: { gte: new Date(Date.now() - THIRTY_DAYS_MS) },
     },
     orderBy: { createdAt: 'desc' },
