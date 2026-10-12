@@ -9,7 +9,7 @@
  * Buckets available: delivered, sent, queued, failed, undeliverable,
  * suppressed, replied, opted-out.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { toast } from 'react-toastify';
 import {
@@ -176,8 +176,13 @@ export default function BroadcastDetail() {
         setPage(1);
     }, []);
 
+    // Ignore repeat clicks while an action is in flight (double Start).
+    const actionInFlight = useRef(false);
+
     const act = useCallback(
         async (action: 'start' | 'pause' | 'cancel') => {
+            if (actionInFlight.current) return;
+            actionInFlight.current = true;
             try {
                 if (action === 'start') await startBroadcast(broadcastId);
                 if (action === 'pause') await pauseBroadcast(broadcastId);
@@ -185,6 +190,8 @@ export default function BroadcastDetail() {
                 await loadBroadcast();
             } catch (err: any) {
                 toast.error(err?.response?.data?.message || `Failed to ${action}`);
+            } finally {
+                actionInFlight.current = false;
             }
         },
         [broadcastId, loadBroadcast],
@@ -251,7 +258,7 @@ export default function BroadcastDetail() {
                             <Pause className="mr-1 h-4 w-4" /> Pause
                         </Button>
                     )}
-                    {broadcast.status !== 'COMPLETED' && broadcast.status !== 'CANCELLED' && (
+                    {broadcast.status !== 'COMPLETED' && broadcast.status !== 'CANCELLED' && broadcast.status !== 'FAILED' && (
                         <Button size="sm" variant="ghost" onClick={() => act('cancel')}>
                             <X className="mr-1 h-4 w-4" /> Cancel
                         </Button>

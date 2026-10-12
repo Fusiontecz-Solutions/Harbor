@@ -8,7 +8,7 @@
  * Progress counters are patched in place from the `broadcast_progress` socket
  * event rather than refetched — a running campaign emits these continuously.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'react-toastify';
 import {
@@ -114,8 +114,14 @@ export default function Broadcasts() {
         };
     }, [socket]);
 
+    // One action per campaign at a time: a double-clicked Start used to fire
+    // two requests. The backend now rejects the second, this just avoids it.
+    const inFlight = useRef(new Set<string>());
+
     const act = useCallback(
         async (id: string, action: 'start' | 'pause' | 'cancel' | 'approve' | 'reject') => {
+            if (inFlight.current.has(id)) return;
+            inFlight.current.add(id);
             try {
                 if (action === 'start') await startBroadcast(id);
                 if (action === 'pause') await pauseBroadcast(id);
@@ -127,6 +133,8 @@ export default function Broadcasts() {
                 await load();
             } catch (error: any) {
                 toast.error(error?.response?.data?.message || `Failed to ${action} broadcast`);
+            } finally {
+                inFlight.current.delete(id);
             }
         },
         [load],
@@ -364,7 +372,7 @@ function BroadcastRow({
                         <Pause className="h-4 w-4" />
                     </Button>
                 )}
-                {broadcast.status !== 'COMPLETED' && broadcast.status !== 'CANCELLED' && (
+                {broadcast.status !== 'COMPLETED' && broadcast.status !== 'CANCELLED' && broadcast.status !== 'FAILED' && (
                     <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => onAction(broadcast.id, 'cancel')} title="Cancel">
                         <X className="h-4 w-4" />
                     </Button>
