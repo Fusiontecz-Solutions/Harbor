@@ -70,6 +70,8 @@ class MessagingWebhookController {
     }
 
     let processed = 0;
+    /** An opt-out we could not apply — ask Infobip to redeliver the batch. */
+    let stopFailed = false;
 
     for (const message of messages) {
       try {
@@ -87,14 +89,29 @@ class MessagingWebhookController {
           broadcastId,
         });
 
-        if (!result || result.duplicate) continue;
+        if (!result) continue;
+
+        // A lost opt-out is a compliance problem, so on failure we answer
+        // non-2xx and Infobip redelivers. The message row already exists by
+        // then, so the retry arrives as a duplicate — which is why STOP is
+        // re-applied for duplicates too (it is idempotent). START is not, since
+        // an old START redelivered after a newer STOP must not undo it.
+        if (result.isStop) {
+          try {
+            await applyStopKeyword(message.from, result.conversationId);
+          } catch (err) {
+            stopFailed = true;
+            console.error('[messaging:webhook] could not apply STOP, requesting redelivery:', message.from, err);
+            continue;
+          }
+        }
+
+        if (result.duplicate) continue;
         processed += 1;
 
         // The campaign's replied/optOut counters were already incremented inside
-        // recordInboundMessage; this only applies the suppression side effect.
-        if (result.isStop) {
-          await applyStopKeyword(message.from, result.conversationId);
-        } else if (isStartKeyword(message.text)) {
+        // recordInboundMessage; STOP's suppression was applied above.
+        if (!result.isStop && isStartKeyword(message.text)) {
           await applyStartKeyword(message.from, result.conversationId);
         }
 
@@ -130,6 +147,11 @@ class MessagingWebhookController {
       emitUnreadCountUpdate(await getTotalUnread());
     } catch {
       /* non-critical */
+    }
+
+    if (stopFailed) {
+      res.status(500).json({ success: false, processed, message: 'Opt-out could not be recorded; please redeliver' });
+      return;
     }
 
     res.status(200).json({ success: true, processed });

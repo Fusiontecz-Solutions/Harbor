@@ -13,7 +13,8 @@
 import type { Prisma } from '@prisma/client';
 import prisma from '../../config/prismaClient';
 import {
-  cacheDelPattern,
+  cacheBumpGeneration,
+  cacheGeneration,
   cacheGet,
   cacheKeys,
   cacheSet,
@@ -26,6 +27,9 @@ import { deductPrepaidAfterInbound } from '../tenantControl/prepaid';
 /** Short TTL: the inbox is realtime via sockets, the cache only absorbs bursts. */
 const CONVERSATION_LIST_TTL_SECONDS = 15;
 const MESSAGE_PAGE_TTL_SECONDS = 10;
+/** Generation names for O(1) cache invalidation (see cacheBumpGeneration). */
+const LIST_GENERATION = 'conv:list';
+const messagesGeneration = (conversationId: string): string => `conv:msgs:${conversationId}`;
 
 export const CONVERSATION_PAGE_SIZE = 30;
 export const MESSAGE_PAGE_SIZE = 50;
@@ -120,7 +124,14 @@ export async function recordInboundMessage(input: {
     select: { id: true, conversationId: true },
   });
   if (existing) {
-    return { conversationId: existing.conversationId, messageId: existing.id, duplicate: true, isStop: false };
+    // Report isStop on redeliveries too: if applying the opt-out failed the
+    // first time, the provider's retry is the only chance to apply it.
+    return {
+      conversationId: existing.conversationId,
+      messageId: existing.id,
+      duplicate: true,
+      isStop: isStopKeyword(input.body),
+    };
   }
 
   const isStop = isStopKeyword(input.body);
@@ -365,7 +376,8 @@ export async function listConversations(params: ConversationListParams): Promise
   const scopeKey = Array.isArray(params.senderNumbers)
     ? params.senderNumbers.slice().sort().join(',')
     : 'all';
-  const cacheKey = cacheKeys.conversationList(params.userId, page, search, `${tab}:${scopeKey}`);
+  const generation = await cacheGeneration(LIST_GENERATION);
+  const cacheKey = cacheKeys.conversationList(params.userId, page, search, `${tab}:${scopeKey}:g${generation}`);
   const cached = await cacheGet<{ items: ConversationListItem[]; page: number; hasMore: boolean }>(cacheKey);
   if (cached) return cached;
 
@@ -484,7 +496,8 @@ export async function listMessages(conversationId: string, page = 1): Promise<{
   hasMore: boolean;
 }> {
   const safePage = Math.max(1, Number(page) || 1);
-  const cacheKey = cacheKeys.conversationMessages(conversationId, safePage);
+  const generation = await cacheGeneration(messagesGeneration(conversationId));
+  const cacheKey = `${cacheKeys.conversationMessages(conversationId, safePage)}:g${generation}`;
   const cached = await cacheGet<{ items: unknown[]; page: number; hasMore: boolean }>(cacheKey);
   if (cached) return cached;
 
@@ -545,12 +558,10 @@ export async function getTotalUnread(senderNumbers?: string[] | null): Promise<n
  * Invalidate both cache families touched by a write.
  *
  * Conversation lists are keyed per user and we do not know which users are
- * looking at a thread, so the list pattern is cleared wholesale. The TTL is
- * 15s, so this is cheap and correct rather than clever.
+ * looking at a thread, so every list is invalidated at once by bumping a shared
+ * generation. This runs on every outbound broadcast message, so it must stay
+ * O(1) — never a keyspace SCAN.
  */
 async function invalidateConversationCaches(conversationId: string): Promise<void> {
-  await Promise.all([
-    cacheDelPattern(cacheKeys.conversationMessagesPattern(conversationId)),
-    cacheDelPattern(cacheKeys.conversationListAllPattern()),
-  ]);
+  await cacheBumpGeneration(messagesGeneration(conversationId), LIST_GENERATION);
 }

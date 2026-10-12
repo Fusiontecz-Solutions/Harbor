@@ -336,7 +336,7 @@ class MessagingBroadcastController {
       res.json({ success: true, data: result });
     } catch (err) {
       console.error('[messaging:broadcast] start failed:', err);
-      res.status(400).json({ success: false, message: (err as Error)?.message || 'Failed to start broadcast' });
+      res.status(Number((err as { statusCode?: number })?.statusCode) || 400).json({ success: false, message: (err as Error)?.message || 'Failed to start broadcast' });
     }
   }
 
@@ -348,7 +348,7 @@ class MessagingBroadcastController {
       res.json({ success: true, data: { id: req.params.id, status: 'PAUSED' } });
     } catch (err) {
       console.error('[messaging:broadcast] pause failed:', err);
-      res.status(400).json({ success: false, message: (err as Error)?.message || 'Failed to pause broadcast' });
+      res.status(Number((err as { statusCode?: number })?.statusCode) || 400).json({ success: false, message: (err as Error)?.message || 'Failed to pause broadcast' });
     }
   }
 
@@ -360,7 +360,7 @@ class MessagingBroadcastController {
       res.json({ success: true, data: { id: req.params.id, status: 'CANCELLED' } });
     } catch (err) {
       console.error('[messaging:broadcast] cancel failed:', err);
-      res.status(400).json({ success: false, message: (err as Error)?.message || 'Failed to cancel broadcast' });
+      res.status(Number((err as { statusCode?: number })?.statusCode) || 400).json({ success: false, message: (err as Error)?.message || 'Failed to cancel broadcast' });
     }
   }
 
@@ -381,7 +381,7 @@ class MessagingBroadcastController {
       res.json({ success: true, data });
     } catch (err) {
       console.error('[messaging:broadcast] approve failed:', err);
-      res.status(400).json({ success: false, message: (err as Error)?.message || 'Failed to approve broadcast' });
+      res.status(Number((err as { statusCode?: number })?.statusCode) || 400).json({ success: false, message: (err as Error)?.message || 'Failed to approve broadcast' });
     }
   }
 

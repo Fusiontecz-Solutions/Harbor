@@ -43,6 +43,8 @@ export interface DispatchResult {
   reason: string | null;
   /** True when the caller should requeue rather than treat this as terminal. */
   retryable: boolean;
+  /** Provider or platform error code on failure (e.g. TENANT_LIMIT_REACHED). */
+  errorCode?: string | null;
 }
 
 export interface DispatchInput {
@@ -235,6 +237,7 @@ export async function dispatchOutboundMessage(input: DispatchInput): Promise<Dis
       providerMessageId: null,
       reason: error.message,
       retryable: error.retryable,
+      errorCode: error.providerCode,
     };
   }
 }

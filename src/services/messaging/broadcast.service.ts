@@ -193,10 +193,48 @@ function buildCampaignKey(name: string): string {
 }
 
 /**
+ * The broadcast is not in a state that allows the requested transition —
+ * already running, finished, cancelled, or awaiting approval. Distinct from an
+ * infrastructure failure so callers (the scheduler especially) can tell "someone
+ * else got there first" apart from "something is broken".
+ */
+export class BroadcastStateError extends Error {
+  readonly statusCode = 409;
+  constructor(message: string) {
+    super(message);
+    this.name = 'BroadcastStateError';
+  }
+}
+
+/** Statuses a campaign may be started (or resumed) from. */
+const STARTABLE_STATUSES = ['DRAFT', 'QUEUED', 'PAUSED'] as const;
+
+function describeUnstartable(status: string): string {
+  switch (status) {
+    case 'RUNNING':
+      return 'Broadcast is already running';
+    case 'COMPLETED':
+      return 'Broadcast has already completed';
+    case 'CANCELLED':
+      return 'Broadcast was cancelled and cannot be restarted';
+    case 'FAILED':
+      return 'Broadcast failed and cannot be restarted';
+    case 'PENDING_APPROVAL':
+      return 'Broadcast is waiting for approval and cannot be started';
+    default:
+      return `Broadcast cannot be started from status ${status}`;
+  }
+}
+
+/**
  * Hand a broadcast's queued recipients to the worker.
  *
  * Only rows still in QUEUED are enqueued, which makes this safe to call again
- * after a partial run — it resumes rather than restarts.
+ * after a pause — it resumes rather than restarts.
+ *
+ * The move to RUNNING is a single conditional UPDATE, so of two concurrent
+ * callers (a double-clicked Start, or the scheduler on two API instances) only
+ * one wins; the other gets a BroadcastStateError and enqueues nothing.
  */
 export async function startBroadcast(broadcastId: string): Promise<{ chunks: number; recipients: number }> {
   if (!isSmsBroadcastQueueEnabled()) {
@@ -205,15 +243,20 @@ export async function startBroadcast(broadcastId: string): Promise<{ chunks: num
 
   const broadcast = await prisma.smsBroadcast.findUnique({
     where: { id: broadcastId },
-    select: { id: true, status: true },
+    select: { id: true, status: true, startedAt: true },
   });
   if (!broadcast) throw new Error('Broadcast not found');
-  if (broadcast.status === 'RUNNING') throw new Error('Broadcast is already running');
-  if (broadcast.status === 'COMPLETED') throw new Error('Broadcast has already completed');
-  // The last line of defence: approval is also checked in the controller, but
-  // the scheduler and any future caller come through here.
-  if (broadcast.status === 'PENDING_APPROVAL') {
-    throw new Error('Broadcast is waiting for approval and cannot be started');
+  if (!(STARTABLE_STATUSES as readonly string[]).includes(broadcast.status)) {
+    throw new BroadcastStateError(describeUnstartable(broadcast.status));
+  }
+
+  // Claim: only succeeds if the status is still the one we just read.
+  const claimed = await prisma.smsBroadcast.updateMany({
+    where: { id: broadcastId, status: broadcast.status },
+    data: { status: 'RUNNING', startedAt: broadcast.startedAt ?? new Date(), finishedAt: null },
+  });
+  if (claimed.count === 0) {
+    throw new BroadcastStateError('Broadcast was started or changed by another request');
   }
 
   const pending = await prisma.smsBroadcastRecipient.findMany({
@@ -222,24 +265,25 @@ export async function startBroadcast(broadcastId: string): Promise<{ chunks: num
   });
 
   if (pending.length === 0) {
-    await prisma.smsBroadcast.update({
-      where: { id: broadcastId },
-      data: { status: 'COMPLETED', finishedAt: new Date() },
-    });
+    await completeBroadcastIfDrained(broadcastId);
     return { chunks: 0, recipients: 0 };
   }
 
-  await prisma.smsBroadcast.update({
-    where: { id: broadcastId },
-    data: { status: 'RUNNING', startedAt: new Date() },
-  });
-
-  const chunks = await enqueueBroadcastChunks(
-    broadcastId,
-    pending.map((row) => row.id),
-  );
-
-  return { chunks, recipients: pending.length };
+  try {
+    const chunks = await enqueueBroadcastChunks(
+      broadcastId,
+      pending.map((row) => row.id),
+    );
+    return { chunks, recipients: pending.length };
+  } catch (err) {
+    // Nothing was handed to the worker (or only part of it, and the worker
+    // claims rows individually) — put the status back so the campaign can be
+    // started again instead of sitting in RUNNING with no jobs behind it.
+    await prisma.smsBroadcast
+      .updateMany({ where: { id: broadcastId, status: 'RUNNING' }, data: { status: broadcast.status } })
+      .catch(() => undefined);
+    throw err;
+  }
 }
 
 /**
@@ -247,15 +291,24 @@ export async function startBroadcast(broadcastId: string): Promise<{ chunks: num
  * because the worker re-reads the broadcast status between sends.
  */
 export async function pauseBroadcast(broadcastId: string): Promise<void> {
-  await prisma.smsBroadcast.update({ where: { id: broadcastId }, data: { status: 'PAUSED' } });
+  const updated = await prisma.smsBroadcast.updateMany({
+    where: { id: broadcastId, status: { in: ['RUNNING', 'QUEUED'] } },
+    data: { status: 'PAUSED' },
+  });
+  if (updated.count === 0) {
+    throw new BroadcastStateError('Only a running or scheduled broadcast can be paused');
+  }
   await removeBroadcastJobs(broadcastId);
 }
 
 export async function cancelBroadcast(broadcastId: string): Promise<void> {
-  await prisma.smsBroadcast.update({
-    where: { id: broadcastId },
+  const updated = await prisma.smsBroadcast.updateMany({
+    where: { id: broadcastId, status: { in: ['DRAFT', 'QUEUED', 'RUNNING', 'PAUSED', 'PENDING_APPROVAL'] } },
     data: { status: 'CANCELLED', finishedAt: new Date() },
   });
+  if (updated.count === 0) {
+    throw new BroadcastStateError('This broadcast has already finished and cannot be cancelled');
+  }
   await removeBroadcastJobs(broadcastId);
 }
 
