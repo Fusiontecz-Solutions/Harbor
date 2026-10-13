@@ -54,10 +54,20 @@ function statusesForAudience(audience: FollowUpAudience): MessagingMessageStatus
 /** Contacts an agent has already judged are out of every automated audience. */
 const UNHANDLED_ONLY = { disposition: 'NEW' as const };
 
+/** Leads left out of a batch audience, and why — so the audience shrinks honestly. */
+export interface BatchExclusions {
+  /** Every lead in the caller's share of the batch, before anything is left out. */
+  total: number;
+  blocked: number;
+  /** Marked Interested or Not Interested (the sum of the two below). */
+  disposed: number;
+  interested: number;
+  notInterested: number;
+}
+
 export interface BatchAudience {
   recipients: BroadcastRecipientInput[];
-  /** Leads left out, and why — so the operator sees the audience shrink honestly. */
-  excluded: { blocked: number; disposed: number };
+  excluded: BatchExclusions;
 }
 
 const toRecipient = (contact: {
@@ -108,14 +118,17 @@ export async function resolveBatchAudience(
 
   // Counted rather than inferred from the difference, so the two reasons stay
   // distinguishable in the UI.
-  const [blocked, disposed] = await Promise.all([
+  const [total, blocked, interested, notInterested] = await Promise.all([
+    prisma.messagingContact.count({ where: scope as never }),
     prisma.messagingContact.count({ where: { ...scope, status: 'BLOCKED' } as never }),
-    prisma.messagingContact.count({
-      where: { ...scope, status: 'ACTIVE', disposition: { not: 'NEW' } } as never,
-    }),
+    prisma.messagingContact.count({ where: { ...scope, status: 'ACTIVE', disposition: 'INTERESTED' } as never }),
+    prisma.messagingContact.count({ where: { ...scope, status: 'ACTIVE', disposition: 'NOT_INTERESTED' } as never }),
   ]);
 
-  return { recipients: eligible.map(toRecipient), excluded: { blocked, disposed } };
+  return {
+    recipients: eligible.map(toRecipient),
+    excluded: { total, blocked, disposed: interested + notInterested, interested, notInterested },
+  };
 }
 
 /**

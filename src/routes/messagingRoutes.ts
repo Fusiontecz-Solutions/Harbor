@@ -80,6 +80,7 @@ router.delete('/send-windows/:id', messagingBroadcastController.removeSendWindow
 
 /* Broadcasts */
 router.get('/broadcasts', messagingBroadcastController.list.bind(messagingBroadcastController));
+router.post('/broadcasts/audience-preview', messagingBroadcastController.audiencePreview.bind(messagingBroadcastController));
 router.post('/broadcasts', messagingBroadcastController.create.bind(messagingBroadcastController));
 router.get('/broadcasts/:id', messagingBroadcastController.stats.bind(messagingBroadcastController));
 router.get('/broadcasts/:id/recipients', messagingBroadcastController.recipients.bind(messagingBroadcastController));

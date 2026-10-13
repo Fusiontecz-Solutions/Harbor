@@ -18,6 +18,7 @@ import { parseContactSheet } from '../services/messaging/contact.service';
 import { buildMergeDataFromSheetRow } from '../services/messaging/mergeTemplate';
 import { analyzeSmsTemplate, estimatedCampaignCredits } from '../services/messaging/smsSegments';
 import { normalizePhoneNumber } from '../services/messaging/phone';
+import { checkSuppressionBulk } from '../services/messaging/suppression.service';
 import {
   exportAudienceCsv,
   getBroadcastAudience,
@@ -32,6 +33,7 @@ import {
   previewFollowUpAudience,
   rejectBroadcast,
   resolveBatchAudience,
+  type BatchExclusions,
 } from '../services/messaging/followUp.service';
 import { isPrivilegedMessagingRole, resolveSenderForActor } from '../services/messaging/sender.service';
 import {
@@ -91,12 +93,113 @@ const ensureBroadcastAccess = async (req: Request, res: Response): Promise<boole
   return true;
 };
 
+type CollectedRecipient = { phoneNumber: string; mergeData?: Record<string, unknown> };
+
+interface CollectedAudience {
+  recipients: CollectedRecipient[];
+  skippedClients: Array<{ clientId: string; businessName: string; reason: string }>;
+  batchExcluded: BatchExclusions | null;
+  leadBatchId: string | null;
+}
+
+/**
+ * Turn a create (or preview) request into the raw recipient list: uploaded
+ * sheet, typed numbers, CRM clients, a lead batch and saved contacts. Shared
+ * by create and the audience preview so the preview is exactly what sends.
+ */
+async function collectAudience(req: Request): Promise<CollectedAudience | { error: { status: number; message: string } }> {
+  let recipients: Array<{ phoneNumber: string; mergeData?: Record<string, unknown> }> = [];
+
+  const upload = readUploadedFile(req);
+  if (upload) {
+    const { rows, columnMapping } = parseContactSheet(upload.buffer);
+    const phoneHeader = Object.entries(columnMapping).find(([, field]) => field === 'phoneNumber')?.[0];
+
+    if (!phoneHeader) {
+      return {
+        error: {
+          status: 400,
+          message: `No phone number column found in the uploaded sheet. Headers seen: ${Object.keys(rows[0] ?? {}).join(', ') || 'none'}`,
+        },
+      };
+    }
+
+    recipients = rows.flatMap((row) => {
+      const phoneNumber = normalizePhoneNumber(row[phoneHeader]);
+      if (!phoneNumber) return [];
+      return [
+        {
+          phoneNumber,
+          mergeData: buildMergeDataFromSheetRow(row, columnMapping, phoneHeader),
+        },
+      ];
+    });
+  } else if (Array.isArray(req.body?.recipients)) {
+    recipients = req.body.recipients;
+  }
+
+  // CRM clients as an audience — resolved to numbers + merge data, and
+  // reported back so the operator sees who was skipped and why.
+  let skippedClients: Array<{ clientId: string; businessName: string; reason: string }> = [];
+  if (Array.isArray(req.body?.clientIds) && req.body.clientIds.length > 0) {
+    if (!isAdmin(req)) return { error: { status: 403, message: 'Forbidden: only admins can message CRM clients' } };
+    const resolved = await resolveClientsAsRecipients(
+      req.body.clientIds.map(String),
+      actorId(req),
+    );
+    recipients = [...recipients, ...resolved.recipients];
+    skippedClients = resolved.skipped;
+  }
+
+  /**
+   * A lead upload as the audience.
+   *
+   * Scoped to the caller: an agent picking "Tuesday's leads" gets the
+   * share that was distributed to them, an admin gets the whole upload.
+   * Contacts the agent has already marked, and blocked ones, are dropped
+   * here rather than being sent and suppressed later.
+   */
+  let batchExcluded: BatchExclusions | null = null;
+  const leadBatchId = req.body?.leadBatchId ? String(req.body.leadBatchId) : null;
+  if (leadBatchId) {
+    const audience = await resolveBatchAudience(leadBatchId, ownerScope(req));
+    recipients = [...recipients, ...audience.recipients];
+    batchExcluded = audience.excluded;
+  }
+
+  // Saved messaging contacts, by id.
+  if (Array.isArray(req.body?.contactIds) && req.body.contactIds.length > 0) {
+    const contacts = await prisma.messagingContact.findMany({
+      where: {
+        id: { in: req.body.contactIds.map(String) },
+        ...(isAdmin(req) ? {} : { ownerUserId: actorId(req) }),
+      },
+      select: { phoneNumber: true, firstName: true, lastName: true, company: true, city: true, state: true },
+    });
+    recipients = [
+      ...recipients,
+      ...contacts.map((contact) => ({
+        phoneNumber: contact.phoneNumber,
+        mergeData: {
+          firstName: contact.firstName,
+          lastName: contact.lastName,
+          company: contact.company,
+          city: contact.city,
+          state: contact.state,
+        },
+      })),
+    ];
+  }
+
+  return { recipients, skippedClients, batchExcluded, leadBatchId };
+}
+
 class MessagingBroadcastController {
   /** GET /messaging/broadcasts?page=&status= */
   async list(req: Request, res: Response): Promise<void> {
     try {
       const page = Math.max(1, Number(req.query.page) || 1);
-      const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 25));
+      const pageSize = Math.min(500, Math.max(1, Number(req.query.pageSize) || 25));
       const status = req.query.status ? String(req.query.status) : undefined;
 
       const where: Record<string, unknown> = status ? { status: status as never } : {};
@@ -127,14 +230,81 @@ class MessagingBroadcastController {
             startedAt: true,
             finishedAt: true,
             createdAt: true,
+            // Detail for the campaign list: what was sent, by whom, when.
+            body: true,
+            scheduledAt: true,
+            approvedAt: true,
+            throttlePerSecond: true,
+            undeliverableCount: true,
+            leadBatchId: true,
+            parentBroadcastId: true,
+            createdBy: { select: { firstName: true, lastName: true } },
+            approvedBy: { select: { firstName: true, lastName: true } },
           },
         }),
         prisma.smsBroadcast.count({ where }),
       ]);
 
+      // Totals across every campaign this caller can see, not just this page.
+      const [sums, byStatus] = await Promise.all([
+        prisma.smsBroadcast.aggregate({
+          where: isAdmin(req) ? {} : { createdById: actorId(req) },
+          _sum: {
+            totalRecipients: true,
+            sentCount: true,
+            deliveredCount: true,
+            failedCount: true,
+            undeliverableCount: true,
+            suppressedCount: true,
+            repliedCount: true,
+            optOutCount: true,
+            queuedCount: true,
+          },
+          _count: { _all: true },
+        }),
+        prisma.smsBroadcast.groupBy({
+          by: ['status'],
+          where: isAdmin(req) ? {} : { createdById: actorId(req) },
+          _count: { _all: true },
+        }),
+      ]);
+
+      const batchIds = [...new Set(items.map((b) => b.leadBatchId).filter((v): v is string => Boolean(v)))];
+      const parentIds = [...new Set(items.map((b) => b.parentBroadcastId).filter((v): v is string => Boolean(v)))];
+      const [batches, parents] = await Promise.all([
+        batchIds.length
+          ? prisma.messagingLeadBatch.findMany({ where: { id: { in: batchIds } }, select: { id: true, name: true } })
+          : [],
+        parentIds.length
+          ? prisma.smsBroadcast.findMany({ where: { id: { in: parentIds } }, select: { id: true, name: true } })
+          : [],
+      ]);
+      const batchName = new Map(batches.map((b) => [b.id, b.name]));
+      const parentName = new Map(parents.map((b) => [b.id, b.name]));
+      const fullName = (u: { firstName: string | null; lastName: string | null } | null) =>
+        u ? `${u.firstName ?? ''} ${u.lastName ?? ''}`.trim() || null : null;
+
       res.json({
         success: true,
-        data: items,
+        data: items.map(({ createdBy, approvedBy, ...b }) => ({
+          ...b,
+          createdByName: fullName(createdBy),
+          approvedByName: fullName(approvedBy),
+          leadBatchName: b.leadBatchId ? batchName.get(b.leadBatchId) ?? null : null,
+          parentName: b.parentBroadcastId ? parentName.get(b.parentBroadcastId) ?? null : null,
+        })),
+        totals: {
+          campaigns: sums._count._all,
+          byStatus: Object.fromEntries(byStatus.map((g) => [g.status, g._count._all])),
+          recipients: sums._sum.totalRecipients ?? 0,
+          sent: sums._sum.sentCount ?? 0,
+          delivered: sums._sum.deliveredCount ?? 0,
+          failed: (sums._sum.failedCount ?? 0) + (sums._sum.undeliverableCount ?? 0),
+          suppressed: sums._sum.suppressedCount ?? 0,
+          replied: sums._sum.repliedCount ?? 0,
+          optedOut: sums._sum.optOutCount ?? 0,
+          queued: sums._sum.queuedCount ?? 0,
+        },
         pagination: { page, pageSize, total, hasMore: page * pageSize < total },
       });
     } catch (err) {
@@ -144,92 +314,132 @@ class MessagingBroadcastController {
   }
 
   /**
+   * POST /messaging/broadcasts/audience-preview
+   *
+   * The audience breakdown for step 2 of the create flow, computed exactly as
+   * create would (same sources, same normalisation, same suppression check)
+   * but without saving anything: how many leads there are, who is left out and
+   * why, and how many will actually receive the message. Leads that opted out
+   * earlier (STOP) show up as opted out even when they are re-uploaded.
+   */
+  async audiencePreview(req: Request, res: Response): Promise<void> {
+    try {
+      const collected = await collectAudience(req);
+      if ('error' in collected) {
+        res.status(collected.error.status).json({ success: false, message: collected.error.message });
+        return;
+      }
+      const { recipients, skippedClients, batchExcluded } = collected;
+
+      // Same normalise / dedupe rules as createBroadcast.
+      const unique = new Map<string, Record<string, unknown> | undefined>();
+      let invalid = 0;
+      for (const r of recipients) {
+        const phone = normalizePhoneNumber(r?.phoneNumber);
+        if (!phone) {
+          invalid += 1;
+          continue;
+        }
+        unique.set(phone, r.mergeData);
+      }
+      const duplicates = recipients.length - unique.size - invalid;
+      const numbers = [...unique.keys()];
+
+      const verdicts = await checkSuppressionBulk(numbers);
+      const byReason = { STOP_KEYWORD: 0, DNC_LIST: 0, MANUAL_BLOCK: 0, OTHER: 0 };
+      const optedOutNumbers: string[] = [];
+      for (const phone of numbers) {
+        const v = verdicts.get(phone);
+        if (!v?.suppressed) continue;
+        if (v.reason === 'STOP_KEYWORD') {
+          byReason.STOP_KEYWORD += 1;
+          optedOutNumbers.push(phone);
+        } else if (v.reason === 'DNC_LIST') byReason.DNC_LIST += 1;
+        else if (v.reason === 'MANUAL_BLOCK') byReason.MANUAL_BLOCK += 1;
+        else byReason.OTHER += 1;
+      }
+      const suppressedTotal = byReason.STOP_KEYWORD + byReason.DNC_LIST + byReason.MANUAL_BLOCK + byReason.OTHER;
+      const willSend = numbers.length - suppressedTotal;
+
+      // Who opted out, so the operator can see it is not a mystery number.
+      const sample = optedOutNumbers.slice(0, 50);
+      const names = await prisma.messagingContact.findMany({
+        where: { phoneNumber: { in: sample } },
+        select: { phoneNumber: true, firstName: true, lastName: true, company: true },
+      });
+      const nameByPhone = new Map(
+        names.map((c) => [c.phoneNumber, [`${c.firstName ?? ''} ${c.lastName ?? ''}`.trim(), c.company].filter(Boolean).join(' · ') || null]),
+      );
+      const optedOutAt = await prisma.messagingSuppression.findMany({
+        where: { phoneNumber: { in: sample }, reason: 'STOP_KEYWORD', active: true },
+        select: { phoneNumber: true, createdAt: true },
+      });
+      const atByPhone = new Map(optedOutAt.map((r) => [r.phoneNumber, r.createdAt]));
+
+      // Informational: how many of the senders have been messaged by a
+      // campaign before, so a re-blast of the same list is obvious.
+      const previouslyMessaged = numbers.length
+        ? (
+            await prisma.messagingMessage.findMany({
+              where: { direction: 'OUTBOUND', broadcastId: { not: null }, toNumber: { in: numbers } },
+              select: { toNumber: true },
+              distinct: ['toNumber'],
+            })
+          ).length
+        : 0;
+
+      const batchTotal = batchExcluded?.total ?? 0;
+      const batchEligible = batchExcluded ? batchExcluded.total - batchExcluded.blocked - batchExcluded.disposed : 0;
+      const totalLeads = batchTotal + (recipients.length - batchEligible);
+
+      res.json({
+        success: true,
+        data: {
+          totalLeads,
+          excluded: {
+            blocked: (batchExcluded?.blocked ?? 0) + byReason.MANUAL_BLOCK,
+            interested: batchExcluded?.interested ?? 0,
+            notInterested: batchExcluded?.notInterested ?? 0,
+            optedOut: byReason.STOP_KEYWORD,
+            dnc: byReason.DNC_LIST,
+            otherSuppressed: byReason.OTHER,
+            invalid,
+            duplicates,
+          },
+          willSend,
+          previouslyMessaged,
+          optedOut: sample.map((phone) => ({
+            phoneNumber: phone,
+            name: nameByPhone.get(phone) ?? null,
+            optedOutAt: atByPhone.get(phone) ?? null,
+          })),
+          optedOutMore: Math.max(0, optedOutNumbers.length - sample.length),
+          skippedClients,
+        },
+      });
+    } catch (err) {
+      console.error('[messaging:broadcast] audience preview failed:', err);
+      res.status(Number((err as { statusCode?: number })?.statusCode) || 400).json({
+        success: false,
+        message: (err as Error)?.message || 'Failed to preview audience',
+      });
+    } finally {
+      cleanupUploadedTempFiles(req);
+    }
+  }
+
+  /**
    * POST /messaging/broadcasts
    * Recipients come either as a JSON array or as an uploaded spreadsheet.
    */
   async create(req: Request, res: Response): Promise<void> {
     try {
-      let recipients: Array<{ phoneNumber: string; mergeData?: Record<string, unknown> }> = [];
-
-      const upload = readUploadedFile(req);
-      if (upload) {
-        const { rows, columnMapping } = parseContactSheet(upload.buffer);
-        const phoneHeader = Object.entries(columnMapping).find(([, field]) => field === 'phoneNumber')?.[0];
-
-        if (!phoneHeader) {
-          res.status(400).json({
-            success: false,
-            message: `No phone number column found in the uploaded sheet. Headers seen: ${Object.keys(rows[0] ?? {}).join(', ') || 'none'}`,
-          });
-          return;
-        }
-
-        recipients = rows.flatMap((row) => {
-          const phoneNumber = normalizePhoneNumber(row[phoneHeader]);
-          if (!phoneNumber) return [];
-          return [
-            {
-              phoneNumber,
-              mergeData: buildMergeDataFromSheetRow(row, columnMapping, phoneHeader),
-            },
-          ];
-        });
-      } else if (Array.isArray(req.body?.recipients)) {
-        recipients = req.body.recipients;
+      const collected = await collectAudience(req);
+      if ('error' in collected) {
+        res.status(collected.error.status).json({ success: false, message: collected.error.message });
+        return;
       }
-
-      // CRM clients as an audience — resolved to numbers + merge data, and
-      // reported back so the operator sees who was skipped and why.
-      let skippedClients: Array<{ clientId: string; businessName: string; reason: string }> = [];
-      if (Array.isArray(req.body?.clientIds) && req.body.clientIds.length > 0) {
-        if (!isAdmin(req)) return adminOnly(res, 'message CRM clients');
-        const resolved = await resolveClientsAsRecipients(
-          req.body.clientIds.map(String),
-          actorId(req),
-        );
-        recipients = [...recipients, ...resolved.recipients];
-        skippedClients = resolved.skipped;
-      }
-
-      /**
-       * A lead upload as the audience.
-       *
-       * Scoped to the caller: an agent picking "Tuesday's leads" gets the
-       * share that was distributed to them, an admin gets the whole upload.
-       * Contacts the agent has already marked, and blocked ones, are dropped
-       * here rather than being sent and suppressed later.
-       */
-      let batchExcluded: { blocked: number; disposed: number } | null = null;
-      const leadBatchId = req.body?.leadBatchId ? String(req.body.leadBatchId) : null;
-      if (leadBatchId) {
-        const audience = await resolveBatchAudience(leadBatchId, ownerScope(req));
-        recipients = [...recipients, ...audience.recipients];
-        batchExcluded = audience.excluded;
-      }
-
-      // Saved messaging contacts, by id.
-      if (Array.isArray(req.body?.contactIds) && req.body.contactIds.length > 0) {
-        const contacts = await prisma.messagingContact.findMany({
-          where: {
-            id: { in: req.body.contactIds.map(String) },
-            ...(isAdmin(req) ? {} : { ownerUserId: actorId(req) }),
-          },
-          select: { phoneNumber: true, firstName: true, lastName: true, company: true, city: true, state: true },
-        });
-        recipients = [
-          ...recipients,
-          ...contacts.map((contact) => ({
-            phoneNumber: contact.phoneNumber,
-            mergeData: {
-              firstName: contact.firstName,
-              lastName: contact.lastName,
-              company: contact.company,
-              city: contact.city,
-              state: contact.state,
-            },
-          })),
-        ];
-      }
+      const { recipients, skippedClients, batchExcluded, leadBatchId } = collected;
 
       if (recipients.length === 0) {
         res.status(400).json({
