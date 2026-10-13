@@ -254,6 +254,9 @@ export async function markOutboundSubmitted(input: {
 }): Promise<void> {
   const sentAt = new Date();
 
+  // maxWait: under load the pool can be busy for a few seconds; Prisma's 2s
+  // default turned a short wait into "Unable to start a transaction" and a
+  // message the provider had accepted was recorded as failed.
   await prisma.$transaction([
     prisma.messagingMessage.update({
       where: { id: input.messageId },
@@ -278,7 +281,7 @@ export async function markOutboundSubmitted(input: {
         messageCount: { increment: 1 },
       },
     }),
-  ]);
+  ], { maxWait: 20_000, timeout: 30_000 });
 
   await invalidateConversationCaches(input.conversationId);
 }

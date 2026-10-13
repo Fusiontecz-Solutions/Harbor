@@ -3,6 +3,7 @@ import Redis from 'ioredis';
 import prisma from '../config/prismaClient';
 import {
   SMS_BROADCAST_QUEUE_NAME,
+  enqueueBroadcastChunks,
   enqueueBroadcastRetry,
   isSmsBroadcastQueueEnabled,
   type SmsBroadcastJobData,
@@ -76,9 +77,38 @@ const HALTED_STATUSES = new Set(['PAUSED', 'CANCELLED', 'COMPLETED', 'FAILED']);
  */
 const resolveChunkParallelism = (): number => {
   const raw = Number(process.env.BROADCAST_CHUNK_PARALLELISM);
-  if (!Number.isFinite(raw) || raw <= 0) return 5;
+  if (!Number.isFinite(raw) || raw <= 0) return 3;
   return Math.min(50, Math.max(1, Math.floor(raw)));
 };
+
+/**
+ * Sends in flight across the whole process, whatever the number of campaigns.
+ * Each send holds a database connection for several queries; with 8 campaigns
+ * × 5 lanes the 10-connection pool starved and sends failed with "Unable to
+ * start a transaction". Kept at half the pool so the API stays responsive.
+ */
+const MAX_CONCURRENT_SENDS = (() => {
+  const raw = Number(process.env.BROADCAST_MAX_CONCURRENT_SENDS);
+  if (Number.isFinite(raw) && raw > 0) return Math.floor(raw);
+  const pool = Number(process.env.DB_POOL_MAX ?? '10');
+  return Math.max(2, Math.floor((Number.isFinite(pool) ? pool : 10) / 2));
+})();
+
+let activeSends = 0;
+const sendWaiters: Array<() => void> = [];
+
+async function withSendSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (activeSends >= MAX_CONCURRENT_SENDS) {
+    await new Promise<void>((resolve) => sendWaiters.push(resolve));
+  }
+  activeSends += 1;
+  try {
+    return await fn();
+  } finally {
+    activeSends -= 1;
+    sendWaiters.shift()?.();
+  }
+}
 
 /** Give up on a recipient after this many requeue passes. */
 const MAX_RETRY_PASSES = (() => {
@@ -101,9 +131,12 @@ const PLATFORM_BLOCK_CODES = new Set([SENDING_DISABLED_CODE, LIMIT_REACHED_CODE]
 /**
  * Rows left in SENDING by a worker that died mid-chunk. The chunk lock means no
  * other chunk of this campaign is sending right now, so any SENDING row in this
- * chunk is orphaned. If the provider accepted the message (the outbound row has
- * a provider id) the recipient is marked SENT; otherwise it never left and goes
- * back to QUEUED. Without this the campaign could never complete.
+ * chunk is orphaned. Three cases:
+ *   - the outbound message has a provider id: it was accepted → SENT
+ *   - an outbound message row exists without one: it may or may not have
+ *     reached the provider → FAILED as "delivery unknown", never resent, since
+ *     a duplicate SMS is worse than a missed one
+ *   - no outbound row at all: it never left → back to QUEUED to be sent
  */
 async function recoverOrphanedRows(broadcastId: string, recipientIds: string[]): Promise<void> {
   const orphaned = await prisma.smsBroadcastRecipient.findMany({
@@ -112,16 +145,18 @@ async function recoverOrphanedRows(broadcastId: string, recipientIds: string[]):
   });
   if (orphaned.length === 0) return;
 
-  const submitted = await prisma.messagingMessage.findMany({
+  const attempts = await prisma.messagingMessage.findMany({
     where: {
       broadcastId,
       direction: 'OUTBOUND',
       toNumber: { in: orphaned.map((row) => row.phoneNumber) },
-      providerMessageId: { not: null },
     },
     select: { toNumber: true, providerMessageId: true },
   });
-  const submittedByNumber = new Map(submitted.map((m) => [m.toNumber, m.providerMessageId]));
+  const submittedByNumber = new Map(
+    attempts.filter((m) => m.providerMessageId).map((m) => [m.toNumber, m.providerMessageId]),
+  );
+  const attemptedNumbers = new Set(attempts.map((m) => m.toNumber));
 
   for (const row of orphaned) {
     const providerMessageId = submittedByNumber.get(row.phoneNumber);
@@ -134,6 +169,19 @@ async function recoverOrphanedRows(broadcastId: string, recipientIds: string[]):
         recordBroadcastCounter(broadcastId, 'sentCount');
         recordBroadcastCounter(broadcastId, 'queuedCount');
       }
+    } else if (attemptedNumbers.has(row.phoneNumber)) {
+      const updated = await prisma.smsBroadcastRecipient.updateMany({
+        where: { id: row.id, status: 'SENDING' },
+        data: {
+          status: 'FAILED',
+          sentAt: new Date(),
+          errorMessage: 'Interrupted mid-send; delivery unknown. Not retried to avoid a duplicate message.',
+        },
+      });
+      if (updated.count > 0) {
+        recordBroadcastCounter(broadcastId, 'failedCount');
+        recordBroadcastCounter(broadcastId, 'queuedCount');
+      }
     } else {
       await prisma.smsBroadcastRecipient.updateMany({
         where: { id: row.id, status: 'SENDING' },
@@ -141,6 +189,55 @@ async function recoverOrphanedRows(broadcastId: string, recipientIds: string[]):
       });
     }
   }
+}
+
+/**
+ * Campaigns stuck in RUNNING: every chunk job is gone (it exhausted its
+ * retries, or the process died) but recipients are still QUEUED or SENDING,
+ * so nothing will ever move them. Called from the scheduler tick.
+ *
+ * A recent stall resumes on its own. An old one is paused instead of sent:
+ * a campaign meant for yesterday afternoon must not go out unannounced the
+ * next morning — an admin can resume it.
+ */
+export async function recoverStalledBroadcasts(now = new Date()): Promise<{ resumed: number; paused: number }> {
+  const STALL_MS = Number(process.env.BROADCAST_STALL_MS ?? String(15 * 60_000));
+  const AUTO_RESUME_MS = Number(process.env.BROADCAST_AUTO_RESUME_MS ?? String(2 * 60 * 60_000));
+
+  const stalled = await prisma.$queryRaw<Array<{ id: string; name: string; lastActivity: Date }>>`
+    SELECT b.id, b.name, MAX(r."updatedAt") AS "lastActivity"
+      FROM "SmsBroadcast" b
+      JOIN "SmsBroadcastRecipient" r ON r."broadcastId" = b.id
+     WHERE b.status = 'RUNNING'
+     GROUP BY b.id, b.name
+    HAVING COUNT(*) FILTER (WHERE r.status IN ('QUEUED', 'SENDING')) > 0
+       AND MAX(r."updatedAt") < ${new Date(now.getTime() - STALL_MS)}`;
+
+  let resumed = 0;
+  let paused = 0;
+  for (const b of stalled) {
+    // A chunk that is genuinely still working holds the lock; leave it alone.
+    const lock = await acquireBroadcastChunkLock(b.id);
+    if (!lock) continue;
+    await releaseBroadcastChunkLock(b.id, lock);
+
+    if (now.getTime() - new Date(b.lastActivity).getTime() > AUTO_RESUME_MS) {
+      await prisma.smsBroadcast.updateMany({ where: { id: b.id, status: 'RUNNING' }, data: { status: 'PAUSED' } });
+      paused += 1;
+      console.warn(`[smsBroadcastWorker] "${b.name}" stalled since ${new Date(b.lastActivity).toISOString()} — paused for an admin to resume`);
+      continue;
+    }
+
+    const pending = await prisma.smsBroadcastRecipient.findMany({
+      where: { broadcastId: b.id, status: { in: ['QUEUED', 'SENDING'] } },
+      select: { id: true },
+    });
+    // The worker settles SENDING rows (recoverOrphanedRows) before sending.
+    await enqueueBroadcastChunks(b.id, pending.map((r) => r.id));
+    resumed += 1;
+    console.warn(`[smsBroadcastWorker] "${b.name}" stalled — re-queued ${pending.length} recipients`);
+  }
+  return { resumed, paused };
 }
 
 async function processChunk(data: SmsBroadcastJobData): Promise<void> {
@@ -315,7 +412,7 @@ async function processChunk(data: SmsBroadcastJobData): Promise<void> {
     while (cursor < recipients.length) {
       const recipient = recipients[cursor++];
       try {
-        await sendOne(recipient);
+        await withSendSlot(() => sendOne(recipient));
       } catch (err) {
         // A DB hiccup on one recipient must not strand the rest of the lane;
         // the row stays SENDING and recoverOrphanedRows settles it on retry.

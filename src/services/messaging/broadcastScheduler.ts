@@ -18,6 +18,7 @@
  */
 import prisma from '../../config/prismaClient';
 import { BroadcastStateError, startBroadcast } from './broadcast.service';
+import { recoverStalledBroadcasts } from '../../workers/smsBroadcastWorker';
 
 const INTERVAL_MS = Number(process.env.BROADCAST_SCHEDULER_INTERVAL_MS ?? '60000');
 
@@ -87,6 +88,7 @@ export function startBroadcastScheduler(): void {
     if (running) return;
     running = true;
     void runDueBroadcasts()
+      .then(() => recoverStalledBroadcasts())
       .catch((err) => console.error('[messaging:scheduler] tick failed:', (err as Error)?.message))
       .finally(() => {
         running = false;
