@@ -26,6 +26,7 @@ import MessagingSenders from '../pages/messaging/MessagingSenders';
 import LeadDistribution from '../pages/messaging/LeadDistribution';
 import SendWindows from '../pages/messaging/SendWindows';
 import MessagingPerformance from '../pages/messaging/MessagingPerformance';
+import Reports from '../pages/reports/Reports';
 import { applicationsPageLoader } from './applicationsLoader';
 
 /** Remount when `?query` changes so list state matches URL + route loader. */
@@ -126,6 +127,7 @@ const Routes: RouteObject[] = [
             { path: 'lead-distribution', element: <LeadDistribution /> },
             { path: 'send-windows', element: <SendWindows /> },
             { path: 'messaging-performance', element: <MessagingPerformance /> },
+            { path: 'reports', element: <Reports /> },
             { path: 'create-clients', element: <CreateClient /> },
             { path: 'create-clients/:clientId', element: <CreateClient /> },
             {

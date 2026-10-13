@@ -15,6 +15,7 @@ import Dialpad from "@mui/icons-material/Dialpad";
 import GroupAdd from "@mui/icons-material/GroupAdd";
 import Insights from "@mui/icons-material/Insights";
 import Schedule from "@mui/icons-material/Schedule";
+import Assessment from "@mui/icons-material/Assessment";
 import {
   Sidebar as UISidebar,
   SidebarHeader,
@@ -155,6 +156,10 @@ const sidebarSections: SidebarNavSection[] = [
       { label: "Send Windows", url: "/send-windows", icon: Schedule, adminOnly: true },
       { label: "Performance", url: "/messaging-performance", icon: Insights, adminOnly: true },
     ],
+  },
+  {
+    title: "REPORTS",
+    items: [{ label: "Reports", url: "/reports", icon: Assessment, adminOnly: true }],
   },
   {
     title: "SETTINGS",
@@ -423,7 +428,10 @@ const Sidebar = () => {
                     items: section.items.filter((item) => isAgentAllowedPath(item.url)),
                   }))
               : sidebarSections
-            ).map((section, sectionIndex) => (
+            )
+              // A group whose items are all admin-only would otherwise leave a bare heading.
+              .filter((section) => section.items.some((item) => !item.adminOnly || isAdmin))
+              .map((section, sectionIndex) => (
               <div
                 key={`${section.title || "section"}-${sectionIndex}`}
                 className="w-full"
