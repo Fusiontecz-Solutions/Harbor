@@ -5,15 +5,16 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'react-toastify';
-import { Download, Loader2, RefreshCw } from 'lucide-react';
+import { FileSpreadsheet, FileText, Loader2, RefreshCw } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import {
     REPORT_SECTIONS,
-    downloadReportExcel,
+    downloadReport,
     fetchReportSummary,
+    type ReportFormat,
     type ReportSectionId,
     type ReportSummary,
 } from '@/services/reports/reportsApi';
@@ -60,7 +61,7 @@ export default function Reports() {
     const [sections, setSections] = useState<ReportSectionId[]>(REPORT_SECTIONS.map((s) => s.id));
     const [summary, setSummary] = useState<ReportSummary | null>(null);
     const [isLoading, setIsLoading] = useState(true);
-    const [isExporting, setIsExporting] = useState(false);
+    const [exporting, setExporting] = useState<ReportFormat | null>(null);
 
     const load = useCallback(async (fromDate: string, toDate: string) => {
         setIsLoading(true);
@@ -86,14 +87,14 @@ export default function Reports() {
     const toggleSection = (id: ReportSectionId) =>
         setSections((prev) => (prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]));
 
-    const exportExcel = async () => {
+    const exportReport = async (format: ReportFormat) => {
         if (sections.length === 0) {
             toast.error('Pick at least one section to export');
             return;
         }
-        setIsExporting(true);
+        setExporting(format);
         try {
-            await downloadReportExcel({ from, to, sections });
+            await downloadReport({ from, to, sections, format });
         } catch (error: any) {
             // A blob error body has to be read before its message is usable.
             let message = 'Failed to export report';
@@ -107,7 +108,7 @@ export default function Reports() {
             }
             toast.error(message);
         } finally {
-            setIsExporting(false);
+            setExporting(null);
         }
     };
 
@@ -206,9 +207,11 @@ export default function Reports() {
 
             <section className="rounded-xl border bg-background shadow-sm">
                 <header className="border-b p-4">
-                    <h2 className="text-base font-semibold">Export to Excel</h2>
+                    <h2 className="text-base font-semibold">Export</h2>
                     <p className="mt-1 text-sm text-muted-foreground">
-                        Covers {from} to {to}. Owner SSN and date of birth are never included.
+                        Covers {from} to {to}. The PDF is the formatted report with a full section for every
+                        broadcast; Excel has the raw data plus a sheet per broadcast. Owner SSN and date of
+                        birth are never included.
                     </p>
                 </header>
                 <div className="space-y-4 p-4">
@@ -234,10 +237,20 @@ export default function Reports() {
                             </label>
                         ))}
                     </div>
-                    <Button onClick={() => void exportExcel()} disabled={isExporting || sections.length === 0}>
-                        {isExporting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
-                        {isExporting ? 'Building workbook…' : 'Export to Excel'}
-                    </Button>
+                    <div className="flex flex-wrap gap-2">
+                        <Button onClick={() => void exportReport('pdf')} disabled={exporting !== null || sections.length === 0}>
+                            {exporting === 'pdf' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileText className="mr-2 h-4 w-4" />}
+                            {exporting === 'pdf' ? 'Building PDF…' : 'Download PDF report'}
+                        </Button>
+                        <Button
+                            variant="outline"
+                            onClick={() => void exportReport('xlsx')}
+                            disabled={exporting !== null || sections.length === 0}
+                        >
+                            {exporting === 'xlsx' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileSpreadsheet className="mr-2 h-4 w-4" />}
+                            {exporting === 'xlsx' ? 'Building workbook…' : 'Download Excel'}
+                        </Button>
+                    </div>
                 </div>
             </section>
         </div>

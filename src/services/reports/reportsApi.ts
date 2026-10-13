@@ -33,25 +33,31 @@ export async function fetchReportSummary(params: { from: string; to: string }): 
     return response.data.data;
 }
 
-/** Downloads the workbook. Large ranges can take a little while to build. */
-export async function downloadReportExcel(params: {
+export type ReportFormat = 'xlsx' | 'pdf';
+
+/** Downloads the report. Large ranges can take a little while to build. */
+export async function downloadReport(params: {
     from: string;
     to: string;
     sections: ReportSectionId[];
+    format: ReportFormat;
 }): Promise<void> {
     const response = await axiosGet('/reports/export', {
-        params: { from: params.from, to: params.to, sections: params.sections.join(',') },
+        params: { from: params.from, to: params.to, sections: params.sections.join(','), format: params.format },
         responseType: 'blob',
         timeout: 300_000,
     });
 
     const disposition = String(response.headers?.['content-disposition'] ?? '');
     const filename =
-        /filename="?([^";]+)"?/i.exec(disposition)?.[1] ?? `harbor-report-${params.from}-to-${params.to}.xlsx`;
+        /filename="?([^";]+)"?/i.exec(disposition)?.[1] ?? `harbor-report-${params.from}-to-${params.to}.${params.format}`;
 
     const url = URL.createObjectURL(
         new Blob([response.data], {
-            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            type:
+                params.format === 'pdf'
+                    ? 'application/pdf'
+                    : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
         }),
     );
     const link = document.createElement('a');
