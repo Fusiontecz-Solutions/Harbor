@@ -3,6 +3,7 @@ import { DocusignService } from './docusign.service';
 import { formatDocusignRouteError } from './utils/docusign-client';
 import {
   buildSenderViewHandoffUrl,
+  canIssueSenderViewHandoff,
   createSenderViewHandoffToken,
   verifySenderViewHandoffToken,
 } from './utils/sender-view-handoff';
@@ -54,7 +55,9 @@ function withSenderViewHandoff<T extends Record<string, unknown>>(
   if (!envelopeId) return result;
 
   const rawUrl = String(result.url || result.sendUrl || '').trim();
-  if (!rawUrl) return result;
+  // Draft created without minting a DocuSign URL — the redirect mints it on navigation.
+  const deferred = result.senderViewDeferred === true;
+  if (!rawUrl && !deferred) return result;
 
   const token = createSenderViewHandoffToken({ ...claims, envelopeId });
   if (!token) return result;
@@ -63,9 +66,9 @@ function withSenderViewHandoff<T extends Record<string, unknown>>(
   return {
     ...result,
     ...(result.url ? { url: openUrl } : {}),
-    ...(result.sendUrl ? { sendUrl: openUrl } : {}),
+    ...(result.sendUrl || deferred ? { sendUrl: openUrl } : {}),
     openUrl,
-    docusignUrl: rawUrl,
+    ...(rawUrl ? { docusignUrl: rawUrl } : {}),
   };
 }
 
@@ -571,6 +574,7 @@ export const mergeAndSendTemplates = async (req: Request, res: Response) => {
         typeof contractState === 'string' && contractState.trim()
           ? contractState.trim()
           : undefined,
+      deferSenderView: canIssueSenderViewHandoff(),
     });
 
     // Draft sender view: hand out the reload-safe redirect instead of the raw single-use

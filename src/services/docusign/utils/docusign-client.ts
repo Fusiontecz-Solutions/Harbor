@@ -74,6 +74,14 @@ export const DOCUSIGN_DEFAULT_CC_EMAIL = process.env.DOCUSIGN_DEFAULT_CC_EMAIL |
 export const DOCUSIGN_AUTO_SEND_ENVELOPE =
   String(process.env.DOCUSIGN_AUTO_SEND_ENVELOPE || 'true').trim().toLowerCase() !== 'false';
 
+/**
+ * Platform-layout envelopes are created with every prefill value already on its tab, so
+ * the post-create tabs GET/PUT pass only repeats that work (several DocuSign round trips
+ * per signer). Off by default; set DOCUSIGN_POST_CREATE_PREFILL=true to re-enable it.
+ */
+export const DOCUSIGN_POST_CREATE_PREFILL =
+  String(process.env.DOCUSIGN_POST_CREATE_PREFILL || 'false').trim().toLowerCase() === 'true';
+
 /** When true (default), contract + addendum/disclosure PDFs are merged into one DocuSign document. */
 export const DOCUSIGN_COMBINE_PACKAGE_PDF =
   String(process.env.DOCUSIGN_COMBINE_PACKAGE_PDF || 'true').trim().toLowerCase() !== 'false';

@@ -15,6 +15,7 @@ import {
   DOCUSIGN_INTEGRATION_KEY,
   DOCUSIGN_CLIENT_SECRET,
   DOCUSIGN_AUTO_SEND_ENVELOPE,
+  DOCUSIGN_POST_CREATE_PREFILL,
   DOCUSIGN_DEFAULT_ROLE_NAME,
   DOCUSIGN_DEFAULT_TEMPLATE_ID,
   DOCUSIGN_REDIRECT_URI,
@@ -3619,6 +3620,8 @@ export class DocusignService {
       createTimePrefillTabCount?: number;
       /** CRM values already burned into uploaded PDFs — skip post-create tab GETs/PUTs. */
       prefillFlattenedInPdf?: boolean;
+      /** Caller hands out its own sender-view redirect — do not mint a DocuSign URL here. */
+      deferSenderView?: boolean;
       client: AxiosInstance;
       accountId: string;
     },
@@ -3677,7 +3680,18 @@ export class DocusignService {
       atCreate: 0,
       atPostCreate: 0,
     };
-    if (options.prefillFields?.length && !options.prefillFlattenedInPdf) {
+    // Values already went onto the tabs in the create payload — re-applying them costs
+    // several DocuSign round trips per signer and delays the review link.
+    const prefillOnTabsAtCreate =
+      (options.createTimePrefillTabCount ?? 0) > 0 && !DOCUSIGN_POST_CREATE_PREFILL;
+    if (prefillOnTabsAtCreate && !options.prefillFlattenedInPdf) {
+      prefillApplied = {
+        applied: options.createTimePrefillTabCount ?? 0,
+        attempted: options.prefillFields?.length ?? 0,
+        atCreate: options.createTimePrefillTabCount ?? 0,
+        atPostCreate: 0,
+      };
+    } else if (options.prefillFields?.length && !options.prefillFlattenedInPdf) {
       const post = await this.applyPrefillToEnvelope(
         userId,
         options.client,
@@ -3736,7 +3750,8 @@ export class DocusignService {
     }
 
     let envelopeStatus: 'created' | 'sent' = 'created';
-    if (prefillApplied.applied > 0) {
+    // Settle delay is only needed after post-create tab PUTs; create-time values are atomic.
+    if (prefillApplied.atPostCreate > 0) {
       await this.sleep(autoSend ? 1000 : 1500);
     }
     if (autoSend) {
@@ -3748,7 +3763,7 @@ export class DocusignService {
         setCachedEnvelopeStatus(options.accountId, envelopeId, 'sent');
         invalidateCachedEnvelopeRecipients(options.accountId, envelopeId);
         envelopeStatus = 'sent';
-        if (prefillApplied.applied > 0) {
+        if (prefillApplied.atPostCreate > 0) {
           await this.sleep(1500);
         }
         if (appId && !options.skipApplicationEnvelopeLink) {
@@ -3787,7 +3802,8 @@ export class DocusignService {
     );
 
     let sendUrl: string | null = null;
-    if (!autoSend) {
+    const senderViewDeferred = !autoSend && options.deferSenderView === true;
+    if (!autoSend && !senderViewDeferred) {
       try {
         sendUrl = await this.createSenderViewUrl(
           options.client,
@@ -3813,6 +3829,7 @@ export class DocusignService {
       documentId: envelopeId,
       envelopeId,
       sendUrl,
+      ...(senderViewDeferred ? { senderViewDeferred: true } : {}),
       message,
       data: {
         prefillFieldCount: options.prefillFields?.length ?? 0,
@@ -4046,6 +4063,7 @@ export class DocusignService {
         reminderCount?: number;
       };
       autoSend?: boolean;
+      deferSenderView?: boolean;
     },
   ) {
     const contractContext = await this.resolveContractFunderAndState(options.contractId);
@@ -4183,6 +4201,7 @@ export class DocusignService {
         autoSend: options.autoSend,
         createTimePrefillTabCount: built.createTimePrefillTabCount,
         prefillFlattenedInPdf: built.prefillFlattenedInPdf,
+        deferSenderView: options.deferSenderView,
         client,
         accountId,
       });
@@ -4308,6 +4327,8 @@ export class DocusignService {
       funderProfileId?: string | null;
       funderName?: string | null;
       contractState?: string | null;
+      /** Caller hands out its own sender-view redirect — skip minting a DocuSign URL here. */
+      deferSenderView?: boolean;
     },
   ) {
     if (!options?.roles?.length) {
@@ -4375,6 +4396,7 @@ export class DocusignService {
       ownerCount: options.ownerCount,
       guarantorCount: options.guarantorCount,
       autoSend: options.autoSend,
+      deferSenderView: options.deferSenderView,
     });
   }
 

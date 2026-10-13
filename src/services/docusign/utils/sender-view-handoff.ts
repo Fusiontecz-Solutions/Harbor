@@ -47,6 +47,14 @@ function handoffSecret(): string | null {
   return String(process.env.JWT_SECRET || '').trim() || null;
 }
 
+/**
+ * True when the CRM can hand out its own reload-safe redirect. Callers then skip minting
+ * a DocuSign sender-view URL up front — the redirect mints one when the tab navigates.
+ */
+export function canIssueSenderViewHandoff(): boolean {
+  return handoffSecret() != null;
+}
+
 export function createSenderViewHandoffToken(
   claims: SenderViewHandoffClaims,
 ): string | null {
