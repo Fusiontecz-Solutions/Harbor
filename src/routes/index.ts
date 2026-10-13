@@ -28,6 +28,7 @@ import mailRoutes from './mailRoutes';
 import integrationSettingsRoutes from './integrationSettingsRoutes';
 import sendgridWebhookRoutes from './sendgridWebhookRoutes';
 import messagingRoutes from './messagingRoutes';
+import reportRoutes from './reportRoutes';
 import backgroundCheckRoutes from './backgroundCheckRoutes';
 import datamerchRoutes from './datamerchRoutes';
 import opencorporatesRoutes from './opencorporatesRoutes';
@@ -73,6 +74,7 @@ router.use('/clear', clearRoutes);
 // DNC and calling. Its own router handles the split between the public
 // provider callbacks and the authenticated agent endpoints.
 router.use('/messaging', messagingRoutes);
+router.use('/reports', reportRoutes);
 router.use('/background-check-report', backgroundCheckReportRoutes);
 
 export default router;
