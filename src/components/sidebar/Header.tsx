@@ -41,6 +41,7 @@ const getPageTitle = (pathname: string): string => {
     if (pathname.startsWith('/lead-distribution')) return 'Lead Distribution';
     if (pathname.startsWith('/send-windows')) return 'Send Windows';
     if (pathname.startsWith('/messaging-performance')) return 'Performance';
+    if (pathname.startsWith('/reports')) return 'Reports';
     return 'Contract Workflow';
 };
 

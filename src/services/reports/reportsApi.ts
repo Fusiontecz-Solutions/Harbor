@@ -68,3 +68,86 @@ export async function downloadReport(params: {
     link.remove();
     URL.revokeObjectURL(url);
 }
+
+export interface DashboardKpis {
+    campaigns: number;
+    recipients: number;
+    sent: number;
+    delivered: number;
+    failed: number;
+    replies: number;
+    repliers: number;
+    optOuts: number;
+    directSent: number;
+    leadsImported: number;
+    applications: number;
+    spend: number;
+}
+
+export interface ReportDashboard {
+    range: { from: string; to: string };
+    previousRange: { from: string; to: string };
+    kpis: DashboardKpis;
+    previous: DashboardKpis;
+    rates: {
+        delivery: number | null;
+        reply: number | null;
+        optOut: number | null;
+        failure: number | null;
+        previousDelivery: number | null;
+        previousReply: number | null;
+        previousOptOut: number | null;
+    };
+    spend: { total: number; currency: string | null; perDelivered: number | null; perReplier: number | null };
+    daily: Array<{ day: string; sent: number; delivered: number; failed: number; replies: number; optOuts: number; applications: number }>;
+    campaigns: Array<{
+        id: string;
+        name: string;
+        status: string;
+        createdAt: string;
+        createdBy: string | null;
+        recipients: number;
+        sent: number;
+        delivered: number;
+        failed: number;
+        suppressed: number;
+        replied: number;
+        optOuts: number;
+        deliveryRate: number | null;
+        replyRate: number | null;
+        optOutRate: number | null;
+        cost: number | null;
+        segments: number | null;
+        durationMinutes: number | null;
+    }>;
+    agents: Array<{
+        name: string;
+        role: string;
+        leadsOwned: number;
+        interested: number;
+        notInterested: number;
+        broadcasts: number;
+        broadcastSent: number;
+        directSent: number;
+        replies: number;
+        replyRate: number | null;
+        optOuts: number;
+        conversations: number;
+    }>;
+    leads: {
+        total: number;
+        importedInPeriod: number;
+        batchesInPeriod: number;
+        new: number;
+        interested: number;
+        notInterested: number;
+        blocked: number;
+        optedOut: number;
+    };
+    applications: { total: number; requestedAmount: number; byQueue: Array<{ queue: string; count: number; requested: number }> };
+}
+
+export async function fetchReportDashboard(params: { from: string; to: string }): Promise<ReportDashboard> {
+    const response = await axiosGet('/reports/dashboard', { params });
+    return response.data.data;
+}
