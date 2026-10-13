@@ -12,14 +12,28 @@
  * refreshes the existing contacts instead of duplicating them.
  */
 import * as XLSX from 'xlsx';
+import { Prisma } from '@prisma/client';
 import prisma from '../../config/prismaClient';
 import { normalizePhoneNumber } from './phone';
 
 /** Prisma defaults to a 5s interactive transaction timeout — import batches exceed that. */
-const PRISMA_TX = { maxWait: 15_000, timeout: 120_000 };
-/** Larger batches = fewer round trips so imports finish before proxy/client timeouts. */
-const IMPORT_UPSERT_BATCH = 100;
-const DISTRIBUTE_UPDATE_BATCH = 75;
+/**
+ * Rows per bulk statement. Imports and distribution used to write one row per
+ * query; against a remote database a few thousand leads meant thousands of
+ * round trips and the request outlived the proxy timeout. Each batch is now a
+ * single INSERT or UPDATE.
+ */
+const IMPORT_WRITE_BATCH = 1_000;
+/** Ids per `IN (...)` lookup, well under Postgres' 32k bind-parameter limit. */
+const LOOKUP_BATCH = 5_000;
+
+async function findInChunks<T>(values: string[], query: (chunk: string[]) => Promise<T[]>): Promise<T[]> {
+  const out: T[] = [];
+  for (let i = 0; i < values.length; i += LOOKUP_BATCH) {
+    out.push(...(await query(values.slice(i, i + LOOKUP_BATCH))));
+  }
+  return out;
+}
 
 export interface ImportedRow {
   phoneNumber: string;
@@ -240,15 +254,16 @@ export async function importContacts(input: {
     assignees.length > 0 ? assignees[index % assignees.length] : (input.ownerUserId ?? null);
 
   const owners = assignees.length > 0 ? assignees : [input.ownerUserId ?? null];
-  const existing = await prisma.messagingContact.findMany({
-    where: {
-      phoneNumber: { in: valid.map((row) => row.phoneNumber) },
-      ownerUserId: { in: owners as string[] },
-    },
-    select: { phoneNumber: true, ownerUserId: true },
-  });
+  const existing = await findInChunks(
+    valid.map((row) => row.phoneNumber),
+    (phones) =>
+      prisma.messagingContact.findMany({
+        where: { phoneNumber: { in: phones }, ownerUserId: { in: owners as string[] } },
+        select: { id: true, phoneNumber: true, ownerUserId: true },
+      }),
+  );
+  const existingIdByKey = new Map(existing.map((row) => [`${row.ownerUserId ?? ''}:${row.phoneNumber}`, row.id]));
   // Keyed per owner: the same number may legitimately sit in two reps' lists.
-  const existingKeys = new Set(existing.map((row) => `${row.ownerUserId ?? ''}:${row.phoneNumber}`));
   const assignedCounts = new Map<string, number>();
 
   /**
@@ -271,60 +286,81 @@ export async function importContacts(input: {
       })
     : null;
 
-  for (let i = 0; i < valid.length; i += IMPORT_UPSERT_BATCH) {
-    const slice = valid.slice(i, i + IMPORT_UPSERT_BATCH);
+  // Split the sheet into leads this owner does not have yet (bulk insert) and
+  // leads they already have (bulk update of only the fields the sheet supplied).
+  const toCreate: Prisma.MessagingContactCreateManyInput[] = [];
+  const toUpdate: Array<{ id: string; row: ImportedRow }> = [];
+  let updated = 0;
 
-    await prisma.$transaction(
-      slice.map((row, offset) => {
-        const owner = ownerForIndex(i + offset);
-        if (owner) assignedCounts.set(owner, (assignedCounts.get(owner) ?? 0) + 1);
-        return prisma.messagingContact.upsert({
-          where: {
-            ownerUserId_phoneNumber: {
-              ownerUserId: owner,
-              phoneNumber: row.phoneNumber,
-            } as never,
-          },
-          create: {
-            phoneNumber: row.phoneNumber,
-            firstName: row.firstName,
-            lastName: row.lastName,
-            emailAddress: row.emailAddress,
-            company: row.company,
-            street: row.street,
-            city: row.city,
-            state: row.state,
-            zip: row.zip,
-            tags: [...new Set([...(row.tags ?? []), ...(input.defaultTags ?? [])])],
-            source: 'import',
-            ownerUserId: owner,
-            batchId: batch?.id ?? null,
-          },
-          update: {
-            // Only overwrite fields the sheet actually supplied — a partial
-            // sheet must not blank out data captured elsewhere.
-            ...(row.firstName ? { firstName: row.firstName } : {}),
-            ...(row.lastName ? { lastName: row.lastName } : {}),
-            ...(row.emailAddress ? { emailAddress: row.emailAddress } : {}),
-            ...(row.company ? { company: row.company } : {}),
-            ...(row.street ? { street: row.street } : {}),
-            ...(row.city ? { city: row.city } : {}),
-            ...(row.state ? { state: row.state } : {}),
-            ...(row.zip ? { zip: row.zip } : {}),
-            ...(row.tags?.length ? { tags: row.tags } : {}),
-            // Re-uploading a lead moves it into the newer batch: the most
-            // recent list is the one an agent will be asked to work.
-            ...(batch ? { batchId: batch.id } : {}),
-          },
-        });
-      }),
-      PRISMA_TX,
-    );
+  valid.forEach((row, index) => {
+    const owner = ownerForIndex(index);
+    if (owner) assignedCounts.set(owner, (assignedCounts.get(owner) ?? 0) + 1);
+    const existingId = existingIdByKey.get(`${owner ?? ''}:${row.phoneNumber}`);
+    if (existingId) {
+      updated += 1;
+      toUpdate.push({ id: existingId, row });
+      return;
+    }
+    toCreate.push({
+      phoneNumber: row.phoneNumber,
+      firstName: row.firstName,
+      lastName: row.lastName,
+      emailAddress: row.emailAddress,
+      company: row.company,
+      street: row.street,
+      city: row.city,
+      state: row.state,
+      zip: row.zip,
+      tags: [...new Set([...(row.tags ?? []), ...(input.defaultTags ?? [])])],
+      source: 'import',
+      ownerUserId: owner,
+      batchId: batch?.id ?? null,
+    });
+  });
+
+  for (let i = 0; i < toCreate.length; i += IMPORT_WRITE_BATCH) {
+    // skipDuplicates covers a lead created by someone else since the lookup.
+    await prisma.messagingContact.createMany({
+      data: toCreate.slice(i, i + IMPORT_WRITE_BATCH),
+      skipDuplicates: true,
+    });
   }
 
-  const updated = valid.filter((row, index) =>
-    existingKeys.has(`${ownerForIndex(index) ?? ''}:${row.phoneNumber}`),
-  ).length;
+  for (let i = 0; i < toUpdate.length; i += IMPORT_WRITE_BATCH) {
+    const slice = toUpdate.slice(i, i + IMPORT_WRITE_BATCH);
+    const col = (pick: (row: ImportedRow) => string | null | undefined) =>
+      slice.map(({ row }) => pick(row) || null);
+    // One UPDATE for the whole slice. COALESCE keeps the stored value where the
+    // sheet left a field blank, so a partial sheet never wipes captured data;
+    // tags are replaced only when the sheet supplied some. A re-uploaded lead
+    // moves into the newer batch, which is the list an agent will work.
+    await prisma.$executeRaw`
+      UPDATE "MessagingContact" AS c SET
+        "firstName"    = COALESCE(v.first_name, c."firstName"),
+        "lastName"     = COALESCE(v.last_name, c."lastName"),
+        "emailAddress" = COALESCE(v.email, c."emailAddress"),
+        "company"      = COALESCE(v.company, c."company"),
+        "street"       = COALESCE(v.street, c."street"),
+        "city"         = COALESCE(v.city, c."city"),
+        "state"        = COALESCE(v.state, c."state"),
+        "zip"          = COALESCE(v.zip, c."zip"),
+        "tags"         = CASE WHEN v.tags IS NOT NULL AND v.tags <> '' THEN string_to_array(v.tags, E'\x1f') ELSE c."tags" END,
+        "batchId"      = COALESCE(${batch?.id ?? null}::uuid, c."batchId"),
+        "updatedAt"    = NOW()
+      FROM unnest(
+        ${slice.map((u) => u.id)}::uuid[],
+        ${col((r) => r.firstName)}::text[],
+        ${col((r) => r.lastName)}::text[],
+        ${col((r) => r.emailAddress)}::text[],
+        ${col((r) => r.company)}::text[],
+        ${col((r) => r.street)}::text[],
+        ${col((r) => r.city)}::text[],
+        ${col((r) => r.state)}::text[],
+        ${col((r) => r.zip)}::text[],
+        ${slice.map(({ row }) => (row.tags?.length ? row.tags.join('\x1f') : null))}::text[]
+      ) AS v(id, first_name, last_name, email, company, street, city, state, zip, tags)
+      WHERE c.id = v.id`;
+  }
 
   return {
     totalRows: rows.length,
@@ -466,18 +502,21 @@ export async function distributeLeads(input: {
   if (assignees.length === 0) throw new Error('Pick at least one user to distribute to');
   if (input.contactIds.length === 0) return { moved: 0, skipped: 0 };
 
-  const contacts = await prisma.messagingContact.findMany({
-    where: { id: { in: input.contactIds } },
-    select: { id: true, phoneNumber: true, ownerUserId: true },
-  });
+  const contacts = await findInChunks(input.contactIds, (ids) =>
+    prisma.messagingContact.findMany({
+      where: { id: { in: ids } },
+      select: { id: true, phoneNumber: true, ownerUserId: true },
+    }),
+  );
 
-  const clashes = await prisma.messagingContact.findMany({
-    where: {
-      phoneNumber: { in: contacts.map((c) => c.phoneNumber) },
-      ownerUserId: { in: assignees },
-    },
-    select: { id: true, phoneNumber: true, ownerUserId: true },
-  });
+  const clashes = await findInChunks(
+    contacts.map((c) => c.phoneNumber),
+    (phones) =>
+      prisma.messagingContact.findMany({
+        where: { phoneNumber: { in: phones }, ownerUserId: { in: assignees } },
+        select: { id: true, phoneNumber: true, ownerUserId: true },
+      }),
+  );
   const taken = new Set(clashes.map((c) => `${c.ownerUserId}:${c.phoneNumber}`));
 
   let moved = 0;
@@ -499,18 +538,21 @@ export async function distributeLeads(input: {
     taken.add(`${owner}:${contact.phoneNumber}`);
   }
 
-  for (let i = 0; i < pending.length; i += DISTRIBUTE_UPDATE_BATCH) {
-    const slice = pending.slice(i, i + DISTRIBUTE_UPDATE_BATCH);
-    await prisma.$transaction(
-      slice.map((row) =>
-        prisma.messagingContact.update({
-          where: { id: row.id },
-          data: { ownerUserId: row.ownerUserId },
-        }),
-      ),
-      PRISMA_TX,
-    );
-    moved += slice.length;
+  // One UPDATE per assignee (per chunk) instead of one per lead.
+  const idsByOwner = new Map<string, string[]>();
+  for (const row of pending) {
+    const ids = idsByOwner.get(row.ownerUserId) ?? [];
+    ids.push(row.id);
+    idsByOwner.set(row.ownerUserId, ids);
+  }
+  for (const [ownerUserId, ids] of idsByOwner) {
+    for (let i = 0; i < ids.length; i += LOOKUP_BATCH) {
+      const result = await prisma.messagingContact.updateMany({
+        where: { id: { in: ids.slice(i, i + LOOKUP_BATCH) } },
+        data: { ownerUserId },
+      });
+      moved += result.count;
+    }
   }
 
   return { moved, skipped };
