@@ -2,6 +2,7 @@ import express, { type Request, type Response } from 'express';
 import { authenticateToken } from '../middleware/authMiddleware';
 import { isPrivilegedMessagingRole } from '../services/messaging/sender.service';
 import {
+  buildReportPdf,
   buildReportSummary,
   buildReportWorkbook,
   parseReportRange,
@@ -35,16 +36,24 @@ router.get('/summary', async (req: Request, res: Response) => {
   }
 });
 
-/** GET /reports/export?from=&to=&sections=broadcasts,inbox,agents,applications → .xlsx */
+/**
+ * GET /reports/export?from=&to=&sections=broadcasts,inbox,agents,applications&format=xlsx|pdf
+ * Excel (default) carries raw data plus a sheet per broadcast; PDF is the
+ * formatted report with a full section per broadcast.
+ */
 router.get('/export', async (req: Request, res: Response) => {
   if (!ensureAdmin(req, res)) return;
   try {
     const range = parseReportRange(req.query.from, req.query.to);
     const sections = parseSections(req.query.sections);
-    const buffer = await buildReportWorkbook(range, sections);
+    const asPdf = String(req.query.format ?? '').toLowerCase() === 'pdf';
+    const buffer = asPdf ? await buildReportPdf(range, sections) : await buildReportWorkbook(range, sections);
     const lastDay = new Date(range.to.getTime() - 86_400_000).toISOString().slice(0, 10);
-    const filename = `harbor-report-${range.from.toISOString().slice(0, 10)}-to-${lastDay}.xlsx`;
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    const filename = `harbor-report-${range.from.toISOString().slice(0, 10)}-to-${lastDay}.${asPdf ? 'pdf' : 'xlsx'}`;
+    res.setHeader(
+      'Content-Type',
+      asPdf ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
     res.send(buffer);

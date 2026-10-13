@@ -12,6 +12,8 @@
  */
 import * as XLSX from 'xlsx';
 import prisma from '../../config/prismaClient';
+import { collectBroadcastDetails, type BroadcastDetail } from './broadcastDetail.service';
+import { renderReportPdf } from './harborReportPdf.service';
 
 export const REPORT_SECTIONS = ['broadcasts', 'inbox', 'agents', 'applications'] as const;
 export type ReportSection = (typeof REPORT_SECTIONS)[number];
@@ -61,7 +63,7 @@ const inRange = (range: ReportRange) => ({ gte: range.from, lt: range.to });
 const num = (v: unknown): number | null => (v === null || v === undefined || v === '' ? null : Number(v));
 const pct = (part: number, whole: number): number | null => (whole > 0 ? Math.round((part / whole) * 1000) / 10 : null);
 
-async function userNames(): Promise<Map<string, string>> {
+export async function userNames(): Promise<Map<string, string>> {
   const users = await prisma.user.findMany({ select: { id: true, firstName: true, lastName: true, email: true } });
   return new Map(users.map((u) => [u.id, `${u.firstName ?? ''} ${u.lastName ?? ''}`.trim() || u.email]));
 }
@@ -348,7 +350,7 @@ async function inboxSheets(range: ReportRange, names: Map<string, string>): Prom
   ];
 }
 
-async function agentSheet(range: ReportRange): Promise<Array<[string, Row[]]>> {
+export async function agentSheet(range: ReportRange): Promise<Array<[string, Row[]]>> {
   const users = await prisma.user.findMany({
     select: { id: true, firstName: true, lastName: true, email: true, role: true, isActive: true },
     orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
@@ -409,7 +411,7 @@ async function agentSheet(range: ReportRange): Promise<Array<[string, Row[]]>> {
   return [['Agent Performance', rows]];
 }
 
-async function applicationSheet(range: ReportRange, names: Map<string, string>): Promise<Array<[string, Row[]]>> {
+export async function applicationSheet(range: ReportRange, names: Map<string, string>): Promise<Array<[string, Row[]]>> {
   const apps = await pageAll((cursor) =>
     prisma.application.findMany({
       where: { createdAt: inRange(range), deletedAt: null },
@@ -503,6 +505,177 @@ async function applicationSheet(range: ReportRange, names: Map<string, string>):
 }
 
 /* ============================================================================
+ * One sheet per broadcast
+ * ==========================================================================*/
+
+type Cell = string | number | boolean | Date | null;
+
+/** Everything about one campaign, stacked as labelled blocks on its own sheet. */
+function broadcastDetailSheet(b: BroadcastDetail): XLSX.WorkSheet {
+  const aoa: Cell[][] = [];
+  const blank = () => aoa.push([]);
+  const title = (t: string) => {
+    blank();
+    aoa.push([t.toUpperCase()]);
+  };
+  const kv = (rows: Array<[string, Cell]>) => rows.forEach(([k, v]) => aoa.push([k, v]));
+  const grid = (headers: string[], rows: Cell[][]) => {
+    aoa.push(headers);
+    if (rows.length === 0) aoa.push(['None']);
+    else aoa.push(...rows);
+  };
+  const f = b.funnel;
+
+  aoa.push([`Broadcast ${b.index}: ${b.name}`]);
+  aoa.push([`${b.status} · ${b.campaignKey}`]);
+
+  title('Campaign details');
+  kv([
+    ['Status', b.status],
+    ['From number', b.fromNumber],
+    ['Created at', b.createdAt],
+    ['Created by', b.createdBy],
+    ['Approved at', b.approvedAt],
+    ['Approved by', b.approvedBy],
+    ['Scheduled for', b.scheduledAt],
+    ['Started at', b.startedAt],
+    ['Finished at', b.finishedAt],
+    ['Duration (seconds)', b.timing.durationSeconds],
+    ['Throttle (msg/sec)', b.throttlePerSecond],
+    ['Achieved throughput (msg/min)', b.timing.throughputPerMinute],
+    ['Lead batch', b.leadBatch],
+    ['Follow-up of', b.followUpOf],
+    ['Follow-ups sent', b.followUps.join(', ') || null],
+  ]);
+
+  title('Message');
+  kv([
+    ['Text', b.body],
+    ['Encoding', b.message.encoding],
+    ['Characters', b.message.characters],
+    ['Segments per message', b.message.segmentsPerMessage],
+    ['Merge fields', b.message.mergeFields.join(', ') || null],
+    ['Non-GSM characters', b.message.unicodeTriggers.join(' ') || null],
+    ['Media', b.media.join(', ') || null],
+  ]);
+
+  title('Funnel and rates');
+  kv([
+    ['Recipients', f.recipients],
+    ['Suppressed before send', f.suppressed],
+    ['Sent', f.sent],
+    ['Delivered', f.delivered],
+    ['Failed / undeliverable', f.failed],
+    ['Awaiting delivery report', f.pending],
+    ['Still queued', f.stillQueued],
+    ['Unique repliers', f.replied],
+    ['Total replies', f.totalReplies],
+    ['Opted out', f.optedOut],
+    ['Interested', f.interested],
+    ['Not interested', f.notInterested],
+    ['Delivery rate %', b.rates.delivery],
+    ['Failure rate %', b.rates.failure],
+    ['Reply rate % (of sent)', b.rates.reply],
+    ['Reply rate % (of delivered)', b.rates.replyOfDelivered],
+    ['Opt-out rate %', b.rates.optOut],
+    ['Interested % (of repliers)', b.rates.interested],
+  ]);
+
+  title('Live campaign counters (for comparison)');
+  kv(Object.entries(b.counters).map(([k, v]): [string, Cell] => [k, v]));
+
+  title('Cost');
+  kv([
+    ['Segments billed', b.cost.segments],
+    ['Total cost', b.cost.total],
+    ['Currency', b.cost.currency],
+    ['Cost per sent', b.cost.perSent],
+    ['Cost per delivered', b.cost.perDelivered],
+    ['Cost per replier', b.cost.perReply],
+  ]);
+
+  title('Timing');
+  kv([
+    ['First send', b.timing.firstSentAt],
+    ['Last send', b.timing.lastSentAt],
+    ['Median seconds to deliver', b.timing.deliveryMedianSeconds],
+    ['90th percentile seconds to deliver', b.timing.deliveryP90Seconds],
+    ['Median minutes to first reply', b.timing.replyMedianMinutes],
+    ['First reply', b.timing.firstReplyAt],
+    ['Last reply', b.timing.lastReplyAt],
+  ]);
+
+  title('Activity by hour (Eastern)');
+  grid(['Hour', 'Sent', 'Replies'], b.sendsByHour.map((v, h) => [`${String(h).padStart(2, '0')}:00`, v, b.repliesByHour[h]]));
+
+  title('Status of every recipient');
+  grid(['Status', 'Recipients'], b.statusBreakdown.map((x) => [x.label, x.count]));
+  title('Failure reasons');
+  grid(['Reason', 'Count'], b.failureReasons.map((x) => [x.label, x.count]));
+  title('Suppression reasons');
+  grid(['Reason', 'Count'], b.suppressionReasons.map((x) => [x.label, x.count]));
+  title('Replies by day');
+  grid(['Day', 'Replies'], b.repliesByDay.map((x) => [x.label, x.count]));
+
+  const bd = (t: string, rows: typeof b.byOwner) => {
+    title(t);
+    grid(
+      ['', 'Recipients', 'Delivered', 'Failed', 'Replied', 'Opted out', 'Interested'],
+      rows.map((r) => [r.label, r.recipients, r.delivered, r.failed, r.replied, r.optedOut, r.interested]),
+    );
+  };
+  bd('By lead owner', b.byOwner);
+  bd('By state', b.byState);
+
+  title(`Replies (${b.replies.length})`);
+  grid(
+    ['Received at', 'From', 'Contact', 'Company', 'Lead owner', 'Reply text', 'Media', 'STOP', 'Minutes after send'],
+    b.replies.map((r) => [r.receivedAt, r.from, r.contactName, r.company, r.leadOwner, r.text, r.media, r.isStop, r.minutesAfterSend]),
+  );
+
+  title(`All recipients (${b.recipients.length})`);
+  grid(
+    ['Phone', 'First name', 'Last name', 'Company', 'Email', 'City', 'State', 'Lead owner', 'Disposition', 'Recipient status', 'Message status', 'Sent at', 'Delivered at', 'Seconds to deliver', 'Segments', 'Price', 'Error code', 'Error', 'Suppressed reason', 'Replies', 'First reply at', 'Opted out'],
+    b.recipients.map((r) => [
+      r.phone, r.firstName, r.lastName, r.company, r.email, r.city, r.state, r.leadOwner, r.disposition,
+      r.recipientStatus, r.messageStatus, r.sentAt, r.deliveredAt, r.deliverySeconds, r.segments, r.price,
+      r.errorCode, r.error, r.suppressedReason, r.replies, r.firstReplyAt, r.optedOut,
+    ]),
+  );
+
+  const sheet = XLSX.utils.aoa_to_sheet(aoa, { cellDates: true, dateNF: 'yyyy-mm-dd hh:mm' });
+  sheet['!cols'] = [{ wch: 34 }, { wch: 22 }, { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 40 }, ...Array.from({ length: 16 }, () => ({ wch: 16 }))];
+  return sheet;
+}
+
+/** Excel sheet names: 31 chars max, no []:*?/\ and unique. */
+function sheetName(b: BroadcastDetail, used: Set<string>): string {
+  const base = `${String(b.index).padStart(2, '0')} ${b.name}`.replace(/[[\]:*?/\\]/g, ' ').slice(0, 31).trim();
+  let name = base;
+  for (let i = 2; used.has(name.toLowerCase()); i += 1) name = `${base.slice(0, 27)} (${i})`;
+  used.add(name.toLowerCase());
+  return name;
+}
+
+/* ============================================================================
+ * PDF
+ * ==========================================================================*/
+
+export async function buildReportPdf(range: ReportRange, sections: ReportSection[]): Promise<Buffer> {
+  const names = await userNames();
+  const summary = await buildReportSummary(range);
+  const lastDay = new Date(range.to.getTime() - DAY_MS).toISOString().slice(0, 10);
+  return renderReportPdf({
+    periodLabel: `${range.from.toISOString().slice(0, 10)} to ${lastDay}`,
+    generatedAt: new Date(),
+    summary,
+    broadcasts: sections.includes('broadcasts') ? await collectBroadcastDetails(range, names) : [],
+    agents: sections.includes('agents') ? (await agentSheet(range))[0][1] : [],
+    applications: sections.includes('applications') ? (await applicationSheet(range, names))[0][1] : [],
+  });
+}
+
+/* ============================================================================
  * Workbook
  * ==========================================================================*/
 
@@ -528,6 +701,7 @@ export async function buildReportWorkbook(range: ReportRange, sections: ReportSe
   const summary = await buildReportSummary(range);
 
   const sheets: Array<[string, Row[]]> = [];
+  const details = sections.includes('broadcasts') ? await collectBroadcastDetails(range, names) : [];
   if (sections.includes('broadcasts')) sheets.push(...(await broadcastSheets(range, names)));
   if (sections.includes('inbox')) sheets.push(...(await inboxSheets(range, names)));
   if (sections.includes('agents')) sheets.push(...(await agentSheet(range)));
@@ -570,6 +744,9 @@ export async function buildReportWorkbook(range: ReportRange, sections: ReportSe
   overviewSheet['!cols'] = [{ wch: 48 }, { wch: 28 }];
   XLSX.utils.book_append_sheet(wb, overviewSheet, 'Overview');
   for (const [name, rows] of sheets) XLSX.utils.book_append_sheet(wb, toSheet(rows), name.slice(0, 31));
+  // Then every campaign on its own sheet, with every detail about it.
+  const used = new Set(wb.SheetNames.map((n) => n.toLowerCase()));
+  for (const b of details) XLSX.utils.book_append_sheet(wb, broadcastDetailSheet(b), sheetName(b, used));
 
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx', compression: true }) as Buffer;
 }
