@@ -98,6 +98,30 @@ export interface BroadcastSummary {
     startedAt: string | null;
     finishedAt: string | null;
     createdAt: string;
+    /** Present on the list endpoint. */
+    body?: string;
+    scheduledAt?: string | null;
+    approvedAt?: string | null;
+    throttlePerSecond?: number | null;
+    undeliverableCount?: number;
+    leadBatchName?: string | null;
+    parentName?: string | null;
+    createdByName?: string | null;
+    approvedByName?: string | null;
+}
+
+/** Totals across every campaign the caller can see (not just one page). */
+export interface BroadcastTotals {
+    campaigns: number;
+    byStatus: Record<string, number>;
+    recipients: number;
+    sent: number;
+    delivered: number;
+    failed: number;
+    suppressed: number;
+    replied: number;
+    optedOut: number;
+    queued: number;
 }
 
 export interface MessagingContact {
@@ -396,7 +420,11 @@ export async function fetchContactStatus(phoneNumber: string) {
 /* Broadcasts                                                            */
 /* -------------------------------------------------------------------- */
 
-export async function fetchBroadcasts(params: { page?: number; status?: string }): Promise<Paginated<BroadcastSummary>> {
+export async function fetchBroadcasts(params: {
+    page?: number;
+    pageSize?: number;
+    status?: string;
+}): Promise<Paginated<BroadcastSummary> & { totals?: BroadcastTotals }> {
     const response = await axiosGet(`${BASE}/broadcasts`, { params });
     return response.data;
 }
@@ -475,6 +503,47 @@ export async function createBroadcastFromFile(input: {
     return response.data.data;
 }
 
+export interface AudiencePreview {
+    /** Every lead / row supplied, before anything is left out. */
+    totalLeads: number;
+    excluded: {
+        blocked: number;
+        interested: number;
+        notInterested: number;
+        /** Replied STOP earlier — kept out even when the lead is re-uploaded. */
+        optedOut: number;
+        dnc: number;
+        otherSuppressed: number;
+        invalid: number;
+        duplicates: number;
+    };
+    /** Who the broadcast will actually go to. */
+    willSend: number;
+    /** Of those numbers, how many a campaign has messaged before. */
+    previouslyMessaged: number;
+    optedOut: Array<{ phoneNumber: string; name: string | null; optedOutAt: string | null }>;
+    optedOutMore: number;
+    skippedClients?: Array<{ clientId: string; businessName: string; reason: string }>;
+}
+
+/** Step-2 breakdown: exactly what create would send, without creating anything. */
+export async function previewBroadcastAudience(input: {
+    leadBatchId?: string;
+    clientIds?: string[];
+    recipients?: Array<{ phoneNumber: string }>;
+    file?: File | null;
+}): Promise<AudiencePreview> {
+    if (input.file) {
+        const formData = new FormData();
+        formData.append('file', input.file);
+        const response = await axiosPostFormData(`${BASE}/broadcasts/audience-preview`, formData);
+        return response.data.data;
+    }
+    const { file: _file, ...json } = input;
+    const response = await axiosPost(`${BASE}/broadcasts/audience-preview`, json);
+    return response.data.data;
+}
+
 export interface CreateBroadcastResult {
     id: string;
     campaignKey: string;
@@ -485,7 +554,7 @@ export interface CreateBroadcastResult {
     invalidDropped: number;
     skippedClients?: Array<{ clientId: string; businessName: string; reason: string }>;
     /** Leads left out of a batch audience, and why. */
-    batchExcluded?: { blocked: number; disposed: number } | null;
+    batchExcluded?: { total?: number; blocked: number; disposed: number; interested?: number; notInterested?: number } | null;
     scheduledAt?: string | null;
     /** True when the creator was an agent, so a Super Admin must release it. */
     awaitingApproval?: boolean;
