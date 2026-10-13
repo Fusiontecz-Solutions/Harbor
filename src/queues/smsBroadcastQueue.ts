@@ -86,7 +86,7 @@ export const getSmsBroadcastQueue = (): Queue<SmsBroadcastJobData> | null => {
 /**
  * Enqueue every chunk for a broadcast.
  *
- * Each start gets its own run key in the job id (`bcast:<id>:<run>:<chunk>`).
+ * Each start gets its own run key in the job id (`bcast-<id>-<run>-<chunk>`).
  * Ids used to be `bcast:<id>:<chunk>` for every run, and because BullMQ keeps
  * completed jobs (removeOnComplete: 1000) and silently ignores an add whose id
  * it still knows, a resume after pause enqueued nothing at all. Double-send
@@ -118,7 +118,9 @@ export const enqueueBroadcastChunks = async (
         recipientIds: recipientIds.slice(i, i + BROADCAST_CHUNK_SIZE),
         chunkIndex,
       },
-      opts: { jobId: `bcast:${broadcastId}:${runKey}:${chunkIndex}` },
+      // BullMQ rejects a custom id containing ':' unless it has exactly three
+      // ':'-separated parts, so ids use '-' as the separator.
+      opts: { jobId: `bcast-${broadcastId}-${runKey}-${chunkIndex}` },
     });
   }
 
@@ -152,7 +154,7 @@ export const enqueueBroadcastRetry = async (
   await queue.add(
     'send-chunk',
     { broadcastId, recipientIds, chunkIndex, pass },
-    { jobId: `bcast:${broadcastId}:retry:${chunkIndex}:${pass}:${Date.now().toString(36)}`, delay: delayMs },
+    { jobId: `bcast-${broadcastId}-retry-${chunkIndex}-${pass}-${Date.now().toString(36)}`, delay: delayMs },
   );
 };
 
