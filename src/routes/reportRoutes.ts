@@ -8,6 +8,7 @@ import {
   parseReportRange,
   parseSections,
 } from '../services/reports/harborReport.service';
+import { buildReportDashboard } from '../services/reports/reportDashboard.service';
 
 const router = express.Router();
 router.use(authenticateToken);
@@ -24,6 +25,17 @@ function fail(res: Response, err: unknown, what: string): void {
   if (status >= 500) console.error(`[reports] ${what} failed:`, err);
   res.status(status).json({ success: false, message: (err as Error)?.message || `Failed to ${what}` });
 }
+
+/** GET /reports/dashboard?from=&to= — everything the Reports page shows. */
+router.get('/dashboard', async (req: Request, res: Response) => {
+  if (!ensureAdmin(req, res)) return;
+  try {
+    const range = parseReportRange(req.query.from, req.query.to);
+    res.json({ success: true, data: await buildReportDashboard(range) });
+  } catch (err) {
+    fail(res, err, 'load report dashboard');
+  }
+});
 
 /** GET /reports/summary?from=YYYY-MM-DD&to=YYYY-MM-DD */
 router.get('/summary', async (req: Request, res: Response) => {
