@@ -29,6 +29,7 @@ import integrationSettingsRoutes from './integrationSettingsRoutes';
 import sendgridWebhookRoutes from './sendgridWebhookRoutes';
 import messagingRoutes from './messagingRoutes';
 import reportRoutes from './reportRoutes';
+import notificationRoutes from './notificationRoutes';
 import backgroundCheckRoutes from './backgroundCheckRoutes';
 import datamerchRoutes from './datamerchRoutes';
 import opencorporatesRoutes from './opencorporatesRoutes';
@@ -75,6 +76,9 @@ router.use('/clear', clearRoutes);
 // provider callbacks and the authenticated agent endpoints.
 router.use('/messaging', messagingRoutes);
 router.use('/reports', reportRoutes);
+// In-app notification feed (bell / Notifications page). Separate from Web Push,
+// which lives under /messaging/push and only alerts devices about new messages.
+router.use('/notifications', notificationRoutes);
 router.use('/background-check-report', backgroundCheckReportRoutes);
 
 export default router;

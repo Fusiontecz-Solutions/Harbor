@@ -6,7 +6,9 @@
  * confirms "42,180 of 50,000 will receive this" before anything is sent.
  */
 import type { Request, Response } from 'express';
+import { Prisma } from '@prisma/client';
 import prisma from '../config/prismaClient';
+import { parsePagination } from '../utils/pagination';
 import {
   cancelBroadcast,
   createBroadcast,
@@ -194,56 +196,110 @@ async function collectAudience(req: Request): Promise<CollectedAudience | { erro
   return { recipients, skippedClients, batchExcluded, leadBatchId };
 }
 
+type BroadcastSort = 'newest' | 'replies' | 'replyRate' | 'delivery' | 'optouts';
+
+/**
+ * Ids of one page of campaigns ordered by reply rate (replied / sent) or
+ * delivery rate (delivered / sent), applying the same filters as the list.
+ */
+async function pageIdsByRate(
+  sort: 'replyRate' | 'delivery',
+  filters: { status?: string; createdById?: string; search: string },
+  skip: number,
+  take: number,
+): Promise<string[]> {
+  const conds: Prisma.Sql[] = [];
+  if (filters.status) conds.push(Prisma.sql`b."status"::text = ${filters.status}`);
+  if (filters.createdById) conds.push(Prisma.sql`b."createdById" = ${filters.createdById}::uuid`);
+  if (filters.search) {
+    const like = `%${filters.search.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+    conds.push(
+      Prisma.sql`(b."name" ILIKE ${like} OR b."body" ILIKE ${like} OR u."firstName" ILIKE ${like} OR u."lastName" ILIKE ${like})`,
+    );
+  }
+  const whereSql = conds.length ? Prisma.sql`WHERE ${Prisma.join(conds, ' AND ')}` : Prisma.empty;
+  const numerator = sort === 'replyRate' ? Prisma.sql`b."repliedCount"` : Prisma.sql`b."deliveredCount"`;
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT b."id"
+    FROM "SmsBroadcast" b
+    LEFT JOIN "User" u ON u."id" = b."createdById"
+    ${whereSql}
+    ORDER BY CASE WHEN b."sentCount" > 0 THEN ${numerator}::float / b."sentCount" END DESC NULLS LAST,
+             b."createdAt" DESC
+    OFFSET ${skip} LIMIT ${take}`;
+  return rows.map((r) => r.id);
+}
+
 class MessagingBroadcastController {
-  /** GET /messaging/broadcasts?page=&status= */
+  /** GET /messaging/broadcasts?page=&pageSize=&status=&search=&sort= */
   async list(req: Request, res: Response): Promise<void> {
     try {
-      const page = Math.max(1, Number(req.query.page) || 1);
-      const pageSize = Math.min(500, Math.max(1, Number(req.query.pageSize) || 25));
+      const { page, pageSize, skip, take } = parsePagination(req, { defaultPageSize: 25 })!;
       const status = req.query.status ? String(req.query.status) : undefined;
+      const search = req.query.search ? String(req.query.search).trim() : '';
+      const sort = String(req.query.sort || 'newest') as BroadcastSort;
 
-      const where: Record<string, unknown> = status ? { status: status as never } : {};
+      const where: Prisma.SmsBroadcastWhereInput = status ? { status: status as never } : {};
       // An agent sees the campaigns they built, including the ones still
       // waiting on approval; an admin sees everyone's.
       if (!isAdmin(req)) where.createdById = actorId(req);
+      if (search) {
+        const contains = { contains: search, mode: 'insensitive' as const };
+        where.OR = [
+          { name: contains },
+          { body: contains },
+          { createdBy: { is: { OR: [{ firstName: contains }, { lastName: contains }] } } },
+        ];
+      }
 
-      const [items, total] = await Promise.all([
-        prisma.smsBroadcast.findMany({
-          where,
-          orderBy: { createdAt: 'desc' },
-          skip: (page - 1) * pageSize,
-          take: pageSize,
-          select: {
-            id: true,
-            campaignKey: true,
-            name: true,
-            status: true,
-            fromNumber: true,
-            totalRecipients: true,
-            queuedCount: true,
-            sentCount: true,
-            deliveredCount: true,
-            failedCount: true,
-            suppressedCount: true,
-            repliedCount: true,
-            optOutCount: true,
-            startedAt: true,
-            finishedAt: true,
-            createdAt: true,
-            // Detail for the campaign list: what was sent, by whom, when.
-            body: true,
-            scheduledAt: true,
-            approvedAt: true,
-            throttlePerSecond: true,
-            undeliverableCount: true,
-            leadBatchId: true,
-            parentBroadcastId: true,
-            createdBy: { select: { firstName: true, lastName: true } },
-            approvedBy: { select: { firstName: true, lastName: true } },
-          },
-        }),
-        prisma.smsBroadcast.count({ where }),
-      ]);
+      const select = {
+        id: true,
+        campaignKey: true,
+        name: true,
+        status: true,
+        fromNumber: true,
+        totalRecipients: true,
+        queuedCount: true,
+        sentCount: true,
+        deliveredCount: true,
+        failedCount: true,
+        suppressedCount: true,
+        repliedCount: true,
+        optOutCount: true,
+        startedAt: true,
+        finishedAt: true,
+        createdAt: true,
+        // Detail for the campaign list: what was sent, by whom, when.
+        body: true,
+        scheduledAt: true,
+        approvedAt: true,
+        throttlePerSecond: true,
+        undeliverableCount: true,
+        leadBatchId: true,
+        parentBroadcastId: true,
+        createdBy: { select: { firstName: true, lastName: true } },
+        approvedBy: { select: { firstName: true, lastName: true } },
+      } satisfies Prisma.SmsBroadcastSelect;
+
+      let items: Prisma.SmsBroadcastGetPayload<{ select: typeof select }>[];
+      const total = await prisma.smsBroadcast.count({ where });
+      if (sort === 'replyRate' || sort === 'delivery') {
+        // A rate is not a column, so Prisma can't order by it: pick this
+        // page's ids in SQL (same filters as `where`), then load them.
+        // Campaigns with nothing sent yet have no rate and sort last.
+        const ids = await pageIdsByRate(sort, { status, createdById: where.createdById as string | undefined, search }, skip, take);
+        const rows = ids.length ? await prisma.smsBroadcast.findMany({ where: { id: { in: ids } }, select }) : [];
+        const byId = new Map(rows.map((r) => [r.id, r]));
+        items = ids.map((id) => byId.get(id)).filter((r): r is NonNullable<typeof r> => Boolean(r));
+      } else {
+        const orderBy: Prisma.SmsBroadcastOrderByWithRelationInput[] =
+          sort === 'replies'
+            ? [{ repliedCount: 'desc' }, { createdAt: 'desc' }]
+            : sort === 'optouts'
+              ? [{ optOutCount: 'desc' }, { createdAt: 'desc' }]
+              : [{ createdAt: 'desc' }];
+        items = await prisma.smsBroadcast.findMany({ where, orderBy, skip, take, select });
+      }
 
       // Totals across every campaign this caller can see, not just this page.
       const [sums, byStatus] = await Promise.all([

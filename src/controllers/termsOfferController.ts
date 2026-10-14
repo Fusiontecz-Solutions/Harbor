@@ -1,6 +1,7 @@
 // @ts-nocheck
 import type { Request, Response } from 'express';
 import prisma from '../config/prismaClient';
+import { parsePagination, paginationMeta } from '../utils/pagination';
 import type { AuthenticatedUser } from '../services/applicationService';
 import { getUnderwriterClaimMutationDenial } from '../services/underwriterClaimGuard';
 import { sanitizePaymentFrequencyForPersist } from '../utils/sanitizePaymentFrequency';
@@ -310,14 +311,22 @@ class TermsOfferController {
         where.applicationId = app.id;
       }
 
-      const termsOffers = await prisma.termsOffer.findMany({
-        where,
-        orderBy: { createdAt: 'desc' },
-      });
+      // `limit` (and `page`) are honoured when sent; without them every
+      // matching offer is returned, as before.
+      const paging = parsePagination(req, { defaultPageSize: null, maxPageSize: 500 });
+      const [termsOffers, total] = await Promise.all([
+        prisma.termsOffer.findMany({
+          where,
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          ...(paging ? { skip: paging.skip, take: paging.take } : {}),
+        }),
+        paging ? prisma.termsOffer.count({ where }) : Promise.resolve(null),
+      ]);
 
       return res.status(200).json({
         success: true,
         data: termsOffers.map(mapTermsOfferToApi),
+        ...(paging && total != null ? { pagination: paginationMeta(paging, total) } : {}),
       });
     } catch (error) {
       console.error('Get all terms offers error:', error);

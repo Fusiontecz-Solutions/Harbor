@@ -80,7 +80,15 @@ export async function createApplicationActivityLog(input: CreateApplicationActiv
   });
 }
 
-export async function getApplicationActivityLogsForUser(applicationId: string, user: AuthenticatedUser | null) {
+/**
+ * Activity logs for an application, newest first. Pass `page` to get one
+ * slice plus the full `total`; without it every log is returned (total null).
+ */
+export async function getApplicationActivityLogsForUser(
+  applicationId: string,
+  user: AuthenticatedUser | null,
+  page?: { skip: number; take: number },
+) {
   // Ensure application exists and user has access
   const application = await prisma.application.findUnique({
     where: { id: applicationId },
@@ -92,7 +100,7 @@ export async function getApplicationActivityLogsForUser(applicationId: string, u
   });
 
   if (!application) {
-    return { forbidden: false, application: null, logs: [] };
+    return { forbidden: false, application: null, logs: [], total: null as number | null };
   }
 
   // Basic access check: elevated roles see everything; agents see only owned applications
@@ -101,11 +109,12 @@ export async function getApplicationActivityLogsForUser(applicationId: string, u
   const isAgent = role === 'AGENT';
 
   if (!user || (!isElevated && !(isAgent && (application.referringAgentId === user.id || application.createdById === user.id)))) {
-    return { forbidden: true, application, logs: [] };
+    return { forbidden: true, application, logs: [], total: null as number | null };
   }
 
-  const logs = await prisma.applicationActivityLog.findMany({
-    where: { applicationId: application.id },
+  const where = { applicationId: application.id };
+  const [logs, total] = await Promise.all([prisma.applicationActivityLog.findMany({
+    where,
     include: {
       User: {
         select: {
@@ -117,11 +126,11 @@ export async function getApplicationActivityLogsForUser(applicationId: string, u
         },
       },
     },
-    orderBy: {
-      createdAt: 'desc',
-    },
-  });
+    // id breaks createdAt ties so consecutive pages never overlap.
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    ...(page ? { skip: page.skip, take: page.take } : {}),
+  }), page ? prisma.applicationActivityLog.count({ where }) : Promise.resolve(null)]);
 
-  return { forbidden: false, application, logs };
+  return { forbidden: false, application, logs, total };
 }
 
