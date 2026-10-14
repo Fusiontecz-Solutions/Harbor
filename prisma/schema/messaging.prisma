@@ -28,8 +28,14 @@ model MessagingContact {
   id              String                  @id @default(uuid()) @db.Uuid
   /// E.164 (+15551234567). Always written through normalizePhoneNumber().
   phoneNumber     String
+  /// Owner's full name as it appears in the lead sheet ("Owners Name"). The
+  /// name shown everywhere for a lead; a lead without one is never broadcast.
+  ownerName       String?
   firstName       String?
   lastName        String?
+  /// Business EIN and owner SSN from the lead sheet, shown on the profile card.
+  ein             String?
+  ssn             String?
   emailAddress    String?
   company         String?
   street          String?

@@ -6,6 +6,7 @@
  * confirms "42,180 of 50,000 will receive this" before anything is sent.
  */
 import type { Request, Response } from 'express';
+import { contactDisplayName } from '../services/messaging/contactName';
 import { Prisma } from '@prisma/client';
 import prisma from '../config/prismaClient';
 import { parsePagination } from '../utils/pagination';
@@ -19,7 +20,7 @@ import {
 import { parseContactSheet } from '../services/messaging/contact.service';
 import { buildMergeDataFromSheetRow } from '../services/messaging/mergeTemplate';
 import { analyzeSmsTemplate, estimatedCampaignCredits } from '../services/messaging/smsSegments';
-import { normalizePhoneNumber } from '../services/messaging/phone';
+import { firstPhoneNumberIn, normalizePhoneNumber } from '../services/messaging/phone';
 import { checkSuppressionBulk } from '../services/messaging/suppression.service';
 import {
   exportAudienceCsv,
@@ -102,6 +103,8 @@ interface CollectedAudience {
   skippedClients: Array<{ clientId: string; businessName: string; reason: string }>;
   batchExcluded: BatchExclusions | null;
   leadBatchId: string | null;
+  /** Spreadsheet rows skipped because they have no owner name. */
+  sheetMissingOwnerName: number;
 }
 
 /**
@@ -111,6 +114,7 @@ interface CollectedAudience {
  */
 async function collectAudience(req: Request): Promise<CollectedAudience | { error: { status: number; message: string } }> {
   let recipients: Array<{ phoneNumber: string; mergeData?: Record<string, unknown> }> = [];
+  let sheetMissingOwnerName = 0;
 
   const upload = readUploadedFile(req);
   if (upload) {
@@ -126,9 +130,26 @@ async function collectAudience(req: Request): Promise<CollectedAudience | { erro
       };
     }
 
+    // A lead without an owner name is never broadcast to.
+    const nameHeaders = Object.entries(columnMapping)
+      .filter(([, field]) => field === 'ownerName' || field === 'firstName' || field === 'lastName')
+      .map(([header]) => header);
+    if (nameHeaders.length === 0) {
+      return {
+        error: {
+          status: 400,
+          message: `No owner name column found in the uploaded sheet (expected "Owners Name"). Headers seen: ${Object.keys(rows[0] ?? {}).join(', ') || 'none'}`,
+        },
+      };
+    }
+
     recipients = rows.flatMap((row) => {
-      const phoneNumber = normalizePhoneNumber(row[phoneHeader]);
+      const phoneNumber = firstPhoneNumberIn(row[phoneHeader]);
       if (!phoneNumber) return [];
+      if (!nameHeaders.some((h) => String(row[h] ?? '').trim())) {
+        sheetMissingOwnerName += 1;
+        return [];
+      }
       return [
         {
           phoneNumber,
@@ -193,7 +214,7 @@ async function collectAudience(req: Request): Promise<CollectedAudience | { erro
     ];
   }
 
-  return { recipients, skippedClients, batchExcluded, leadBatchId };
+  return { recipients, skippedClients, batchExcluded, leadBatchId, sheetMissingOwnerName };
 }
 
 type BroadcastSort = 'newest' | 'replies' | 'replyRate' | 'delivery' | 'optouts';
@@ -385,7 +406,7 @@ class MessagingBroadcastController {
         res.status(collected.error.status).json({ success: false, message: collected.error.message });
         return;
       }
-      const { recipients, skippedClients, batchExcluded } = collected;
+      const { recipients, skippedClients, batchExcluded, sheetMissingOwnerName } = collected;
 
       // Same normalise / dedupe rules as createBroadcast.
       const unique = new Map<string, Record<string, unknown> | undefined>();
@@ -421,10 +442,10 @@ class MessagingBroadcastController {
       const sample = optedOutNumbers.slice(0, 50);
       const names = await prisma.messagingContact.findMany({
         where: { phoneNumber: { in: sample } },
-        select: { phoneNumber: true, firstName: true, lastName: true, company: true },
+        select: { phoneNumber: true, ownerName: true, firstName: true, lastName: true, company: true },
       });
       const nameByPhone = new Map(
-        names.map((c) => [c.phoneNumber, [`${c.firstName ?? ''} ${c.lastName ?? ''}`.trim(), c.company].filter(Boolean).join(' · ') || null]),
+        names.map((c) => [c.phoneNumber, [contactDisplayName(c), c.company].filter(Boolean).join(' · ') || null]),
       );
       const optedOutAt = await prisma.messagingSuppression.findMany({
         where: { phoneNumber: { in: sample }, reason: 'STOP_KEYWORD', active: true },
@@ -446,7 +467,8 @@ class MessagingBroadcastController {
 
       const batchTotal = batchExcluded?.total ?? 0;
       const batchEligible = batchExcluded ? batchExcluded.total - batchExcluded.blocked - batchExcluded.disposed : 0;
-      const totalLeads = batchTotal + (recipients.length - batchEligible);
+      const batchEligibleAfterOwner = batchEligible - (batchExcluded?.missingOwnerName ?? 0);
+      const totalLeads = batchTotal + (recipients.length - batchEligibleAfterOwner) + sheetMissingOwnerName;
 
       res.json({
         success: true,
@@ -456,6 +478,7 @@ class MessagingBroadcastController {
             blocked: (batchExcluded?.blocked ?? 0) + byReason.MANUAL_BLOCK,
             interested: batchExcluded?.interested ?? 0,
             notInterested: batchExcluded?.notInterested ?? 0,
+            missingOwnerName: (batchExcluded?.missingOwnerName ?? 0) + sheetMissingOwnerName,
             optedOut: byReason.STOP_KEYWORD,
             dnc: byReason.DNC_LIST,
             otherSuppressed: byReason.OTHER,
@@ -495,16 +518,18 @@ class MessagingBroadcastController {
         res.status(collected.error.status).json({ success: false, message: collected.error.message });
         return;
       }
-      const { recipients, skippedClients, batchExcluded, leadBatchId } = collected;
+      const { recipients, skippedClients, batchExcluded, leadBatchId, sheetMissingOwnerName } = collected;
+      const missingOwnerName = (batchExcluded?.missingOwnerName ?? 0) + sheetMissingOwnerName;
 
       if (recipients.length === 0) {
         res.status(400).json({
           success: false,
           message: leadBatchId
-            ? 'Nobody in that batch is messageable — every lead is blocked or already marked.'
+            ? 'Nobody in that batch is messageable — every lead is blocked, already marked, or has no owner name.'
             : 'No recipients. Upload a spreadsheet in the "file" field, or pass recipients / clientIds / contactIds / leadBatchId.',
           skippedClients,
           batchExcluded,
+          missingOwnerName,
         });
         return;
       }
@@ -561,6 +586,7 @@ class MessagingBroadcastController {
             ...result,
             skippedClients,
             batchExcluded,
+            missingOwnerName,
             started,
             sms: {
               ...smsSegment,
@@ -577,6 +603,7 @@ class MessagingBroadcastController {
           ...result,
           skippedClients,
           batchExcluded,
+          missingOwnerName,
           scheduledAt,
           awaitingApproval: !isAdmin(req),
           sms: {

@@ -14,7 +14,8 @@
 import * as XLSX from 'xlsx';
 import { Prisma } from '@prisma/client';
 import prisma from '../../config/prismaClient';
-import { normalizePhoneNumber } from './phone';
+import { firstPhoneNumberIn, normalizePhoneNumber } from './phone';
+import { splitOwnerName } from './contactName';
 
 /** Prisma defaults to a 5s interactive transaction timeout — import batches exceed that. */
 /**
@@ -37,6 +38,10 @@ async function findInChunks<T>(values: string[], query: (chunk: string[]) => Pro
 
 export interface ImportedRow {
   phoneNumber: string;
+  /** "Owners Name" — the lead's display name; rows without it are not broadcast to. */
+  ownerName?: string | null;
+  ein?: string | null;
+  ssn?: string | null;
   firstName?: string | null;
   lastName?: string | null;
   emailAddress?: string | null;
@@ -69,15 +74,18 @@ export interface ImportSummary {
  * "phone_number" and "PHONE-NUMBER" all resolve to the same field.
  */
 const COLUMN_ALIASES: Record<keyof Omit<ImportedRow, 'tags'> | 'tags', string[]> = {
-  phoneNumber: ['phone', 'phonenumber', 'mobile', 'cell', 'cellphone', 'mobilenumber', 'number', 'contactnumber', 'telephone'],
+  phoneNumber: ['phone', 'phone1', 'phonenumber', 'phonenumber1', 'mobile', 'cell', 'cellphone', 'mobilenumber', 'number', 'contactnumber', 'telephone'],
+  ownerName: ['ownername', 'ownersname', 'owner', 'owners', 'ownerfullname', 'fullname', 'name', 'contactname'],
+  ein: ['ein', 'einnumber', 'businessein', 'fein', 'taxid', 'federaltaxid'],
+  ssn: ['ssn', 'ownerssn', 'socialsecurity', 'socialsecuritynumber'],
   firstName: ['firstname', 'fname', 'first', 'givenname'],
   lastName: ['lastname', 'lname', 'last', 'surname', 'familyname'],
   emailAddress: ['email', 'emailaddress', 'mail', 'e-mail'],
   company: ['company', 'business', 'businessname', 'organization', 'organisation', 'dba'],
-  street: ['street', 'address', 'address1', 'streetaddress', 'addressline1'],
-  city: ['city', 'town'],
-  state: ['state', 'province', 'region'],
-  zip: ['zip', 'zipcode', 'postalcode', 'postcode'],
+  street: ['street', 'address', 'address1', 'streetaddress', 'addressline1', 'businessaddress', 'businessaddress1'],
+  city: ['city', 'town', 'businesscity'],
+  state: ['state', 'province', 'region', 'businessstate'],
+  zip: ['zip', 'zipcode', 'postalcode', 'postcode', 'businesszip', 'businesszipcode'],
   tags: ['tags', 'tag', 'labels', 'segment'],
 };
 
@@ -145,7 +153,8 @@ function toImportedRow(
     if (value) mapped[field] = value;
   }
 
-  const phoneNumber = normalizePhoneNumber(mapped.phoneNumber);
+  // A cell can hold two numbers; the first usable one is the one we text.
+  const phoneNumber = firstPhoneNumberIn(mapped.phoneNumber);
   if (!phoneNumber) {
     return {
       row: null,
@@ -156,8 +165,13 @@ function toImportedRow(
   return {
     row: {
       phoneNumber,
-      firstName: mapped.firstName ?? null,
-      lastName: mapped.lastName ?? null,
+      ownerName: mapped.ownerName ?? null,
+      ein: mapped.ein ?? null,
+      ssn: mapped.ssn ?? null,
+      // First/last come from the owner name when the sheet has no separate
+      // columns, so {{firstName}} templates and older screens keep working.
+      firstName: mapped.firstName ?? splitOwnerName(mapped.ownerName).firstName,
+      lastName: mapped.lastName ?? (mapped.firstName ? null : splitOwnerName(mapped.ownerName).lastName),
       emailAddress: mapped.emailAddress ?? null,
       company: mapped.company ?? null,
       street: mapped.street ?? null,
@@ -303,6 +317,9 @@ export async function importContacts(input: {
     }
     toCreate.push({
       phoneNumber: row.phoneNumber,
+      ownerName: row.ownerName ?? null,
+      ein: row.ein ?? null,
+      ssn: row.ssn ?? null,
       firstName: row.firstName,
       lastName: row.lastName,
       emailAddress: row.emailAddress,
@@ -336,6 +353,9 @@ export async function importContacts(input: {
     // moves into the newer batch, which is the list an agent will work.
     await prisma.$executeRaw`
       UPDATE "MessagingContact" AS c SET
+        "ownerName"    = COALESCE(v.owner_name, c."ownerName"),
+        "ein"          = COALESCE(v.ein, c."ein"),
+        "ssn"          = COALESCE(v.ssn, c."ssn"),
         "firstName"    = COALESCE(v.first_name, c."firstName"),
         "lastName"     = COALESCE(v.last_name, c."lastName"),
         "emailAddress" = COALESCE(v.email, c."emailAddress"),
@@ -349,6 +369,9 @@ export async function importContacts(input: {
         "updatedAt"    = NOW()
       FROM unnest(
         ${slice.map((u) => u.id)}::uuid[],
+        ${col((r) => r.ownerName)}::text[],
+        ${col((r) => r.ein)}::text[],
+        ${col((r) => r.ssn)}::text[],
         ${col((r) => r.firstName)}::text[],
         ${col((r) => r.lastName)}::text[],
         ${col((r) => r.emailAddress)}::text[],
@@ -358,7 +381,7 @@ export async function importContacts(input: {
         ${col((r) => r.state)}::text[],
         ${col((r) => r.zip)}::text[],
         ${slice.map(({ row }) => (row.tags?.length ? row.tags.join('\x1f') : null))}::text[]
-      ) AS v(id, first_name, last_name, email, company, street, city, state, zip, tags)
+      ) AS v(id, owner_name, ein, ssn, first_name, last_name, email, company, street, city, state, zip, tags)
       WHERE c.id = v.id`;
   }
 
@@ -474,6 +497,9 @@ export async function createContact(input: ImportedRow & { ownerUserId?: string 
       lastName: input.lastName ?? null,
       emailAddress: input.emailAddress ?? null,
       company: input.company ?? null,
+      ownerName: input.ownerName ?? null,
+      ein: input.ein ?? null,
+      ssn: input.ssn ?? null,
       street: input.street ?? null,
       city: input.city ?? null,
       state: input.state ?? null,

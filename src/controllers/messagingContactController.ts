@@ -392,6 +392,9 @@ class MessagingContactController {
         select: {
           id: true,
           phoneNumber: true,
+          ownerName: true,
+          ein: true,
+          ssn: true,
           firstName: true,
           lastName: true,
           emailAddress: true,
@@ -405,7 +408,40 @@ class MessagingContactController {
         },
       });
 
+      // A contact linked to a specific CRM client wins over a phone match.
       const client = await findClientByPhone(phoneNumber);
+      const identityClientId = saved?.clientId || client?.id || null;
+
+      /**
+       * The profile card shows owner, business, EIN, SSN, phone and email. EIN
+       * and SSN exist only on the CRM client, so they are read here, for this
+       * one record, rather than added to the shared client lookup other
+       * features reuse.
+       */
+      const crm = identityClientId
+        ? await prisma.client.findUnique({
+            where: { id: identityClientId },
+            select: {
+              ownerFirstName: true,
+              ownerLastName: true,
+              businessName: true,
+              businessEinNumber: true,
+              ownerSsn: true,
+              ownerEmail: true,
+              businessEmail: true,
+            },
+          })
+        : null;
+      const ownerName = (first?: string | null, last?: string | null) =>
+        [first, last].filter((v) => v && String(v).trim()).join(' ').trim() || null;
+      const identity = {
+        ownerName: saved?.ownerName?.trim() || ownerName(crm?.ownerFirstName, crm?.ownerLastName) || ownerName(saved?.firstName, saved?.lastName),
+        businessName: crm?.businessName || saved?.company || null,
+        ein: crm?.businessEinNumber || saved?.ein || null,
+        ssn: crm?.ownerSsn || saved?.ssn || null,
+        phoneNumber,
+        email: saved?.emailAddress || crm?.ownerEmail || crm?.businessEmail || null,
+      };
 
       if (!saved && !client) {
         res.json({ success: true, data: null });
@@ -430,6 +466,7 @@ class MessagingContactController {
             status: 'ACTIVE',
             createdAt: null,
             source: 'crm-client',
+            identity,
             client: {
               id: client.id,
               clientNumber: client.clientId,
@@ -454,6 +491,7 @@ class MessagingContactController {
           city: saved!.city || client?.businessCity || null,
           state: saved!.state || client?.businessState || null,
           source: 'contact',
+          identity,
           client: client
             ? {
                 id: client.id,

@@ -14,6 +14,7 @@
  * someone who already said no.
  */
 import type { MessagingMessageStatus } from '@prisma/client';
+import { contactDisplayName } from './contactName';
 import prisma from '../../config/prismaClient';
 import { createBroadcast, type BroadcastRecipientInput } from './broadcast.service';
 import { analyzeSmsTemplate, estimatedCampaignCredits } from './smsSegments';
@@ -54,6 +55,14 @@ function statusesForAudience(audience: FollowUpAudience): MessagingMessageStatus
 /** Contacts an agent has already judged are out of every automated audience. */
 const UNHANDLED_ONLY = { disposition: 'NEW' as const };
 
+/**
+ * A lead needs an owner name to be broadcast to. Older leads that predate the
+ * owner-name column count when they have a first or last name.
+ */
+const HAS_OWNER_NAME = {
+  OR: [{ ownerName: { not: '' } }, { firstName: { not: '' } }, { lastName: { not: '' } }],
+};
+
 /** Leads left out of a batch audience, and why — so the audience shrinks honestly. */
 export interface BatchExclusions {
   /** Every lead in the caller's share of the batch, before anything is left out. */
@@ -63,6 +72,8 @@ export interface BatchExclusions {
   disposed: number;
   interested: number;
   notInterested: number;
+  /** Leads with no owner name in the sheet — never broadcast to. */
+  missingOwnerName: number;
 }
 
 export interface BatchAudience {
@@ -72,6 +83,7 @@ export interface BatchAudience {
 
 const toRecipient = (contact: {
   phoneNumber: string;
+  ownerName?: string | null;
   firstName: string | null;
   lastName: string | null;
   company: string | null;
@@ -80,6 +92,7 @@ const toRecipient = (contact: {
 }): BroadcastRecipientInput => ({
   phoneNumber: contact.phoneNumber,
   mergeData: {
+    ownerName: contactDisplayName(contact),
     firstName: contact.firstName,
     lastName: contact.lastName,
     company: contact.company,
@@ -104,6 +117,7 @@ export async function resolveBatchAudience(
 
   const select = {
     phoneNumber: true,
+    ownerName: true,
     firstName: true,
     lastName: true,
     company: true,
@@ -112,22 +126,23 @@ export async function resolveBatchAudience(
   } as const;
 
   const eligible = await prisma.messagingContact.findMany({
-    where: { ...scope, status: 'ACTIVE', ...UNHANDLED_ONLY } as never,
+    where: { ...scope, status: 'ACTIVE', ...UNHANDLED_ONLY, ...HAS_OWNER_NAME } as never,
     select,
   });
 
-  // Counted rather than inferred from the difference, so the two reasons stay
+  // Counted rather than inferred from the difference, so the reasons stay
   // distinguishable in the UI.
-  const [total, blocked, interested, notInterested] = await Promise.all([
+  const [total, blocked, interested, notInterested, missingOwnerName] = await Promise.all([
     prisma.messagingContact.count({ where: scope as never }),
     prisma.messagingContact.count({ where: { ...scope, status: 'BLOCKED' } as never }),
     prisma.messagingContact.count({ where: { ...scope, status: 'ACTIVE', disposition: 'INTERESTED' } as never }),
     prisma.messagingContact.count({ where: { ...scope, status: 'ACTIVE', disposition: 'NOT_INTERESTED' } as never }),
+    prisma.messagingContact.count({ where: { ...scope, status: 'ACTIVE', ...UNHANDLED_ONLY, NOT: HAS_OWNER_NAME } as never }),
   ]);
 
   return {
     recipients: eligible.map(toRecipient),
-    excluded: { total, blocked, disposed: interested + notInterested, interested, notInterested },
+    excluded: { total, blocked, disposed: interested + notInterested, interested, notInterested, missingOwnerName },
   };
 }
 

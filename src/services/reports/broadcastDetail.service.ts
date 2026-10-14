@@ -6,6 +6,7 @@
  * derived from the recipient and message rows themselves.
  */
 import prisma from '../../config/prismaClient';
+import { contactDisplayName } from '../messaging/contactName';
 import { analyzeSmsText } from '../messaging/smsSegments';
 import type { ReportRange } from './harborReport.service';
 
@@ -220,7 +221,7 @@ export async function collectBroadcastDetails(
         where: { broadcastId: b.id },
         include: {
           contact: {
-            select: { firstName: true, lastName: true, company: true, emailAddress: true, city: true, state: true, ownerUserId: true, disposition: true },
+            select: { ownerName: true, firstName: true, lastName: true, company: true, emailAddress: true, city: true, state: true, ownerUserId: true, disposition: true },
           },
         },
         orderBy: { createdAt: 'asc' },
@@ -261,8 +262,9 @@ export async function collectBroadcastDetails(
       const c = r.contact;
       return {
         phone: r.phoneNumber,
-        firstName: c?.firstName ?? null,
-        lastName: c?.lastName ?? null,
+        // The sheet's owner name is the name; first/last only for older leads.
+        firstName: c?.ownerName || c?.firstName || null,
+        lastName: c?.ownerName ? null : c?.lastName ?? null,
         company: c?.company ?? null,
         email: c?.emailAddress ?? null,
         city: c?.city ?? null,
@@ -418,7 +420,7 @@ export async function collectBroadcastDetails(
         const rec = recipientByPhone.get(r.fromNumber);
         return {
           from: r.fromNumber,
-          contactName: rec ? `${rec.firstName ?? ''} ${rec.lastName ?? ''}`.trim() || null : null,
+          contactName: rec ? contactDisplayName(rec) : null,
           company: rec?.company ?? null,
           leadOwner: rec?.leadOwner ?? null,
           text: r.body,

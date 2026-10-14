@@ -12,6 +12,7 @@
  * (a mailto: or https: URL). Without them push is simply disabled.
  */
 import webpush from 'web-push';
+import { contactDisplayName } from './contactName';
 import prisma from '../../config/prismaClient';
 import { visibleSendersForUser } from './sender.service';
 import { normalizePhoneNumber, normalizeSender } from './phone';
@@ -147,10 +148,10 @@ export async function notifyInboundMessage(input: {
     const contact = normalizePhoneNumber(input.contactNumber) ?? input.contactNumber;
     const conversation = await prisma.messagingConversation.findUnique({
       where: { id: input.conversationId },
-      select: { contact: { select: { firstName: true, lastName: true, company: true } } },
+      select: { contact: { select: { ownerName: true, firstName: true, lastName: true, company: true } } },
     });
     const c = conversation?.contact;
-    const name = [c?.firstName, c?.lastName].filter(Boolean).join(' ').trim() || c?.company || formatPhone(contact);
+    const name = contactDisplayName(c) || c?.company || formatPhone(contact);
 
     const text = (input.text ?? '').trim();
     const body = input.isStop

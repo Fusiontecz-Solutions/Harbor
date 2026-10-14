@@ -11,6 +11,7 @@
  * are deliberately never exported.
  */
 import prisma from '../../config/prismaClient';
+import { contactDisplayName } from '../messaging/contactName';
 import { collectBroadcastDetails } from './broadcastDetail.service';
 import { renderReportPdf } from './harborReportPdf.service';
 import { renderReportExcel } from './harborReportExcel.service';
@@ -227,7 +228,7 @@ export async function broadcastSheets(range: ReportRange, names: Map<string, str
   const recipients = await pageAll((cursor) =>
     prisma.smsBroadcastRecipient.findMany({
       where: { broadcastId: { in: ids } },
-      include: { contact: { select: { firstName: true, lastName: true, company: true, emailAddress: true, city: true, state: true, ownerUserId: true, disposition: true } } },
+      include: { contact: { select: { ownerName: true, firstName: true, lastName: true, company: true, emailAddress: true, city: true, state: true, ownerUserId: true, disposition: true } } },
       ...cursorArgs(cursor),
     }),
   );
@@ -239,8 +240,7 @@ export async function broadcastSheets(range: ReportRange, names: Map<string, str
     return {
       'Campaign': byId.get(r.broadcastId)?.name ?? r.broadcastId,
       'Phone': r.phoneNumber,
-      'First Name': c?.firstName ?? null,
-      'Last Name': c?.lastName ?? null,
+      'Owner Name': contactDisplayName(c),
       'Company': c?.company ?? null,
       'Email': c?.emailAddress ?? null,
       'City': c?.city ?? null,
@@ -287,7 +287,7 @@ export async function inboxSheets(range: ReportRange, names: Map<string, string>
   const conversations = await pageAll((cursor) =>
     prisma.messagingConversation.findMany({
       where: { lastMessageAt: inRange(range) },
-      include: { contact: { select: { firstName: true, lastName: true, company: true, status: true, disposition: true } } },
+      include: { contact: { select: { ownerName: true, firstName: true, lastName: true, company: true, status: true, disposition: true } } },
       ...cursorArgs(cursor),
     }),
   );
@@ -295,7 +295,7 @@ export async function inboxSheets(range: ReportRange, names: Map<string, string>
     .sort((a, b) => (b.lastMessageAt?.getTime() ?? 0) - (a.lastMessageAt?.getTime() ?? 0))
     .map((c) => ({
       'Contact Number': c.contactNumber,
-      'Contact Name': `${c.contact?.firstName ?? ''} ${c.contact?.lastName ?? ''}`.trim() || null,
+      'Contact Name': contactDisplayName(c.contact),
       'Company': c.contact?.company ?? null,
       'Our Number': c.businessNumber,
       'Owner': c.ownerUserId ? names.get(c.ownerUserId) ?? c.ownerUserId : null,

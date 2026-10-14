@@ -99,3 +99,19 @@ export function normalizeSender(raw: unknown): string {
 export function conversationKey(businessNumber: string, contactNumber: string): string {
   return `${normalizeSender(businessNumber)}::${normalizePhoneNumber(contactNumber) ?? contactNumber}`;
 }
+
+/**
+ * The first usable number in a cell. Lead sheets sometimes hold two numbers in
+ * one cell ("(312) 493-3343(847) 852-9929"); the whole string does not parse,
+ * so try it as-is, then each 10/11-digit run in turn.
+ */
+export function firstPhoneNumberIn(raw: unknown): string | null {
+  const whole = normalizePhoneNumber(raw);
+  if (whole) return whole;
+  const text = String(raw ?? '');
+  for (const match of text.matchAll(/\+?1?[\s.-]*\(?\d{3}\)?[\s.-]*\d{3}[\s.-]*\d{4}/g)) {
+    const phone = normalizePhoneNumber(match[0]);
+    if (phone) return phone;
+  }
+  return null;
+}

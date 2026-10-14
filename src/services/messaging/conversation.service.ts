@@ -11,6 +11,7 @@
  * live in this file, inside transactions, so the summary cannot drift.
  */
 import type { Prisma } from '@prisma/client';
+import { contactDisplayName } from './contactName';
 import prisma from '../../config/prismaClient';
 import {
   cacheBumpGeneration,
@@ -464,7 +465,7 @@ export async function listConversations(params: ConversationListParams): Promise
       hasBroadcastMessage: true,
       isOptedOut: true,
       contact: {
-        select: { firstName: true, lastName: true, company: true, status: true, disposition: true },
+        select: { ownerName: true, firstName: true, lastName: true, company: true, status: true, disposition: true },
       },
     },
   });
@@ -475,7 +476,7 @@ export async function listConversations(params: ConversationListParams): Promise
     businessNumber: row.businessNumber,
     contactNumber: row.contactNumber,
     contactName:
-      [row.contact?.firstName, row.contact?.lastName].filter(Boolean).join(' ').trim() ||
+      contactDisplayName(row.contact) ||
       row.contact?.company ||
       null,
     lastMessageText: row.lastMessageText,
