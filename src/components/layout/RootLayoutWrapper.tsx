@@ -4,7 +4,7 @@ import Header from "../sidebar/Header";
 import { useSidebar } from "@/components/ui/sidebar";
 
 const RootLayoutWrapper = () => {
-    const { state } = useSidebar();
+    const { state, isMobile } = useSidebar();
     const location = useLocation();
 
     useEffect(() => {
@@ -13,7 +13,8 @@ const RootLayoutWrapper = () => {
 
     return (
         <main
-            className={`mx-0 ${state === "expanded" ? "w-[calc(100%-var(--sidebar-width))]" : "w-[calc(100%-var(--sidebar-width-icon))]"}`}
+            // On phones the sidebar is a slide-over sheet that takes no width.
+            className={`mx-0 min-w-0 ${isMobile ? "w-full" : state === "expanded" ? "w-[calc(100%-var(--sidebar-width))]" : "w-[calc(100%-var(--sidebar-width-icon))]"}`}
         >
             <Header />
             <Outlet />

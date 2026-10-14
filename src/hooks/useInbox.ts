@@ -38,6 +38,7 @@ import {
     fetchConversations,
     fetchMessages,
     markConversationRead as markReadRequest,
+    markConversationUnread as markUnreadRequest,
     type Conversation,
     type Message,
     type MessageStatus,
@@ -212,6 +213,35 @@ export function useInbox({ userScope, search = '', filter = 'regular' }: UseInbo
         },
         [loadMessages],
     );
+
+    /**
+     * Flag a thread unread again. If it is the open thread it is closed too —
+     * otherwise opening logic would immediately mark it read again.
+     */
+    const markUnread = useCallback(async (conversationId: string) => {
+        if (activeConversationRef.current === conversationId) {
+            setActiveConversationId(null);
+            setMessages([]);
+        }
+        setConversations((prev) =>
+            prev.map((conv) => (conv.id === conversationId ? { ...conv, unreadCount: Math.max(1, conv.unreadCount) } : conv)),
+        );
+        try {
+            await markUnreadRequest(conversationId);
+        } finally {
+            memoryInvalidate(memoryKeys.conversationsPrefix);
+        }
+    }, []);
+
+    /** Clear the unread badge without opening the thread. */
+    const markRead = useCallback(async (conversationId: string) => {
+        setConversations((prev) => prev.map((conv) => (conv.id === conversationId ? { ...conv, unreadCount: 0 } : conv)));
+        try {
+            await markReadRequest(conversationId);
+        } finally {
+            memoryInvalidate(memoryKeys.conversationsPrefix);
+        }
+    }, []);
 
     /* ------------------------------------------------------------------ */
     /* Socket events (batched)                                             */
@@ -450,6 +480,8 @@ export function useInbox({ userScope, search = '', filter = 'regular' }: UseInbo
         activeConversationId,
         activeConversation,
         openConversation,
+        markUnread,
+        markRead,
         messages,
         isLoadingMessages,
         refreshAfterSend,

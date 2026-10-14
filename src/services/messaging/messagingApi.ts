@@ -294,6 +294,30 @@ export async function sendMessage(input: {
     return response.data.data;
 }
 
+/** Flag a conversation unread again ("come back to this"). */
+export async function markConversationUnread(conversationId: string): Promise<{ id: string; unreadCount: number }> {
+    const response = await axiosPatch(`${BASE}/conversations/${conversationId}/unread`);
+    return response.data.data;
+}
+
+export async function fetchPushConfig(): Promise<{ enabled: boolean; publicKey: string | null }> {
+    const response = await axiosGet(`${BASE}/push/config`);
+    return response.data.data;
+}
+
+export async function savePushSubscription(subscription: PushSubscriptionJSON) {
+    await axiosPost(`${BASE}/push/subscribe`, { subscription });
+}
+
+export async function deletePushSubscription(endpoint: string) {
+    await axiosPost(`${BASE}/push/unsubscribe`, { endpoint });
+}
+
+export async function sendTestPush(): Promise<{ delivered: number }> {
+    const response = await axiosPost(`${BASE}/push/test`);
+    return response.data.data;
+}
+
 export async function markConversationRead(conversationId: string) {
     const response = await axiosPatch(`${BASE}/conversations/${conversationId}/read`);
     return response.data.data;

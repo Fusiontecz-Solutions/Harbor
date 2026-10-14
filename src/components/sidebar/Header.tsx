@@ -47,7 +47,7 @@ const getPageTitle = (pathname: string): string => {
 
 const Header = () => {
 
-    const { state, setOpen } = useSidebar();
+    const { state, setOpen, isMobile, openMobile, setOpenMobile } = useSidebar();
     const [user, setUser] = useState<user>()
     const { loading, data } = useSelector((state: RootState) => state.login)
     const { pathname } = useLocation();
@@ -101,10 +101,15 @@ const Header = () => {
 
     return (
         <header className="sticky top-0 z-40 border-b border-border bg-card app-header-scroll-compensate">
-            <div className="w-full mx-auto px-6">
-                <div className="h-16 flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                        {state === "expanded" ? (
+            <div className="w-full mx-auto px-3 sm:px-6">
+                <div className="h-16 flex items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                        {isMobile ? (
+                            // Phones: the sidebar is a slide-over sheet with its own open state.
+                            <Button variant="outline" size={"sm"} onClick={() => setOpenMobile(!openMobile)} aria-label="Open menu">
+                                <PanelLeftOpen size={20} />
+                            </Button>
+                        ) : state === "expanded" ? (
                             <Button variant="outline" size={"sm"} onClick={() => setOpen(false)}>
                                 <PanelLeftClose size={20} />
                             </Button>
@@ -113,11 +118,11 @@ const Header = () => {
                                 <PanelLeftOpen size={20} />
                             </Button>
                         )}
-                        <h1 className="text-xl font-semibold text-muted-foreground font-inter">
+                        <h1 className="truncate text-base font-semibold text-muted-foreground font-inter sm:text-xl">
                             {pageTitle}
                         </h1>
                     </div>
-                    <div className="flex items-center gap-3">
+                    <div className="flex shrink-0 items-center gap-1.5 sm:gap-3">
                         {messagingConfig?.prepaid && (
                             <span
                                 className={cn(
