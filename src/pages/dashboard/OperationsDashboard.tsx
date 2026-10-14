@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import {
   CheckCircle2,
   Clock,
@@ -20,6 +20,8 @@ import type { AppDispatch, RootState } from "@/redux/store";
 import {
   fetchOperationsDashboardSummary,
   fetchOperationsDashboardRecentCases,
+  fetchOperationsDashboardRecentCasesPage,
+  type OperationsDashboardRecentCasesPage,
 } from "@/redux/actions/operationsDashboardActions";
 import type { OperationsDashboardRecentCase } from "@/redux/slices/operationsDashboardSlice";
 import { useTheme } from "@/context/ThemeContext";
@@ -214,6 +216,7 @@ export const OperationsDashboard = () => {
     summaryError,
     hasLoadedSummaryOnce,
     recentCases,
+    recentTotal,
     recentLoading,
     recentError,
     recentInFlight,
@@ -292,7 +295,8 @@ export const OperationsDashboard = () => {
       refetchOnWindowFocus: false,
     });
 
-  const recentCasesQuery = useQuery({
+  // Keeps the store's first page (login prefetch / session restore) fresh.
+  useQuery({
     queryKey: ["operations-dashboard-recent-cases", userRole],
     queryFn: async () => dispatch(fetchOperationsDashboardRecentCases()).unwrap(),
     enabled: !recentPrefetchFresh,
@@ -301,9 +305,53 @@ export const OperationsDashboard = () => {
     refetchOnWindowFocus: false,
   });
 
+  const [debouncedRecentSearch, setDebouncedRecentSearch] = useState("");
+  useEffect(() => {
+    const id = window.setTimeout(
+      () => setDebouncedRecentSearch(recentCasesSearchTerm.trim()),
+      300,
+    );
+    return () => window.clearTimeout(id);
+  }, [recentCasesSearchTerm]);
+
+  const recentCasesPageSize = recentCasesViewMode === "list" ? 5 : 6;
+  // Page 1 without a search can start from the cached first page.
+  const recentInitialPage: OperationsDashboardRecentCasesPage | undefined =
+    recentCasesCurrentPage === 1 &&
+    !debouncedRecentSearch &&
+    recentTotal != null &&
+    recentCases.length >= Math.min(recentCasesPageSize, recentTotal)
+      ? { cases: recentCases.slice(0, recentCasesPageSize), total: recentTotal }
+      : undefined;
+
+  // Search and paging run on the server, so every matching case is reachable
+  // (the old list was capped at the newest 200 and filtered in the browser).
+  const recentCasesQuery = useQuery({
+    queryKey: [
+      "operations-dashboard-recent-cases",
+      userRole,
+      recentCasesCurrentPage,
+      recentCasesPageSize,
+      debouncedRecentSearch,
+    ],
+    queryFn: () =>
+      fetchOperationsDashboardRecentCasesPage({
+        page: recentCasesCurrentPage,
+        pageSize: recentCasesPageSize,
+        search: debouncedRecentSearch,
+      }),
+    initialData: recentInitialPage,
+    initialDataUpdatedAt: lastRecentFetchedAt ?? undefined,
+    placeholderData: keepPreviousData,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+  });
+  const recentCasesPageRows = recentCasesQuery.data?.cases ?? [];
+  const recentCasesTotal = recentCasesQuery.data?.total ?? 0;
+
   const recentCasesBlockingLoad = isListBlockingLoad({
-    rowCount: recentCases.length,
-    loading: recentLoading,
+    rowCount: recentCasesPageRows.length,
+    loading: recentLoading || recentCasesQuery.isPending,
     isFetching: recentCasesQuery.isPending || recentCasesQuery.isFetching,
     awaitingFirstLoad: !hasLoadedRecentOnce && recentInFlight,
   });
@@ -508,23 +556,9 @@ export const OperationsDashboard = () => {
         ? "last 8 weeks"
         : "last 6 months";
 
-  const filteredRecentCases = useMemo(() => {
-    if (!recentCasesSearchTerm.trim()) return recentCases;
-    const term = recentCasesSearchTerm.toLowerCase();
-    return recentCases.filter(
-      (item) =>
-        item.id.toLowerCase().includes(term) ||
-        item.applicationId.toLowerCase().includes(term) ||
-        item.merchant.toLowerCase().includes(term) ||
-        item.status.toLowerCase().includes(term) ||
-        (item.email ?? "").toLowerCase().includes(term),
-    );
-  }, [recentCases, recentCasesSearchTerm]);
-
-  const recentCasesPageSize = recentCasesViewMode === "list" ? 5 : 6;
   const totalRecentCasesPages = Math.max(
     1,
-    Math.ceil(filteredRecentCases.length / recentCasesPageSize),
+    Math.ceil(recentCasesTotal / recentCasesPageSize),
   );
   const safeRecentCasesCurrentPage = Math.min(
     recentCasesCurrentPage,
@@ -532,10 +566,7 @@ export const OperationsDashboard = () => {
   );
   const recentCasesStartIndex =
     (safeRecentCasesCurrentPage - 1) * recentCasesPageSize;
-  const paginatedRecentCases = filteredRecentCases.slice(
-    recentCasesStartIndex,
-    recentCasesStartIndex + recentCasesPageSize,
-  );
+  const paginatedRecentCases = recentCasesPageRows;
 
   return (
     <div className="flex-1 px-4 py-6 sm:px-6 lg:px-8 space-y-6">
@@ -875,7 +906,7 @@ export const OperationsDashboard = () => {
                     Loading applications...
                   </span>
                 </div>
-              ) : filteredRecentCases.length === 0 ? (
+              ) : paginatedRecentCases.length === 0 ? (
                 <div className="py-12 text-center text-sm text-muted-foreground">
                   {isSuperAdmin || isOperationsUser
                     ? "No contract signed applications found."
@@ -1116,12 +1147,12 @@ export const OperationsDashboard = () => {
             <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
               <div className="text-sm text-muted-foreground">
                 <span>
-                  {filteredRecentCases.length === 0
+                  {recentCasesTotal === 0
                     ? "Showing 0 to 0 of 0 entries"
                     : `Showing ${recentCasesStartIndex + 1} to ${Math.min(
                         recentCasesStartIndex + recentCasesPageSize,
-                        filteredRecentCases.length,
-                      )} of ${filteredRecentCases.length} entries`}
+                        recentCasesTotal,
+                      )} of ${recentCasesTotal} entries`}
                 </span>
               </div>
               <div className="flex items-center gap-2">

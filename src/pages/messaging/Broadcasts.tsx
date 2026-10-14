@@ -133,11 +133,28 @@ export default function Broadcasts() {
     const [statusFilter, setStatusFilter] = useState<string>('ALL');
     const [search, setSearch] = useState('');
     const [sort, setSort] = useState<SortId>('newest');
+    const [debouncedSearch, setDebouncedSearch] = useState('');
+
+    useEffect(() => {
+        const id = window.setTimeout(() => setDebouncedSearch(search.trim()), 300);
+        return () => window.clearTimeout(id);
+    }, [search]);
+
+    // Status, search and sort are applied by the server, so "Load more" keeps
+    // paging through the filtered list rather than the whole one.
+    const query = useMemo(
+        () => ({
+            status: statusFilter === 'ALL' ? undefined : statusFilter,
+            search: debouncedSearch || undefined,
+            sort,
+        }),
+        [debouncedSearch, sort, statusFilter],
+    );
 
     /** Reloads every page loaded so far, so an action never shrinks the list. */
     const load = useCallback(async (pages = 1) => {
         try {
-            const response = await fetchBroadcasts({ page: 1, pageSize: PAGE_SIZE * pages });
+            const response = await fetchBroadcasts({ ...query, page: 1, pageSize: PAGE_SIZE * pages });
             setBroadcasts(response.data);
             setTotals(response.totals ?? null);
             setHasMore(response.pagination.hasMore);
@@ -147,7 +164,7 @@ export default function Broadcasts() {
         } finally {
             setIsLoading(false);
         }
-    }, []);
+    }, [query]);
 
     useEffect(() => {
         void load();
@@ -156,7 +173,7 @@ export default function Broadcasts() {
     const loadMore = useCallback(async () => {
         setIsLoadingMore(true);
         try {
-            const response = await fetchBroadcasts({ page: page + 1, pageSize: PAGE_SIZE });
+            const response = await fetchBroadcasts({ ...query, page: page + 1, pageSize: PAGE_SIZE });
             setBroadcasts((prev) => [...prev, ...response.data.filter((b) => !prev.some((p) => p.id === b.id))]);
             setHasMore(response.pagination.hasMore);
             setPage((p) => p + 1);
@@ -165,7 +182,7 @@ export default function Broadcasts() {
         } finally {
             setIsLoadingMore(false);
         }
-    }, [page]);
+    }, [page, query]);
 
     useEffect(() => {
         if (!socket) return;
@@ -206,31 +223,12 @@ export default function Broadcasts() {
         [load, page],
     );
 
-    const visible = useMemo(() => {
-        const q = search.trim().toLowerCase();
-        const list = broadcasts.filter((b) => {
-            if (statusFilter !== 'ALL' && b.status !== statusFilter) return false;
-            if (!q) return true;
-            return [b.name, b.createdByName, b.body, b.leadBatchName, b.fromNumber]
-                .filter(Boolean)
-                .some((v) => String(v).toLowerCase().includes(q));
-        });
-        const key = (b: BroadcastSummary): number => {
-            switch (sort) {
-                case 'replies':
-                    return b.repliedCount;
-                case 'replyRate':
-                    return rate(b.repliedCount, b.sentCount) ?? -1;
-                case 'delivery':
-                    return rate(b.deliveredCount, b.sentCount) ?? -1;
-                case 'optouts':
-                    return b.optOutCount;
-                default:
-                    return new Date(b.createdAt).getTime();
-            }
-        };
-        return [...list].sort((a, b) => key(b) - key(a));
-    }, [broadcasts, search, sort, statusFilter]);
+    // The server already filtered and sorted; a live progress event can
+    // move a campaign out of the chosen status, so drop those here.
+    const visible = useMemo(
+        () => broadcasts.filter((b) => statusFilter === 'ALL' || b.status === statusFilter),
+        [broadcasts, statusFilter],
+    );
 
     const t = totals;
     const byStatus = t?.byStatus ?? {};
@@ -358,9 +356,9 @@ export default function Broadcasts() {
             ) : visible.length === 0 ? (
                 <div className="rounded-xl border p-10 text-center">
                     <Megaphone className="mx-auto h-8 w-8 text-muted-foreground" />
-                    <p className="mt-2 text-sm font-medium">{broadcasts.length === 0 ? 'No broadcasts yet' : 'No campaigns match those filters'}</p>
+                    <p className="mt-2 text-sm font-medium">{(totals?.campaigns ?? 0) === 0 ? 'No broadcasts yet' : 'No campaigns match those filters'}</p>
                     <p className="text-xs text-muted-foreground">
-                        {broadcasts.length === 0 ? 'Create one to reach your leads in bulk.' : 'Try another status or search.'}
+                        {(totals?.campaigns ?? 0) === 0 ? 'Create one to reach your leads in bulk.' : 'Try another status or search.'}
                     </p>
                 </div>
             ) : (
@@ -368,7 +366,7 @@ export default function Broadcasts() {
                     {visible.map((b) => (
                         <CampaignCard key={b.id} b={b} canRelease={canRelease} onAction={act} onOpen={() => navigate(`/broadcasts/${b.id}`)} />
                     ))}
-                    {hasMore && statusFilter === 'ALL' && !search && (
+                    {hasMore && (
                         <div className="flex justify-center pt-1">
                             <Button variant="outline" size="sm" onClick={() => void loadMore()} disabled={isLoadingMore}>
                                 {isLoadingMore && <Loader2 className="mr-1 h-4 w-4 animate-spin" />} Load more campaigns

@@ -448,6 +448,8 @@ export async function fetchBroadcasts(params: {
     page?: number;
     pageSize?: number;
     status?: string;
+    search?: string;
+    sort?: 'newest' | 'replies' | 'replyRate' | 'delivery' | 'optouts';
 }): Promise<Paginated<BroadcastSummary> & { totals?: BroadcastTotals }> {
     const response = await axiosGet(`${BASE}/broadcasts`, { params });
     return response.data;

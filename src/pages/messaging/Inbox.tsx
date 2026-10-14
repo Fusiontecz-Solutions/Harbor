@@ -9,7 +9,7 @@
  * DOM rows. The message pane is not — a thread page is capped at 50 messages
  * server-side, and virtualizing it would fight the scroll-to-bottom behaviour.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Virtuoso } from 'react-virtuoso';
 import { toast } from 'react-toastify';
 import {
@@ -246,6 +246,9 @@ export default function Inbox() {
         markRead,
         messages: loadedMessages,
         isLoadingMessages,
+        hasOlderMessages,
+        isLoadingOlderMessages,
+        loadOlderMessages,
         refreshAfterSend,
         pushOptimisticOutbound,
         reconcileOptimisticOutbound,
@@ -368,9 +371,34 @@ export default function Inbox() {
         [markRead, reloadConversations],
     );
 
+    // Follow the newest message only when the tail of the thread changes;
+    // prepending older history must not yank the view to the bottom.
+    const lastMessageId = messages[messages.length - 1]?.id;
     useEffect(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [messages.length]);
+    }, [lastMessageId]);
+
+    const messagesScrollRef = useRef<HTMLDivElement | null>(null);
+    /** scrollHeight/scrollTop captured before older messages are prepended. */
+    const scrollAnchor = useRef<{ height: number; top: number } | null>(null);
+
+    const handleMessagesScroll = useCallback(() => {
+        const el = messagesScrollRef.current;
+        if (!el || isDraft || !hasOlderMessages || isLoadingOlderMessages) return;
+        if (el.scrollTop > 80) return;
+        scrollAnchor.current = { height: el.scrollHeight, top: el.scrollTop };
+        void loadOlderMessages();
+    }, [hasOlderMessages, isDraft, isLoadingOlderMessages, loadOlderMessages]);
+
+    // Once the older page renders, shift scrollTop by the height it added so
+    // the message the user was reading stays put.
+    useLayoutEffect(() => {
+        const el = messagesScrollRef.current;
+        const anchor = scrollAnchor.current;
+        if (!el || !anchor || isLoadingOlderMessages) return;
+        scrollAnchor.current = null;
+        el.scrollTop = anchor.top + (el.scrollHeight - anchor.height);
+    }, [messages, isLoadingOlderMessages]);
 
     /** Load the saved contact record backing the open thread, for the details panel. */
     useEffect(() => {
@@ -988,7 +1016,30 @@ export default function Inbox() {
                             </div>
                         </header>
 
-                        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-3 py-4 sm:px-4">
+                        <div
+                            ref={messagesScrollRef}
+                            onScroll={handleMessagesScroll}
+                            className="min-h-0 flex-1 space-y-4 overflow-y-auto px-3 py-4 sm:px-4"
+                        >
+                            {!isDraft && (isLoadingOlderMessages || hasOlderMessages) && messages.length > 0 && (
+                                <div className="flex justify-center">
+                                    {isLoadingOlderMessages ? (
+                                        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                                    ) : (
+                                        <button
+                                            type="button"
+                                            className="text-[11px] text-muted-foreground hover:underline"
+                                            onClick={() => {
+                                                const el = messagesScrollRef.current;
+                                                if (el) scrollAnchor.current = { height: el.scrollHeight, top: el.scrollTop };
+                                                void loadOlderMessages();
+                                            }}
+                                        >
+                                            Load earlier messages
+                                        </button>
+                                    )}
+                                </div>
+                            )}
                             {isLoadingMessages && messages.length === 0 ? (
                                 <p className="text-sm text-muted-foreground">Loading messages…</p>
                             ) : (

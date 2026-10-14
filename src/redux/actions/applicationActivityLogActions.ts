@@ -46,9 +46,19 @@ export interface ApplicationActivityLog {
 
 export const getApplicationActivityLogs = createAsyncThunk(
   'applicationActivityLogs/getByApplication',
-  async (applicationId: string | number, { rejectWithValue }) => {
+  async (
+    arg: string | number | { applicationId: string | number; page?: number; pageSize?: number },
+    { rejectWithValue },
+  ) => {
     try {
-      const response = await axiosGet(`/applications/${applicationId}/activity-logs`);
+      // A bare id returns the whole history; page/pageSize asks the API for
+      // one newest-first slice plus `pagination` (total, hasMore).
+      const { applicationId, page, pageSize } =
+        typeof arg === 'object' ? arg : { applicationId: arg, page: undefined, pageSize: undefined };
+      const params: Record<string, number> = {};
+      if (page) params.page = page;
+      if (pageSize) params.pageSize = pageSize;
+      const response = await axiosGet(`/applications/${applicationId}/activity-logs`, { params });
       return response.data;
     } catch (error: unknown) {
       const err = error as { response?: { data?: { message?: string } } };

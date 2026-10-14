@@ -48,6 +48,21 @@ import {
 const FALLBACK_POLL_MS = 10_000;
 /** Socket event coalescing window. */
 const EVENT_FLUSH_MS = 50;
+/** Messages per page on the server (MESSAGE_PAGE_SIZE in harbor-be). */
+const MESSAGE_PAGE_SIZE = 50;
+
+/**
+ * Merges two oldest-first message lists, dropping duplicate ids (pages can
+ * overlap when new messages arrive between requests). `incoming` wins.
+ */
+function mergeMessages(existing: Message[], incoming: Message[]): Message[] {
+    const byId = new Map<string, Message>();
+    for (const m of existing) byId.set(m.id, m);
+    for (const m of incoming) byId.set(m.id, m);
+    return [...byId.values()].sort(
+        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+    );
+}
 
 interface UseInboxOptions {
     /** Scopes cache keys so two agents on one browser cannot see each other's data. */
@@ -68,6 +83,10 @@ export function useInbox({ userScope, search = '', filter = 'regular' }: UseInbo
     const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
     const [messages, setMessages] = useState<Message[]>([]);
     const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+    const [hasOlderMessages, setHasOlderMessages] = useState(false);
+    const [isLoadingOlderMessages, setIsLoadingOlderMessages] = useState(false);
+    /** Deepest message page loaded for the open thread (1 = newest only). */
+    const messagePagesLoaded = useRef(1);
 
     /**
      * Pending socket events, drained on a timer. Held in a ref so queueing an
@@ -161,6 +180,8 @@ export function useInbox({ userScope, search = '', filter = 'regular' }: UseInbo
                 const hit = memoryGet<Message[]>(memKey);
                 if (hit) {
                     setMessages(hit);
+                    // The cache keeps only the list; a full page suggests more.
+                    setHasOlderMessages(hit.length >= MESSAGE_PAGE_SIZE);
                     setIsLoadingMessages(false);
                     return;
                 }
@@ -168,6 +189,7 @@ export function useInbox({ userScope, search = '', filter = 'regular' }: UseInbo
                 const cached = await readCachedMessages<Message[]>(idbKey);
                 if (cached) {
                     setMessages(cached.data);
+                    setHasOlderMessages(cached.data.length >= MESSAGE_PAGE_SIZE);
                     setIsLoadingMessages(false);
                     if (!cached.isStale) {
                         memorySet(memKey, cached.data, MESSAGES_TTL_MS);
@@ -183,7 +205,17 @@ export function useInbox({ userScope, search = '', filter = 'regular' }: UseInbo
                 // Ignore a response for a thread the user has already left.
                 if (activeConversationRef.current !== conversationId) return;
 
-                setMessages(response.data);
+                // Refreshing page 1 must not drop older pages the user scrolled
+                // back to: keep everything older than this page's oldest message.
+                const oldest = response.data[0]?.createdAt;
+                setMessages((prev) => {
+                    if (messagePagesLoaded.current <= 1 || !oldest) return response.data;
+                    const older = prev.filter(
+                        (m) => !m.id.startsWith('pending-') && new Date(m.createdAt) < new Date(oldest),
+                    );
+                    return mergeMessages(older, response.data);
+                });
+                if (messagePagesLoaded.current <= 1) setHasOlderMessages(response.pagination.hasMore);
                 memorySet(memKey, response.data, MESSAGES_TTL_MS);
                 void writeCachedMessages(idbKey, response.data);
             } catch (error) {
@@ -195,10 +227,32 @@ export function useInbox({ userScope, search = '', filter = 'regular' }: UseInbo
         [userScope],
     );
 
+    /** Fetch the next page back in the open thread and prepend it. */
+    const loadOlderMessages = useCallback(async () => {
+        const conversationId = activeConversationRef.current;
+        if (!conversationId || !hasOlderMessages || isLoadingOlderMessages) return;
+        const nextPage = messagePagesLoaded.current + 1;
+        setIsLoadingOlderMessages(true);
+        try {
+            const response = await fetchMessages(conversationId, nextPage);
+            if (activeConversationRef.current !== conversationId) return;
+            messagePagesLoaded.current = nextPage;
+            setMessages((prev) => mergeMessages(response.data, prev));
+            setHasOlderMessages(response.pagination.hasMore);
+        } catch (error) {
+            console.error('[useInbox] failed to load older messages:', error);
+        } finally {
+            if (activeConversationRef.current === conversationId) setIsLoadingOlderMessages(false);
+        }
+    }, [hasOlderMessages, isLoadingOlderMessages]);
+
     const openConversation = useCallback(
         (conversationId: string | null) => {
             setActiveConversationId(conversationId);
             setMessages([]);
+            setHasOlderMessages(false);
+            setIsLoadingOlderMessages(false);
+            messagePagesLoaded.current = 1;
 
             if (!conversationId) return;
 
@@ -484,6 +538,9 @@ export function useInbox({ userScope, search = '', filter = 'regular' }: UseInbo
         markRead,
         messages,
         isLoadingMessages,
+        hasOlderMessages,
+        isLoadingOlderMessages,
+        loadOlderMessages,
         refreshAfterSend,
         pushOptimisticOutbound,
         reconcileOptimisticOutbound,

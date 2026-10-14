@@ -296,6 +296,48 @@ export default function Reports() {
                 </div>
             </div>
 
+            {/* Export */}
+            <section className="rounded-xl border bg-card">
+                <header className="border-b px-4 py-3">
+                    <h2 className="flex items-center gap-2 text-sm font-semibold"><FileText className="h-4 w-4 text-muted-foreground" /> Download</h2>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                        Covers {from} to {to}. The PDF is the formatted report with a full section for every broadcast; Excel has the raw data plus a sheet per
+                        broadcast. Owner SSN and date of birth are never included.
+                    </p>
+                </header>
+                <div className="space-y-4 p-4">
+                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                        {REPORT_SECTIONS.map((s) => (
+                            <label
+                                key={s.id}
+                                className={cn('flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors', sections.includes(s.id) ? 'border-primary bg-primary/5' : 'hover:bg-muted/50')}
+                            >
+                                <input
+                                    type="checkbox"
+                                    className="mt-0.5 h-4 w-4"
+                                    checked={sections.includes(s.id)}
+                                    onChange={() => setSections((prev) => (prev.includes(s.id) ? prev.filter((x) => x !== s.id) : [...prev, s.id]))}
+                                />
+                                <span>
+                                    <span className="block text-sm font-medium">{s.label}</span>
+                                    <span className="block text-xs text-muted-foreground">{s.hint}</span>
+                                </span>
+                            </label>
+                        ))}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                        <Button onClick={() => void exportReport('pdf')} disabled={exporting !== null || sections.length === 0}>
+                            {exporting === 'pdf' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileText className="mr-2 h-4 w-4" />}
+                            {exporting === 'pdf' ? 'Building PDF…' : 'Download PDF report'}
+                        </Button>
+                        <Button variant="outline" onClick={() => void exportReport('xlsx')} disabled={exporting !== null || sections.length === 0}>
+                            {exporting === 'xlsx' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileSpreadsheet className="mr-2 h-4 w-4" />}
+                            {exporting === 'xlsx' ? 'Building workbook…' : 'Download Excel'}
+                        </Button>
+                    </div>
+                </div>
+            </section>
+
             {!data ? (
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                     {Array.from({ length: 8 }).map((_, i) => (
@@ -540,47 +582,6 @@ export default function Reports() {
                 </div>
             )}
 
-            {/* Export */}
-            <section className="rounded-xl border bg-card">
-                <header className="border-b px-4 py-3">
-                    <h2 className="flex items-center gap-2 text-sm font-semibold"><FileText className="h-4 w-4 text-muted-foreground" /> Download</h2>
-                    <p className="mt-0.5 text-xs text-muted-foreground">
-                        Covers {from} to {to}. The PDF is the formatted report with a full section for every broadcast; Excel has the raw data plus a sheet per
-                        broadcast. Owner SSN and date of birth are never included.
-                    </p>
-                </header>
-                <div className="space-y-4 p-4">
-                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
-                        {REPORT_SECTIONS.map((s) => (
-                            <label
-                                key={s.id}
-                                className={cn('flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors', sections.includes(s.id) ? 'border-primary bg-primary/5' : 'hover:bg-muted/50')}
-                            >
-                                <input
-                                    type="checkbox"
-                                    className="mt-0.5 h-4 w-4"
-                                    checked={sections.includes(s.id)}
-                                    onChange={() => setSections((prev) => (prev.includes(s.id) ? prev.filter((x) => x !== s.id) : [...prev, s.id]))}
-                                />
-                                <span>
-                                    <span className="block text-sm font-medium">{s.label}</span>
-                                    <span className="block text-xs text-muted-foreground">{s.hint}</span>
-                                </span>
-                            </label>
-                        ))}
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                        <Button onClick={() => void exportReport('pdf')} disabled={exporting !== null || sections.length === 0}>
-                            {exporting === 'pdf' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileText className="mr-2 h-4 w-4" />}
-                            {exporting === 'pdf' ? 'Building PDF…' : 'Download PDF report'}
-                        </Button>
-                        <Button variant="outline" onClick={() => void exportReport('xlsx')} disabled={exporting !== null || sections.length === 0}>
-                            {exporting === 'xlsx' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileSpreadsheet className="mr-2 h-4 w-4" />}
-                            {exporting === 'xlsx' ? 'Building workbook…' : 'Download Excel'}
-                        </Button>
-                    </div>
-                </div>
-            </section>
         </div>
     );
 }

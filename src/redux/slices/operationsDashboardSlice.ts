@@ -80,6 +80,8 @@ export interface OperationsDashboardState {
   hasLoadedSummaryOnce: boolean;
 
   recentCases: OperationsDashboardRecentCase[];
+  /** Total matching recent cases on the server; null until fetched this session. */
+  recentTotal?: number | null;
   recentLoading: boolean;
   recentError: string | null;
   recentInFlight: boolean;
@@ -101,6 +103,7 @@ const emptyState = (): OperationsDashboardState => ({
   hasLoadedSummaryOnce: false,
 
   recentCases: [],
+  recentTotal: null,
   recentLoading: false,
   recentError: null,
   recentInFlight: false,
@@ -165,7 +168,8 @@ export const operationsDashboardSlice = createSlice({
         state.recentLoading = false;
         state.hasLoadedRecentOnce = true;
         state.lastRecentFetchedAt = Date.now();
-        state.recentCases = action.payload;
+        state.recentCases = action.payload.cases;
+        state.recentTotal = action.payload.total;
       })
       .addCase(fetchOperationsDashboardRecentCases.rejected, (state, action) => {
         state.recentInFlight = false;

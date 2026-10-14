@@ -299,8 +299,13 @@ function isNavItemActive(
 }
 
 const Sidebar = () => {
-  const { state } = useSidebar();
-  const { pathname } = useLocation();
+  const { state, isMobile, setOpenMobile } = useSidebar();
+  const { pathname, search } = useLocation();
+
+  // On phones the sidebar is a drawer: close it once a menu item navigates.
+  useEffect(() => {
+    if (isMobile) setOpenMobile(false);
+  }, [isMobile, pathname, search, setOpenMobile]);
   const [searchParams] = useSearchParams();
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === "dark";
