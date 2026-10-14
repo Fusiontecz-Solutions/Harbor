@@ -27,6 +27,8 @@ import {
     CheckCheck,
     ChevronRight,
     ClipboardCopy,
+    Eye,
+    EyeOff,
     Loader2,
     Megaphone,
     MessageSquarePlus,
@@ -636,27 +638,14 @@ export default function Inbox() {
      */
     const copyProfile = useCallback(async () => {
         if (!activeConversation) return;
-        const d = contactDetail;
-        const disposition =
-            d?.disposition === 'INTERESTED' ? 'Interested' : d?.disposition === 'NOT_INTERESTED' ? 'Not interested' : d ? 'Not marked' : null;
-        const status = [
-            activeConversation.isOptedOut ? 'Opted out (STOP)' : null,
-            activeConversation.isBlocked || d?.status === 'BLOCKED' ? 'Blocked' : null,
-        ].filter(Boolean);
+        const id = contactDetail?.identity;
         const lines: Array<[string, string | null | undefined]> = [
-            ['Name', contactFullName],
-            ['Phone', formatPhone(activeConversation.contactNumber)],
-            ['Company', d?.company],
-            ['Email', d?.emailAddress],
-            ['Location', [d?.city, d?.state].filter(Boolean).join(', ')],
-            ['Tags', d?.tags?.length ? d.tags.join(', ') : null],
-            ['Disposition', disposition],
-            ['Status', status.length ? status.join(', ') : 'Active'],
-            ['Lead batch', d?.batch?.name],
-            ['CRM client', d?.client ? `${d.client.businessName} (#${d.client.clientNumber}, ${d.client.status})` : null],
-            ['Our number', formatPhone(activeConversation.businessNumber)],
-            ['Messages', String(messages.length)],
-            ['Last message', activeConversation.lastMessageAt ? new Date(activeConversation.lastMessageAt).toLocaleString() : null],
+            ['Owner name', id?.ownerName ?? contactFullName],
+            ['Business name', id?.businessName ?? contactDetail?.company],
+            ['EIN', id?.ein],
+            ['SSN', id?.ssn],
+            ['Phone number', formatPhone(activeConversation.contactNumber)],
+            ['Email', id?.email ?? contactDetail?.emailAddress],
         ];
         const text = lines
             .filter(([, value]) => value != null && String(value).trim() !== '')
@@ -681,7 +670,7 @@ export default function Inbox() {
             }
         }
         toast.success('Profile copied to clipboard');
-    }, [activeConversation, contactDetail, contactFullName, messages.length]);
+    }, [activeConversation, contactDetail, contactFullName]);
 
     /** Group messages by day so the thread gets date separators. */
     const grouped = useMemo(() => {
@@ -1144,23 +1133,21 @@ export default function Inbox() {
                     </div>
 
                     <div className="flex-1 space-y-2 overflow-y-auto p-3 text-sm">
-                        <DetailField label="Company" value={contactDetail?.company} />
-                        <DetailField label="Email" value={contactDetail?.emailAddress} />
                         <DetailField
-                            label="Location"
-                            value={[contactDetail?.city, contactDetail?.state].filter(Boolean).join(', ')}
+                            label="Owner name"
+                            value={contactDetail?.identity?.ownerName ?? contactFullName}
                         />
-                        <DetailField label="Tags" value={contactDetail?.tags?.join(', ')} />
                         <DetailField
-                            label="Client"
-                            value={
-                                contactDetail?.client
-                                    ? `${contactDetail.client.businessName} (#${contactDetail.client.clientNumber})`
-                                    : null
-                            }
+                            label="Business name"
+                            value={contactDetail?.identity?.businessName ?? contactDetail?.company}
                         />
-                        <DetailField label="Sender" value={formatPhone(activeConversation.businessNumber)} />
-                        <DetailField label="Messages" value={String(messages.length)} />
+                        <DetailField label="EIN" value={contactDetail?.identity?.ein} />
+                        <SsnField value={contactDetail?.identity?.ssn ?? null} />
+                        <DetailField label="Phone number" value={formatPhone(activeConversation.contactNumber)} />
+                        <DetailField
+                            label="Email"
+                            value={contactDetail?.identity?.email ?? contactDetail?.emailAddress}
+                        />
 
                         {contactDetail?.source === 'crm-client' && (
                             <p className="pt-2 text-xs text-muted-foreground">
@@ -1218,6 +1205,32 @@ export default function Inbox() {
                     </div>
                 </DialogContent>
             </Dialog>
+        </div>
+    );
+}
+
+/** SSN is masked to its last four digits until the agent chooses to show it. */
+function SsnField({ value }: { value: string | null }) {
+    const [shown, setShown] = useState(false);
+    useEffect(() => setShown(false), [value]);
+    const digits = (value ?? '').replace(/\D/g, '');
+    const masked = digits.length >= 4 ? `•••-••-${digits.slice(-4)}` : value ? '•••••••••' : null;
+    return (
+        <div className="flex items-start justify-between gap-3 border-b pb-2 last:border-b-0">
+            <span className="shrink-0 text-xs text-muted-foreground">SSN</span>
+            <span className="flex items-center gap-1.5 text-right text-xs">
+                <span className="font-mono">{value ? (shown ? value : masked) : '—'}</span>
+                {value && (
+                    <button
+                        type="button"
+                        onClick={() => setShown((v) => !v)}
+                        className="rounded p-0.5 text-muted-foreground hover:text-foreground"
+                        title={shown ? 'Hide SSN' : 'Show SSN'}
+                    >
+                        {shown ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                    </button>
+                )}
+            </span>
         </div>
     );
 }

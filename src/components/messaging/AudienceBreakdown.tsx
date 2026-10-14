@@ -4,7 +4,7 @@
  * with the same rules create uses, so the number here is the number that sends.
  */
 import { useState } from 'react';
-import { AlertTriangle, Ban, CheckCircle2, ChevronDown, Copy, Loader2, PhoneOff, ThumbsDown, ThumbsUp, Users } from 'lucide-react';
+import { AlertTriangle, Ban, CheckCircle2, ChevronDown, Copy, Loader2, PhoneOff, ThumbsDown, ThumbsUp, UserX, Users } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 import type { AudiencePreview } from '@/services/messaging/messagingApi';
@@ -111,7 +111,7 @@ export function AudienceBreakdown({
                     [e.optedOut, 'bg-red-500'],
                     [e.dnc + e.blocked + e.otherSuppressed, 'bg-zinc-500'],
                     [e.interested + e.notInterested, 'bg-blue-500'],
-                    [e.invalid + e.duplicates, 'bg-amber-400'],
+                    [e.invalid + e.duplicates + (e.missingOwnerName ?? 0), 'bg-amber-400'],
                 ].map(([v, c], i) =>
                     (v as number) > 0 ? <div key={i} className={c as string} style={{ width: `${((v as number) / Math.max(1, total)) * 100}%` }} /> : null,
                 )}
@@ -128,6 +128,7 @@ export function AudienceBreakdown({
                         <Row icon={Ban} label="On Do-Not-Contact list" hint="DNC" value={e.dnc} total={total} tone="text-zinc-500" />
                         <Row icon={Ban} label="Blocked" hint="blocked contact" value={e.blocked} total={total} tone="text-zinc-500" />
                         <Row icon={Ban} label="Other suppression" hint="carrier / bounce" value={e.otherSuppressed} total={total} tone="text-zinc-500" />
+                        <Row icon={UserX} label="Missing owner name" hint="not in the sheet" value={e.missingOwnerName ?? 0} total={total} tone="text-amber-500" />
                         <Row icon={ThumbsUp} label="Already marked Interested" hint="being worked" value={e.interested} total={total} tone="text-blue-500" />
                         <Row icon={ThumbsDown} label="Already marked Not Interested" hint="closed" value={e.notInterested} total={total} tone="text-blue-500" />
                         <Row icon={AlertTriangle} label="Invalid phone numbers" hint="can't be parsed" value={e.invalid} total={total} tone="text-amber-500" />

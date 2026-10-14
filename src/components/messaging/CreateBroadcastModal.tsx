@@ -266,6 +266,10 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
                         `${result.invalidDropped} invalid`,
                 );
 
+                if (result.missingOwnerName) {
+                    toast.info(`${result.missingOwnerName} lead(s) without an owner name were left out`);
+                }
+
                 if (result.skippedClients?.length) {
                     toast.warn(`${result.skippedClients.length} client(s) skipped — see the campaign for details`);
                 }
@@ -441,7 +445,8 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
                                 {file && <p className="text-xs text-muted-foreground">{file.name}</p>}
                                 <p className="text-xs text-muted-foreground">
                                     A phone column is required. Every other column becomes a merge field, so a
-                                    "firstName" header fills {'{{firstName}}'} automatically.
+                                    "firstName" header fills {'{{firstName}}'} automatically. Rows without an owner
+                                    name ("Owners Name") are left out; {'{{ownerName}}'} inserts it.
                                 </p>
                             </TabsContent>
 

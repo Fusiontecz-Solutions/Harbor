@@ -354,7 +354,7 @@ export default function MessagingContacts() {
                         <Table>
                             <TableHeader>
                                 <TableRow>
-                                    <TableHead>Name</TableHead>
+                                    <TableHead>Owner name</TableHead>
                                     <TableHead>Phone</TableHead>
                                     <TableHead>Company</TableHead>
                                     <TableHead>Marker</TableHead>
@@ -367,7 +367,7 @@ export default function MessagingContacts() {
                                 {contacts.map((contact) => (
                                     <TableRow key={contact.id}>
                                         <TableCell>
-                                            {[contact.firstName, contact.lastName].filter(Boolean).join(' ') || '—'}
+                                            {contact.ownerName?.trim() || [contact.firstName, contact.lastName].filter(Boolean).join(' ') || '—'}
                                         </TableCell>
                                         <TableCell className="font-mono text-xs">{contact.phoneNumber}</TableCell>
                                         <TableCell>{contact.company || '—'}</TableCell>

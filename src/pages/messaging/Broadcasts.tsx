@@ -20,6 +20,7 @@ import {
     CalendarClock,
     Check,
     CheckCheck,
+    ChevronLeft,
     ChevronRight,
     Clock,
     CornerDownRight,
@@ -60,7 +61,7 @@ import {
     type BroadcastTotals,
 } from '@/services/messaging/messagingApi';
 
-const PAGE_SIZE = 50;
+const PAGE_SIZES = [10, 25, 50] as const;
 
 const STATUS_STYLE: Record<string, string> = {
     DRAFT: 'bg-muted text-muted-foreground',
@@ -126,9 +127,11 @@ export default function Broadcasts() {
     const [broadcasts, setBroadcasts] = useState<BroadcastSummary[]>([]);
     const [totals, setTotals] = useState<BroadcastTotals | null>(null);
     const [page, setPage] = useState(1);
-    const [hasMore, setHasMore] = useState(false);
+    const [pageSize, setPageSize] = useState<number>(25);
+    /** Campaigns matching the current filters, across all pages. */
+    const [matching, setMatching] = useState(0);
     const [isLoading, setIsLoading] = useState(true);
-    const [isLoadingMore, setIsLoadingMore] = useState(false);
+    const [isPaging, setIsPaging] = useState(false);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [statusFilter, setStatusFilter] = useState<string>('ALL');
     const [search, setSearch] = useState('');
@@ -140,8 +143,8 @@ export default function Broadcasts() {
         return () => window.clearTimeout(id);
     }, [search]);
 
-    // Status, search and sort are applied by the server, so "Load more" keeps
-    // paging through the filtered list rather than the whole one.
+    // Status, search and sort are applied by the server, so every page is a
+    // page of the filtered list rather than of the whole one.
     const query = useMemo(
         () => ({
             status: statusFilter === 'ALL' ? undefined : statusFilter,
@@ -151,38 +154,49 @@ export default function Broadcasts() {
         [debouncedSearch, sort, statusFilter],
     );
 
-    /** Reloads every page loaded so far, so an action never shrinks the list. */
-    const load = useCallback(async (pages = 1) => {
-        try {
-            const response = await fetchBroadcasts({ ...query, page: 1, pageSize: PAGE_SIZE * pages });
-            setBroadcasts(response.data);
-            setTotals(response.totals ?? null);
-            setHasMore(response.pagination.hasMore);
-            setPage(pages);
-        } catch (error: any) {
-            toast.error(error?.response?.data?.message || 'Failed to load broadcasts');
-        } finally {
-            setIsLoading(false);
-        }
-    }, [query]);
+    /** Only the newest request may update the list — older responses are dropped. */
+    const latestRequest = useRef(0);
+
+    /** Loads one page of the filtered list (the current one by default). */
+    const load = useCallback(
+        async (targetPage = page) => {
+            const requestId = ++latestRequest.current;
+            setIsPaging(true);
+            try {
+                const response = await fetchBroadcasts({ ...query, page: targetPage, pageSize });
+                if (requestId !== latestRequest.current) return;
+                const total = response.pagination.total ?? response.data.length;
+                const lastPage = Math.max(1, Math.ceil(total / pageSize));
+                // A filter change or an action can leave us past the end; step back.
+                if (targetPage > lastPage && total > 0) {
+                    setPage(lastPage);
+                    return;
+                }
+                setBroadcasts(response.data);
+                setTotals(response.totals ?? null);
+                setMatching(total);
+            } catch (error: any) {
+                if (requestId === latestRequest.current) {
+                    toast.error(error?.response?.data?.message || 'Failed to load broadcasts');
+                }
+            } finally {
+                if (requestId === latestRequest.current) {
+                    setIsLoading(false);
+                    setIsPaging(false);
+                }
+            }
+        },
+        [page, pageSize, query],
+    );
 
     useEffect(() => {
         void load();
     }, [load]);
 
-    const loadMore = useCallback(async () => {
-        setIsLoadingMore(true);
-        try {
-            const response = await fetchBroadcasts({ ...query, page: page + 1, pageSize: PAGE_SIZE });
-            setBroadcasts((prev) => [...prev, ...response.data.filter((b) => !prev.some((p) => p.id === b.id))]);
-            setHasMore(response.pagination.hasMore);
-            setPage((p) => p + 1);
-        } catch (error: any) {
-            toast.error(error?.response?.data?.message || 'Failed to load more broadcasts');
-        } finally {
-            setIsLoadingMore(false);
-        }
-    }, [page, query]);
+    // A new filter, search, sort or page size starts again at page 1.
+    useEffect(() => {
+        setPage(1);
+    }, [query, pageSize]);
 
     useEffect(() => {
         if (!socket) return;
@@ -213,14 +227,14 @@ export default function Broadcasts() {
                 // away: an approver clicking the tick means "send this".
                 if (action === 'approve') await approveBroadcast(id, true);
                 if (action === 'reject') await rejectBroadcast(id);
-                await load(page);
+                await load();
             } catch (error: any) {
                 toast.error(error?.response?.data?.message || `Failed to ${action} broadcast`);
             } finally {
                 inFlight.current.delete(id);
             }
         },
-        [load, page],
+        [load],
     );
 
     // The server already filtered and sorted; a live progress event can
@@ -366,17 +380,90 @@ export default function Broadcasts() {
                     {visible.map((b) => (
                         <CampaignCard key={b.id} b={b} canRelease={canRelease} onAction={act} onOpen={() => navigate(`/broadcasts/${b.id}`)} />
                     ))}
-                    {hasMore && (
-                        <div className="flex justify-center pt-1">
-                            <Button variant="outline" size="sm" onClick={() => void loadMore()} disabled={isLoadingMore}>
-                                {isLoadingMore && <Loader2 className="mr-1 h-4 w-4 animate-spin" />} Load more campaigns
-                            </Button>
-                        </div>
-                    )}
+                    <PageControls
+                        page={page}
+                        pageSize={pageSize}
+                        total={matching}
+                        busy={isPaging}
+                        onPage={setPage}
+                        onPageSize={setPageSize}
+                    />
                 </div>
             )}
 
-            <CreateBroadcastModal open={isModalOpen} onOpenChange={setIsModalOpen} onCreated={() => void load(page)} />
+            <CreateBroadcastModal open={isModalOpen} onOpenChange={setIsModalOpen} onCreated={() => void load()} />
+        </div>
+    );
+}
+
+/** "1–25 of 80", page size, and Previous / numbered pages / Next. */
+function PageControls({
+    page,
+    pageSize,
+    total,
+    busy,
+    onPage,
+    onPageSize,
+}: {
+    page: number;
+    pageSize: number;
+    total: number;
+    busy: boolean;
+    onPage: (page: number) => void;
+    onPageSize: (size: number) => void;
+}) {
+    const pages = Math.max(1, Math.ceil(total / pageSize));
+    const from = total === 0 ? 0 : (page - 1) * pageSize + 1;
+    const to = Math.min(total, page * pageSize);
+    // At most 5 numbered buttons around the current page.
+    const start = Math.max(1, Math.min(page - 2, pages - 4));
+    const numbers = Array.from({ length: Math.min(5, pages) }, (_, i) => start + i);
+
+    return (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-card px-4 py-2.5 text-xs">
+            <div className="flex items-center gap-3 text-muted-foreground">
+                <span>
+                    <span className="font-medium text-foreground">
+                        {from.toLocaleString()}–{to.toLocaleString()}
+                    </span>{' '}
+                    of {total.toLocaleString()} campaigns
+                </span>
+                <select
+                    value={pageSize}
+                    onChange={(e) => onPageSize(Number(e.target.value))}
+                    className="h-8 rounded-md border bg-background px-2 text-xs"
+                    aria-label="Campaigns per page"
+                >
+                    {PAGE_SIZES.map((n) => (
+                        <option key={n} value={n}>
+                            {n} per page
+                        </option>
+                    ))}
+                </select>
+                {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            </div>
+            <div className="flex items-center gap-1">
+                <Button size="sm" variant="outline" className="h-8 px-2" disabled={page <= 1 || busy} onClick={() => onPage(page - 1)}>
+                    <ChevronLeft className="h-4 w-4" />
+                    <span className="hidden sm:inline">Previous</span>
+                </Button>
+                {numbers.map((n) => (
+                    <Button
+                        key={n}
+                        size="sm"
+                        variant={n === page ? 'default' : 'ghost'}
+                        className="h-8 min-w-8 px-2"
+                        disabled={busy}
+                        onClick={() => onPage(n)}
+                    >
+                        {n}
+                    </Button>
+                ))}
+                <Button size="sm" variant="outline" className="h-8 px-2" disabled={page >= pages || busy} onClick={() => onPage(page + 1)}>
+                    <span className="hidden sm:inline">Next</span>
+                    <ChevronRight className="h-4 w-4" />
+                </Button>
+            </div>
         </div>
     );
 }

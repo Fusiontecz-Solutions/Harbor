@@ -127,6 +127,10 @@ export interface BroadcastTotals {
 export interface MessagingContact {
     id: string;
     phoneNumber: string;
+    /** "Owners Name" from the lead sheet — the name shown for a lead. */
+    ownerName?: string | null;
+    ein?: string | null;
+    ssn?: string | null;
     firstName: string | null;
     lastName: string | null;
     emailAddress: string | null;
@@ -153,6 +157,15 @@ export interface ContactProfile extends Omit<MessagingContact, 'id' | 'createdAt
     id: string | null;
     createdAt: string | null;
     source: 'contact' | 'crm-client';
+    /** What the Inbox profile card shows. EIN and SSN come from the CRM client. */
+    identity?: {
+        ownerName: string | null;
+        businessName: string | null;
+        ein: string | null;
+        ssn: string | null;
+        phoneNumber: string;
+        email: string | null;
+    };
     client: {
         id: string;
         clientNumber: number;
@@ -536,6 +549,8 @@ export interface AudiencePreview {
         blocked: number;
         interested: number;
         notInterested: number;
+        /** No owner name in the lead sheet — never broadcast to. */
+        missingOwnerName: number;
         /** Replied STOP earlier — kept out even when the lead is re-uploaded. */
         optedOut: number;
         dnc: number;
@@ -584,6 +599,8 @@ export interface CreateBroadcastResult {
     scheduledAt?: string | null;
     /** True when the creator was an agent, so a Super Admin must release it. */
     awaitingApproval?: boolean;
+    /** Leads skipped because the sheet had no owner name for them. */
+    missingOwnerName?: number;
 }
 
 /** Create from CRM clients, saved contacts, and/or an explicit number list. */
