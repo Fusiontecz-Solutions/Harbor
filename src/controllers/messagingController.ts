@@ -18,7 +18,15 @@ import {
   listConversations,
   listMessages,
   markConversationRead,
+  markConversationUnread,
 } from '../services/messaging/conversation.service';
+import {
+  getPushPublicKey,
+  parseSubscription,
+  removeSubscription,
+  saveSubscription,
+  sendTestPush,
+} from '../services/messaging/push.service';
 import {
   findClientById,
   upsertContactFromClient,
@@ -228,6 +236,76 @@ class MessagingController {
     } catch (err) {
       console.error('[messaging] markRead failed:', err);
       res.status(500).json({ success: false, message: (err as Error)?.message || 'Failed to mark conversation read' });
+    }
+  }
+
+  /** PATCH /messaging/conversations/:id/unread — "keep this for later". */
+  async markUnread(req: Request, res: Response): Promise<void> {
+    try {
+      const conversationId = String(req.params.id);
+      if (!(await findVisibleConversation(req, conversationId))) {
+        res.status(404).json({ success: false, message: 'Conversation not found' });
+        return;
+      }
+      const unreadCount = await markConversationUnread(conversationId);
+
+      emitConversationUpdate({ id: conversationId, unreadCount });
+      emitUnreadCountUpdate(await getTotalUnread());
+
+      res.json({ success: true, data: { id: conversationId, unreadCount } });
+    } catch (err) {
+      console.error('[messaging] markUnread failed:', err);
+      res.status(500).json({ success: false, message: (err as Error)?.message || 'Failed to mark conversation unread' });
+    }
+  }
+
+  /** GET /messaging/push/config — the VAPID public key a browser subscribes with. */
+  async pushConfig(_req: Request, res: Response): Promise<void> {
+    const publicKey = getPushPublicKey();
+    res.json({ success: true, data: { enabled: Boolean(publicKey), publicKey } });
+  }
+
+  /** POST /messaging/push/subscribe — body: the browser PushSubscription JSON. */
+  async pushSubscribe(req: Request, res: Response): Promise<void> {
+    try {
+      const userId = actorId(req);
+      const sub = parseSubscription(req.body?.subscription ?? req.body);
+      if (!userId || !sub) {
+        res.status(400).json({ success: false, message: 'A valid push subscription is required' });
+        return;
+      }
+      await saveSubscription(userId, sub, String(req.headers['user-agent'] ?? '').slice(0, 300) || null);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('[messaging] push subscribe failed:', err);
+      res.status(500).json({ success: false, message: 'Failed to save push subscription' });
+    }
+  }
+
+  /** POST /messaging/push/unsubscribe — body: { endpoint } */
+  async pushUnsubscribe(req: Request, res: Response): Promise<void> {
+    try {
+      const endpoint = String(req.body?.endpoint ?? '').trim();
+      if (endpoint) await removeSubscription(endpoint, actorId(req) ?? undefined);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('[messaging] push unsubscribe failed:', err);
+      res.status(500).json({ success: false, message: 'Failed to remove push subscription' });
+    }
+  }
+
+  /** POST /messaging/push/test — send a test notification to the caller's devices. */
+  async pushTest(req: Request, res: Response): Promise<void> {
+    try {
+      const userId = actorId(req);
+      if (!userId) {
+        res.status(401).json({ success: false, message: 'Authentication required' });
+        return;
+      }
+      res.json({ success: true, data: { delivered: await sendTestPush(userId) } });
+    } catch (err) {
+      console.error('[messaging] push test failed:', err);
+      res.status(500).json({ success: false, message: 'Failed to send test notification' });
     }
   }
 

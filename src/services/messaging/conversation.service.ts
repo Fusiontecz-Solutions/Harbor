@@ -543,6 +543,21 @@ export async function markConversationRead(conversationId: string): Promise<void
   await invalidateConversationCaches(conversationId);
 }
 
+/**
+ * Flag a conversation as unread again (an agent's "come back to this").
+ * Keeps an existing count; otherwise sets it to 1 so the badge shows.
+ */
+export async function markConversationUnread(conversationId: string): Promise<number> {
+  const current = await prisma.messagingConversation.findUnique({
+    where: { id: conversationId },
+    select: { unreadCount: true },
+  });
+  const unreadCount = Math.max(1, current?.unreadCount ?? 0);
+  await prisma.messagingConversation.update({ where: { id: conversationId }, data: { unreadCount } });
+  await invalidateConversationCaches(conversationId);
+  return unreadCount;
+}
+
 export async function getTotalUnread(senderNumbers?: string[] | null): Promise<number> {
   const result = await prisma.messagingConversation.aggregate({
     _sum: { unreadCount: true },

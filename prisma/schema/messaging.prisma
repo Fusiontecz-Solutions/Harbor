@@ -405,3 +405,19 @@ enum MessagingSuppressionReason {
   CARRIER_VIOLATION
   BOUNCE
 }
+
+/// A browser/device that asked for Web Push notifications of new messages.
+/// One row per push endpoint; a user can have several (laptop, phone…).
+model PushSubscription {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @db.Uuid
+  /// The push service URL for this browser — unique per device.
+  endpoint   String   @unique
+  p256dh     String
+  auth       String
+  userAgent  String?
+  createdAt  DateTime @default(now())
+  lastUsedAt DateTime?
+
+  @@index([userId])
+}

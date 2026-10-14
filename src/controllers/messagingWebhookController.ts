@@ -12,6 +12,7 @@
  * Reference: https://www.infobip.com/docs/api/channels/sms/inbound-sms/receive-inbound-sms-messages
  */
 import type { Request, Response } from 'express';
+import { notifyInboundMessage } from '../services/messaging/push.service';
 import prisma from '../config/prismaClient';
 import {
   parseDeliveryReportPayload,
@@ -127,6 +128,16 @@ class MessagingWebhookController {
           isStopKeyword: result.isStop,
           broadcastId,
           createdAt: message.receivedAt.toISOString(),
+        });
+
+        // Push to everyone who can see this thread — even with Harbor closed.
+        void notifyInboundMessage({
+          conversationId: result.conversationId,
+          businessNumber: message.to,
+          contactNumber: message.from,
+          text: message.text,
+          isStop: result.isStop,
+          hasMedia: Boolean(message.mediaUrls?.length),
         });
 
         emitConversationUpdate({
