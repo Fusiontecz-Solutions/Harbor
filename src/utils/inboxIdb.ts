@@ -15,9 +15,16 @@
  *     must never see each other's conversations out of the cache.
  */
 import { openDB, type IDBPDatabase } from 'idb';
+import { memoryClear } from './messagingMemoryCache';
 
 const DB_NAME = 'harbor-inbox';
 const DB_VERSION = 1;
+/**
+ * Bump when the shape of a cached Conversation/Message changes. It is part of
+ * every key, so entries written by an older build are simply never read again
+ * (and age out through the LRU cap) instead of rendering in a stale shape.
+ */
+const SCHEMA_VERSION = 'v2';
 const STORE_CONVERSATIONS = 'conversations';
 const STORE_MESSAGES = 'messages';
 
@@ -25,7 +32,12 @@ const STORE_MESSAGES = 'messages';
 const MAX_CONVERSATION_KEYS = 10;
 const MAX_MESSAGE_THREADS = 50;
 
-/** Stale entries are still served (instantly) but trigger a refetch. */
+/**
+ * Informational only. Cached entries are always rendered instantly AND always
+ * revalidated against the API — an earlier build treated entries younger than
+ * this as authoritative and skipped the network, which is what made new
+ * inbound messages take up to five minutes to appear.
+ */
 export const IDB_STALE_AFTER_MS = 5 * 60 * 1000;
 
 export interface IdbEntry<T> {
@@ -63,7 +75,7 @@ function getDb(): Promise<IDBPDatabase | null> {
 }
 
 function scopeKey(userScope: string | null | undefined, key: string): string {
-  return `${userScope?.trim() || 'anon'}::${key}`;
+  return `${SCHEMA_VERSION}::${userScope?.trim() || 'anon'}::${key}`;
 }
 
 async function readEntry<T>(store: string, key: string): Promise<IdbEntry<T> | null> {
@@ -156,4 +168,13 @@ export async function clearInboxCache(): Promise<void> {
   } catch (error) {
     console.warn('[inbox-idb] clear failed:', error);
   }
+}
+
+/**
+ * Logout / user switch: drop every inbox layer — the in-memory store as well
+ * as IndexedDB. Message bodies and phone numbers are PII.
+ */
+export async function clearInboxCaches(): Promise<void> {
+  memoryClear();
+  await clearInboxCache();
 }

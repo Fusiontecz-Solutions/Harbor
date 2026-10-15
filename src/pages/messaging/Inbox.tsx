@@ -9,7 +9,7 @@
  * DOM rows. The message pane is not — a thread page is capped at 50 messages
  * server-side, and virtualizing it would fight the scroll-to-bottom behaviour.
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Virtuoso } from 'react-virtuoso';
 import { toast } from 'react-toastify';
 import {
@@ -58,7 +58,7 @@ import {
 import { cn } from '@/lib/utils';
 import { isAgentRole } from '@/lib/agentAccess';
 import { resolveEffectiveRole } from '@/lib/sessionRole';
-import { useInbox } from '@/hooks/useInbox';
+import { PENDING_PREFIX, useInbox } from '@/hooks/useInbox';
 import { useSearchParams } from 'react-router';
 import {
     disablePush,
@@ -254,6 +254,7 @@ export default function Inbox() {
         refreshAfterSend,
         pushOptimisticOutbound,
         reconcileOptimisticOutbound,
+        discardOptimistic,
         isRealtime,
     } = useInbox({ userScope, search, filter });
 
@@ -375,12 +376,29 @@ export default function Inbox() {
 
     // Follow the newest message only when the tail of the thread changes;
     // prepending older history must not yank the view to the bottom.
-    const lastMessageId = messages[messages.length - 1]?.id;
-    useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [lastMessageId]);
-
+    // Switching threads jumps straight to the bottom (no animated scroll from
+    // the top); a new tail message animates only when the agent is already
+    // near the bottom or sent it — reading history is never yanked away.
     const messagesScrollRef = useRef<HTMLDivElement | null>(null);
+    const lastMessage = messages[messages.length - 1];
+    const lastMessageId = lastMessage?.id;
+    const scrolledThreadRef = useRef<string | null>(null);
+    const threadKeyForScroll = activeConversation?.id ?? activeConversation?.contactNumber ?? null;
+    useLayoutEffect(() => {
+        const el = messagesScrollRef.current;
+        if (!el || !lastMessageId) return;
+        if (scrolledThreadRef.current !== threadKeyForScroll) {
+            scrolledThreadRef.current = threadKeyForScroll;
+            el.scrollTop = el.scrollHeight;
+            return;
+        }
+        const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
+        if (nearBottom || lastMessage?.direction === 'OUTBOUND') {
+            messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [lastMessageId, threadKeyForScroll]);
+
     /** scrollHeight/scrollTop captured before older messages are prepended. */
     const scrollAnchor = useRef<{ height: number; top: number } | null>(null);
 
@@ -426,15 +444,16 @@ export default function Inbox() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [activeConversation?.contactNumber]);
 
-    const handleSend = useCallback(() => {
-        const body = draft.trim();
+    /**
+     * Send `body` on the open thread with an optimistic bubble. Shared by the
+     * composer and by "Retry" on a failed bubble.
+     */
+    const sendBody = useCallback((body: string) => {
         if (!body || !activeConversation) return;
-        if (!confirmMultiSegmentSend(draftSms, 1)) return;
 
         const fromNumber =
             activeConversation.businessNumber || config?.defaultSender || '';
         const toNumber = activeConversation.contactNumber;
-        setDraft('');
 
         let optimisticId: string | null = null;
         if (isDraft) {
@@ -449,7 +468,7 @@ export default function Inbox() {
                     toNumber,
                     body,
                     mediaUrls: [],
-                    status: 'SENT',
+                    status: 'SENDING',
                     errorMessage: null,
                     broadcastId: null,
                     isStopKeyword: false,
@@ -505,9 +524,7 @@ export default function Inbox() {
     }, [
         activeConversation,
         config?.defaultSender,
-        draft,
         draftClientId,
-        draftSms,
         isDraft,
         openConversation,
         pushOptimisticOutbound,
@@ -515,6 +532,28 @@ export default function Inbox() {
         refreshAfterSend,
         reloadConversations,
     ]);
+
+    const handleSend = useCallback(() => {
+        const body = draft.trim();
+        if (!body || !activeConversation) return;
+        if (!confirmMultiSegmentSend(draftSms, 1)) return;
+        setDraft('');
+        sendBody(body);
+    }, [activeConversation, draft, draftSms, sendBody]);
+
+    /** Re-send a bubble whose send request failed (never reached the provider). */
+    const handleRetry = useCallback(
+        (message: Message) => {
+            if (!message.body) return;
+            if (isDraft) {
+                setDraftMessages((prev) => prev.filter((row) => row.id !== message.id));
+            } else {
+                discardOptimistic(message.id);
+            }
+            sendBody(message.body);
+        },
+        [discardOptimistic, isDraft, sendBody],
+    );
 
     const handleStartConversation = useCallback(() => {
         if (startDraft(newNumber, null)) setNewNumber('');
@@ -1040,7 +1079,7 @@ export default function Inbox() {
                                             </span>
                                         </div>
                                         {group.items.map((message) => (
-                                            <MessageBubble key={message.id} message={message} />
+                                            <MessageBubble key={message.id} message={message} onRetry={handleRetry} />
                                         ))}
                                     </div>
                                 ))
@@ -1142,7 +1181,8 @@ export default function Inbox() {
                             value={contactDetail?.identity?.businessName ?? contactDetail?.company}
                         />
                         <DetailField label="EIN" value={contactDetail?.identity?.ein} />
-                        <SsnField value={contactDetail?.identity?.ssn ?? null} />
+                        {/* SSN is admin-only; the API does not send it to agents at all. */}
+                        {canUseClients && <SsnField value={contactDetail?.identity?.ssn ?? null} />}
                         <DetailField label="Phone number" value={formatPhone(activeConversation.contactNumber)} />
                         <DetailField
                             label="Email"
@@ -1341,9 +1381,17 @@ function ConversationRow({
     );
 }
 
-function MessageBubble({ message }: { message: Message }) {
+const MessageBubble = memo(function MessageBubble({
+    message,
+    onRetry,
+}: {
+    message: Message;
+    onRetry?: (message: Message) => void;
+}) {
     const isOutbound = message.direction === 'OUTBOUND';
     const isFailed = message.status === 'FAILED' || message.status === 'UNDELIVERABLE';
+    /** Only a send that never got a server id can be retried safely (no double send). */
+    const canRetry = isFailed && message.id.startsWith(PENDING_PREFIX) && Boolean(onRetry);
     const time = new Date(message.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
     return (
@@ -1387,9 +1435,18 @@ function MessageBubble({ message }: { message: Message }) {
                     <p className="mt-1 flex items-start gap-1 text-[10px] font-medium text-red-400">
                         <AlertCircle className="mt-px h-3 w-3 shrink-0" />
                         <span>{message.errorMessage || 'Not delivered'}</span>
+                        {canRetry && (
+                            <button
+                                type="button"
+                                className="ml-1 underline hover:no-underline"
+                                onClick={() => onRetry?.(message)}
+                            >
+                                Retry
+                            </button>
+                        )}
                     </p>
                 )}
             </div>
         </div>
     );
-}
+});
