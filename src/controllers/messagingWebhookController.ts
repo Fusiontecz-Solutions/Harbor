@@ -21,7 +21,6 @@ import {
 } from '../services/messaging/infobip.service';
 import {
   applyDeliveryReport,
-  getTotalUnread,
   recordInboundMessage,
 } from '../services/messaging/conversation.service';
 import { recordBroadcastCounter } from '../services/messaging/broadcast.service';
@@ -71,6 +70,8 @@ class MessagingWebhookController {
     }
 
     let processed = 0;
+    /** Threads that gained unread messages — each gets a scoped badge update. */
+    const touchedConversations = new Set<string>();
     /** An opt-out we could not apply — ask Infobip to redeliver the batch. */
     let stopFailed = false;
 
@@ -109,6 +110,7 @@ class MessagingWebhookController {
 
         if (result.duplicate) continue;
         processed += 1;
+        touchedConversations.add(result.conversationId);
 
         // The campaign's replied/optOut counters were already incremented inside
         // recordInboundMessage; STOP's suppression was applied above.
@@ -154,11 +156,7 @@ class MessagingWebhookController {
       }
     }
 
-    try {
-      emitUnreadCountUpdate(await getTotalUnread());
-    } catch {
-      /* non-critical */
-    }
+    for (const conversationId of touchedConversations) emitUnreadCountUpdate(conversationId);
 
     if (stopFailed) {
       res.status(500).json({ success: false, processed, message: 'Opt-out could not be recorded; please redeliver' });

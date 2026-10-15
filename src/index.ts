@@ -7,7 +7,7 @@ import connectDB from './config/database';
 import router from './routes/index';
 import cors from 'cors';
 import cloudinaryConnect from './config/cloudinary';
-import { initializeSocketIO } from './socket/index';
+import { attachSocketRedisAdapter, initializeSocketIO } from './socket/index';
 import { testRedisConnection } from './config/redis';
 import { startApplicationApprovalWorker } from './workers/applicationApprovalWorker';
 import { startSmsBroadcastWorker } from './workers/smsBroadcastWorker';
@@ -93,6 +93,9 @@ if (sendgridWebhookBase) {
 void testRedisConnection()
   .catch(console.error)
   .finally(() => {
+    // Cross-instance socket fan-out (no-op without REDIS_URL). Runs after
+    // initializeSocketIO below, which is synchronous at module load.
+    void attachSocketRedisAdapter();
     startApplicationApprovalWorker();
     // SMS broadcast sender. Concurrency here controls how many campaign chunks
     // progress at once; the actual send rate is governed by the Redis token

@@ -31,6 +31,15 @@ const actorId = (req: Request): string | null => req.user?.id ?? null;
  * Which owners' leads this caller may see: null for an admin (everything), or
  * just themselves. Repeated in enough handlers now to be worth naming.
  */
+/**
+ * SSN is for admins only. Every response that can carry a contact row goes
+ * through this, so an agent's request never receives the number at all —
+ * hiding it in the browser alone would still send it over the wire.
+ */
+const canSeeSsn = (req: Request): boolean => isPrivilegedMessagingRole(req.user?.role);
+const withoutSsn = <T extends object>(req: Request, row: T): T =>
+  canSeeSsn(req) || !row || !('ssn' in row) ? row : { ...row, ssn: null };
+
 const ownerScope = (req: Request): string[] | null =>
   isPrivilegedMessagingRole(req.user?.role) ? null : [actorId(req) ?? ''];
 
@@ -62,7 +71,7 @@ class MessagingContactController {
 
       res.json({
         success: true,
-        data: result.items,
+        data: result.items.map((item) => withoutSsn(req, item)),
         pagination: {
           page: result.page,
           pageSize: result.pageSize,
@@ -94,7 +103,7 @@ class MessagingContactController {
         clientId: req.body?.clientId ?? null,
       });
 
-      res.status(201).json({ success: true, data: contact });
+      res.status(201).json({ success: true, data: withoutSsn(req, contact) });
     } catch (err) {
       console.error('[messaging:contacts] create failed:', err);
       res.status(400).json({ success: false, message: (err as Error)?.message || 'Failed to create contact' });
@@ -182,7 +191,7 @@ class MessagingContactController {
         },
       });
 
-      res.json({ success: true, data: contact });
+      res.json({ success: true, data: withoutSsn(req, contact) });
     } catch (err) {
       console.error('[messaging:contacts] update failed:', err);
       res.status(400).json({ success: false, message: (err as Error)?.message || 'Failed to update contact' });
@@ -438,7 +447,8 @@ class MessagingContactController {
         ownerName: saved?.ownerName?.trim() || ownerName(crm?.ownerFirstName, crm?.ownerLastName) || ownerName(saved?.firstName, saved?.lastName),
         businessName: crm?.businessName || saved?.company || null,
         ein: crm?.businessEinNumber || saved?.ein || null,
-        ssn: crm?.ownerSsn || saved?.ssn || null,
+        // Admins only — agents get null, so there is nothing to reveal.
+        ssn: canSeeSsn(req) ? crm?.ownerSsn || saved?.ssn || null : null,
         phoneNumber,
         email: saved?.emailAddress || crm?.ownerEmail || crm?.businessEmail || null,
       };

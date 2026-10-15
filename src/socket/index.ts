@@ -2,7 +2,16 @@
 import type { Server as HttpServer } from 'http';
 import { Server } from 'socket.io';
 import jwt from 'jsonwebtoken';
+import { createAdapter } from '@socket.io/redis-adapter';
 import prisma from '../config/prismaClient';
+import { getRedisClient } from '../config/redis';
+import { visibleSendersForUser } from '../services/messaging/sender.service';
+import {
+  MESSAGING_ALL_ROOM,
+  MESSAGING_BROADCASTS_ROOM,
+  conversationRoom,
+  senderRoom,
+} from './messagingEvents';
 
 /**
  * Module-scoped Socket.IO server instance.
@@ -122,6 +131,64 @@ function mapMessageToApi(m: {
   };
 }
 
+/**
+ * Join exactly the messaging rooms the inbox list would show this user
+ * (visibleSendersForUser), leaving any stale sender rooms first. Re-run on the
+ * client's `messaging:subscribe`, so a sender reassignment takes effect on the
+ * next inbox open or reconnect without a new login.
+ */
+export async function syncMessagingRooms(socket): Promise<void> {
+  const { userId, role } = socket.data as { userId: string; role?: string };
+  const allowed = await visibleSendersForUser(userId, role);
+  for (const room of socket.rooms) {
+    if (room === MESSAGING_ALL_ROOM || room.startsWith('messaging:sender:')) socket.leave(room);
+  }
+  socket.join(MESSAGING_BROADCASTS_ROOM);
+  if (allowed === null) {
+    socket.join(MESSAGING_ALL_ROOM);
+  } else {
+    for (const number of allowed) socket.join(senderRoom(number));
+  }
+}
+
+/** Same rule as findVisibleConversation in messagingController. */
+export async function canSeeConversation(socket, conversationId: string): Promise<boolean> {
+  const { userId, role } = socket.data as { userId: string; role?: string };
+  const conversation = await prisma.messagingConversation.findUnique({
+    where: { id: conversationId },
+    select: { businessNumber: true },
+  });
+  if (!conversation) return false;
+  const allowed = await visibleSendersForUser(userId, role);
+  return allowed === null || allowed.includes(conversation.businessNumber);
+}
+
+/**
+ * Share rooms across backend instances through Redis pub/sub. Without it a
+ * webhook handled by instance A never reaches a browser connected to B. Called
+ * once Redis is up; a no-op (single-instance behaviour) when Redis is absent.
+ */
+export async function attachSocketRedisAdapter(): Promise<void> {
+  const io = ioInstance;
+  const redis = getRedisClient();
+  if (!io || !redis) return;
+  try {
+    const pubClient = redis.duplicate();
+    const subClient = redis.duplicate();
+    pubClient.on('error', (err) => console.error('[socket] redis pub error:', err.message));
+    subClient.on('error', (err) => console.error('[socket] redis sub error:', err.message));
+    // Duplicates inherit lazyConnect from the base client.
+    await Promise.all([
+      pubClient.status === 'wait' ? pubClient.connect() : Promise.resolve(),
+      subClient.status === 'wait' ? subClient.connect() : Promise.resolve(),
+    ]);
+    io.adapter(createAdapter(pubClient, subClient, { key: 'harbor:socket.io' }));
+    console.log('✅ Socket.IO Redis adapter attached');
+  } catch (err) {
+    console.error('[socket] Redis adapter unavailable, continuing single-instance:', (err as Error)?.message);
+  }
+}
+
 export function initializeSocketIO(httpServer: HttpServer): void {
   if (ioInstance) return;
   const io = new Server(httpServer, {
@@ -138,17 +205,31 @@ export function initializeSocketIO(httpServer: HttpServer): void {
 
   ioInstance = io;
 
-  io.use((socket, next) => {
+  // Same checks as authenticateToken: a valid signature AND a live
+  // AccessToken row, so a logged-out or expired session cannot keep a socket.
+  io.use(async (socket, next) => {
     const token = (socket.handshake.auth as { token?: string })?.token;
     if (!token) return next(new Error('Authentication required'));
     if (!JWT_SECRET) return next(new Error('Server misconfiguration'));
+    let decoded: { id: string; email?: string; role?: string };
     try {
-      const decoded = jwt.verify(token, JWT_SECRET) as { id: string; email?: string };
-      (socket.data as { userId: string }).userId = decoded.id;
-      next();
+      decoded = jwt.verify(token, JWT_SECRET) as { id: string; email?: string; role?: string };
     } catch {
-      next(new Error('Invalid token'));
+      return next(new Error('Invalid token'));
     }
+    try {
+      const accessToken = await prisma.accessToken.findFirst({
+        where: { token, userId: decoded.id },
+        select: { expiresAt: true },
+      });
+      if (!accessToken || accessToken.expiresAt < new Date()) return next(new Error('Invalid or expired token'));
+    } catch (err) {
+      console.error('[socket] token lookup failed:', (err as Error)?.message);
+      return next(new Error('Authentication unavailable'));
+    }
+    (socket.data as { userId: string; role?: string }).userId = decoded.id;
+    (socket.data as { userId: string; role?: string }).role = decoded.role;
+    next();
   });
 
   const connectedUsers = new Map<string, string>();
@@ -166,16 +247,31 @@ export function initializeSocketIO(httpServer: HttpServer): void {
     // receiving inbox list updates without an extra round-trip; per-thread
     // rooms are joined only while a conversation is open, which keeps a busy
     // broadcast from fanning out to every connected client.
-    socket.join('messaging:inbox');
+    // Rooms are scoped by visibleSendersForUser so a rep only ever receives
+    // events for threads their inbox list would show.
+    syncMessagingRooms(socket).catch((err) =>
+      console.error('[socket] messaging room sync failed:', (err as Error)?.message),
+    );
 
-    socket.on('messaging:join_conversation', (data: { conversationId?: string }) => {
+    socket.on('messaging:subscribe', () => {
+      syncMessagingRooms(socket).catch((err) =>
+        console.error('[socket] messaging room sync failed:', (err as Error)?.message),
+      );
+    });
+
+    socket.on('messaging:join_conversation', async (data: { conversationId?: string }) => {
       const conversationId = String(data?.conversationId || '').trim();
-      if (conversationId) socket.join(`messaging:conv:${conversationId}`);
+      if (!conversationId || !UUID_REGEX.test(conversationId)) return;
+      try {
+        if (await canSeeConversation(socket, conversationId)) socket.join(conversationRoom(conversationId));
+      } catch (err) {
+        console.error('[socket] join_conversation check failed:', (err as Error)?.message);
+      }
     });
 
     socket.on('messaging:leave_conversation', (data: { conversationId?: string }) => {
       const conversationId = String(data?.conversationId || '').trim();
-      if (conversationId) socket.leave(`messaging:conv:${conversationId}`);
+      if (conversationId) socket.leave(conversationRoom(conversationId));
     });
 
     socket.on('join_conversation', (data: { conversationId: string }) => {

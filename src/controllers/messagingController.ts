@@ -230,7 +230,7 @@ class MessagingController {
       await markConversationRead(conversationId);
 
       emitConversationUpdate({ id: conversationId, unreadCount: 0 });
-      emitUnreadCountUpdate(await getTotalUnread());
+      emitUnreadCountUpdate(conversationId);
 
       res.json({ success: true, data: { id: conversationId, unreadCount: 0 } });
     } catch (err) {
@@ -250,7 +250,7 @@ class MessagingController {
       const unreadCount = await markConversationUnread(conversationId);
 
       emitConversationUpdate({ id: conversationId, unreadCount });
-      emitUnreadCountUpdate(await getTotalUnread());
+      emitUnreadCountUpdate(conversationId);
 
       res.json({ success: true, data: { id: conversationId, unreadCount } });
     } catch (err) {
@@ -358,9 +358,10 @@ class MessagingController {
 
       // The FE treats any conversation_update as "refetch page 1", which is
       // what we want here — the row simply stops coming back.
-      emitConversationUpdate({ id: conversationId, deleted: true });
+      // The row is gone, so pass its number — the emit cannot look it up.
+      emitConversationUpdate({ id: conversationId, deleted: true, businessNumber: existing.businessNumber });
       if (existing.unreadCount > 0) {
-        emitUnreadCountUpdate(await getTotalUnread());
+        emitUnreadCountUpdate(conversationId, existing.businessNumber);
       }
 
       res.json({ success: true, data: { id: conversationId } });
