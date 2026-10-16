@@ -16,8 +16,14 @@ export interface ReportSummary {
         recipients: number;
         sent: number;
         delivered: number;
+        /** Accepted, carrier did not deliver (incl. expired). */
+        undeliverable: number;
+        /** Accepted, no final delivery report yet. */
+        pending: number;
+        /** Rejected / never accepted — not part of sent. */
         failed: number;
         suppressed: number;
+        /** Distinct contacts with a non-STOP reply. */
         replied: number;
         optedOut: number;
         deliveryRate: number | null;
@@ -69,11 +75,33 @@ export async function downloadReport(params: {
     URL.revokeObjectURL(url);
 }
 
+/**
+ * Count definitions (same as the backend's smsMetrics.ts):
+ *   sent = accepted by the provider (delivered + undeliverable + pending)
+ *   failed = rejected / never accepted (not part of sent)
+ *   replies = non-STOP inbound; repliers = distinct contacts; optOuts = STOP
+ */
+export const COUNT_DEFINITIONS = {
+    sent: 'Accepted by the SMS provider — delivered, undeliverable or still awaiting a delivery report.',
+    delivered: 'Confirmed delivered to the handset.',
+    undeliverable: 'Accepted by the provider but the carrier did not deliver it (includes expired).',
+    pending: 'Accepted, no final delivery report yet.',
+    unknown: 'Still awaiting a report after 7 days — we stopped asking and never guess an outcome.',
+    failed: 'Rejected by the provider or never accepted — not counted as sent.',
+    replies: 'Inbound messages, excluding STOP / opt-out keywords.',
+    repliers: 'Distinct contacts who sent at least one non-STOP reply.',
+    optOuts: 'Inbound STOP / opt-out messages.',
+    spend: 'Outbound SMS cost in USD (segments × price). From the Infobip export where backfilled, otherwise converted from the account currency.',
+} as const;
+
 export interface DashboardKpis {
     campaigns: number;
     recipients: number;
     sent: number;
     delivered: number;
+    undeliverable: number;
+    pending: number;
+    unknown: number;
     failed: number;
     replies: number;
     repliers: number;
@@ -81,7 +109,10 @@ export interface DashboardKpis {
     directSent: number;
     leadsImported: number;
     applications: number;
+    /** USD. */
     spend: number;
+    /** Sent messages with no USD cost recorded yet. */
+    unpriced: number;
 }
 
 export interface ReportDashboard {
@@ -89,8 +120,10 @@ export interface ReportDashboard {
     previousRange: { from: string; to: string };
     kpis: DashboardKpis;
     previous: DashboardKpis;
+    days?: { from: string; to: string; timezone: string };
     rates: {
         delivery: number | null;
+        undeliverable?: number | null;
         reply: number | null;
         optOut: number | null;
         failure: number | null;
@@ -98,8 +131,15 @@ export interface ReportDashboard {
         previousReply: number | null;
         previousOptOut: number | null;
     };
-    spend: { total: number; currency: string | null; perDelivered: number | null; perReplier: number | null };
-    daily: Array<{ day: string; sent: number; delivered: number; failed: number; replies: number; optOuts: number; applications: number }>;
+    spend: {
+        total: number;
+        currency: string | null;
+        unpriced?: number;
+        providerTotals?: Array<{ currency: string | null; total: number }>;
+        perDelivered: number | null;
+        perReplier: number | null;
+    };
+    daily: Array<{ day: string; sent: number; delivered: number; undeliverable?: number; failed: number; replies: number; optOuts: number; applications: number }>;
     campaigns: Array<{
         id: string;
         name: string;
@@ -109,6 +149,8 @@ export interface ReportDashboard {
         recipients: number;
         sent: number;
         delivered: number;
+        undeliverable?: number;
+        pending?: number;
         failed: number;
         suppressed: number;
         replied: number;

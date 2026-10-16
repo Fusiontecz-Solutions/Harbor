@@ -56,6 +56,7 @@ import {
     REPORT_SECTIONS,
     downloadReport,
     fetchReportDashboard,
+    COUNT_DEFINITIONS,
     type ReportDashboard,
     type ReportFormat,
     type ReportSectionId,
@@ -88,7 +89,9 @@ function isoDaysAgo(days: number): string {
 const fmt = (v: number | null | undefined) => (v == null ? '—' : v.toLocaleString());
 const fmtRate = (v: number | null | undefined) => (v == null ? '—' : `${v}%`);
 const fmtMoney = (v: number | null | undefined, currency?: string | null) =>
-    v == null ? '—' : `${currency ? `${currency} ` : '$'}${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+    v == null
+        ? '—'
+        : `${currency && currency !== 'USD' ? `${currency} ` : '$'}${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
 const fmtUsd = (v: number) => `$${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 const shortDay = (d: string) => new Date(`${d}T12:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 
@@ -118,6 +121,7 @@ function Kpi({
     sub,
     delta,
     tone,
+    hint,
 }: {
     icon: typeof Send;
     label: string;
@@ -125,9 +129,11 @@ function Kpi({
     sub?: string;
     delta?: React.ReactNode;
     tone?: string;
+    /** Definition shown on hover. */
+    hint?: string;
 }) {
     return (
-        <div className="rounded-xl border bg-card p-4">
+        <div className="rounded-xl border bg-card p-4" title={hint}>
             <div className="flex items-center justify-between">
                 <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                     <Icon className={cn('h-3.5 w-3.5', tone)} /> {label}
@@ -348,14 +354,14 @@ export default function Reports() {
                 <div className={cn('space-y-5 transition-opacity', isLoading && 'opacity-60')}>
                     {/* Headline KPIs */}
                     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                        <Kpi icon={Send} label="Messages sent" value={fmt(k!.sent)} sub={`${fmt(k!.sent - k!.directSent)} campaign · ${fmt(k!.directSent)} 1:1`} delta={<Delta now={k!.sent} before={p!.sent} />} />
-                        <Kpi icon={CheckCheck} label="Delivered" value={fmt(k!.delivered)} sub={`${fmtRate(r!.delivery)} delivery rate`} tone="text-emerald-600" delta={<Delta now={r!.delivery} before={r!.previousDelivery} unit="pt" />} />
-                        <Kpi icon={MessageSquare} label="Replies" value={fmt(k!.replies)} sub={`${fmt(k!.repliers)} people · ${fmtRate(r!.reply)} reply rate`} tone="text-sky-600" delta={<Delta now={k!.replies} before={p!.replies} />} />
-                        <Kpi icon={ShieldAlert} label="Opt-outs" value={fmt(k!.optOuts)} sub={`${fmtRate(r!.optOut)} of sent`} tone="text-rose-600" delta={<Delta now={r!.optOut} before={r!.previousOptOut} unit="pt" invert />} />
+                        <Kpi icon={Send} label="Messages sent" hint={COUNT_DEFINITIONS.sent} value={fmt(k!.sent)} sub={`${fmt(k!.sent - k!.directSent)} campaign · ${fmt(k!.directSent)} 1:1`} delta={<Delta now={k!.sent} before={p!.sent} />} />
+                        <Kpi icon={CheckCheck} label="Delivered" hint={COUNT_DEFINITIONS.delivered} value={fmt(k!.delivered)} sub={`${fmtRate(r!.delivery)} delivery rate`} tone="text-emerald-600" delta={<Delta now={r!.delivery} before={r!.previousDelivery} unit="pt" />} />
+                        <Kpi icon={MessageSquare} label="Replies" hint={`${COUNT_DEFINITIONS.replies} People: ${COUNT_DEFINITIONS.repliers}`} value={fmt(k!.replies)} sub={`${fmt(k!.repliers)} people · ${fmtRate(r!.reply)} reply rate`} tone="text-sky-600" delta={<Delta now={k!.replies} before={p!.replies} />} />
+                        <Kpi icon={ShieldAlert} label="Opt-outs" hint={COUNT_DEFINITIONS.optOuts} value={fmt(k!.optOuts)} sub={`${fmtRate(r!.optOut)} of sent`} tone="text-rose-600" delta={<Delta now={r!.optOut} before={r!.previousOptOut} unit="pt" invert />} />
                         <Kpi icon={Megaphone} label="Campaigns" value={fmt(k!.campaigns)} sub={`${fmt(k!.recipients)} recipients`} delta={<Delta now={k!.campaigns} before={p!.campaigns} />} />
                         <Kpi icon={Layers} label="Leads imported" value={fmt(k!.leadsImported)} sub={`${fmt(data.leads.batchesInPeriod)} uploads`} delta={<Delta now={k!.leadsImported} before={p!.leadsImported} />} />
                         <Kpi icon={Inbox} label="Applications" value={fmt(k!.applications)} sub={`${fmtUsd(data.applications.requestedAmount)} requested`} delta={<Delta now={k!.applications} before={p!.applications} />} />
-                        <Kpi icon={Banknote} label="Messaging spend" value={fmtMoney(data.spend.total, data.spend.currency)} sub={`${fmtMoney(data.spend.perReplier, data.spend.currency)} per replier`} delta={<Delta now={k!.spend} before={p!.spend} invert />} />
+                        <Kpi icon={Banknote} label="Messaging spend (USD)" hint={COUNT_DEFINITIONS.spend} value={fmtMoney(data.spend.total, data.spend.currency)} sub={`${fmtMoney(data.spend.perReplier, data.spend.currency)} per replier`} delta={<Delta now={k!.spend} before={p!.spend} invert />} />
                     </div>
 
                     {/* Trend */}
@@ -391,7 +397,8 @@ export default function Reports() {
                                         <>
                                             <Area type="monotone" dataKey="sent" name="Sent" stroke="#3b6fd8" fill="url(#sentFill)" strokeWidth={2} />
                                             <Line type="monotone" dataKey="delivered" name="Delivered" stroke="#13a06f" strokeWidth={2} dot={false} />
-                                            <Bar dataKey="failed" name="Failed" fill="#e5484d" radius={[3, 3, 0, 0]} maxBarSize={14} />
+                                            <Bar dataKey="undeliverable" name="Undeliverable" fill="#f59e0b" radius={[3, 3, 0, 0]} maxBarSize={14} />
+                                            <Bar dataKey="failed" name="Failed (not sent)" fill="#e5484d" radius={[3, 3, 0, 0]} maxBarSize={14} />
                                         </>
                                     ) : (
                                         <>
@@ -412,6 +419,8 @@ export default function Reports() {
                                 const stages = [
                                     { label: 'Sent', value: k!.sent, color: 'bg-blue-500' },
                                     { label: 'Delivered', value: k!.delivered, color: 'bg-emerald-500' },
+                                    { label: 'Undeliverable', value: k!.undeliverable, color: 'bg-amber-500' },
+                                    { label: 'Awaiting report', value: k!.pending, color: 'bg-slate-400' },
                                     { label: 'Replied (people)', value: k!.repliers, color: 'bg-sky-500' },
                                     { label: 'Opted out', value: k!.optOuts, color: 'bg-rose-500' },
                                 ];
@@ -427,17 +436,28 @@ export default function Reports() {
                                 ));
                             })()}
                             <p className="mt-2 text-[11px] text-muted-foreground">
-                                {fmt(k!.failed)} failed ({fmtRate(r!.failure)} of sent).
+                                <span title={COUNT_DEFINITIONS.failed}>{fmt(k!.failed)} failed — rejected or never sent, not part of sent ({fmtRate(r!.failure)} of attempts).</span>
+                                {k!.unknown > 0 && <span title={COUNT_DEFINITIONS.unknown}> {fmt(k!.unknown)} still unknown after 7 days.</span>}
                             </p>
                         </Panel>
 
-                        <Panel title="Spend" icon={Banknote} hint="As billed by the SMS provider">
+                        <Panel title="Spend (USD)" icon={Banknote} hint="Segments × provider price, in US dollars">
                             <p className="text-3xl font-semibold tabular-nums">{fmtMoney(data.spend.total, data.spend.currency)}</p>
                             <dl className="mt-3 space-y-2 text-sm">
                                 <div className="flex justify-between"><dt className="text-muted-foreground">Per delivered message</dt><dd className="font-medium">{fmtMoney(data.spend.perDelivered, data.spend.currency)}</dd></div>
                                 <div className="flex justify-between"><dt className="text-muted-foreground">Per person who replied</dt><dd className="font-medium">{fmtMoney(data.spend.perReplier, data.spend.currency)}</dd></div>
                                 <div className="flex justify-between"><dt className="text-muted-foreground">Previous period</dt><dd className="font-medium">{fmtMoney(p!.spend, data.spend.currency)}</dd></div>
+                                {(data.spend.providerTotals ?? [])
+                                    .filter((t) => t.currency && t.currency !== 'USD')
+                                    .map((t) => (
+                                        <div key={t.currency} className="flex justify-between"><dt className="text-muted-foreground">Billed in account currency</dt><dd className="font-medium">{fmtMoney(t.total, t.currency)}</dd></div>
+                                    ))}
                             </dl>
+                            {(data.spend.unpriced ?? 0) > 0 && (
+                                <p className="mt-2 text-[11px] text-muted-foreground">
+                                    {fmt(data.spend.unpriced ?? 0)} sent messages have no USD cost yet and are not included.
+                                </p>
+                            )}
                         </Panel>
 
                         <Panel title="Lead pipeline" icon={Users} hint={`${fmt(data.leads.total)} leads on file`}>

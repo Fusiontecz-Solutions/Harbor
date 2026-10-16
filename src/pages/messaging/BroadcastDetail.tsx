@@ -6,7 +6,7 @@
  * also shows a grouped breakdown of *why* — "1,204 × Absent Subscriber" tells
  * an operator something actionable, where 1,204 identical rows does not.
  *
- * Buckets available: delivered, sent, queued, failed, undeliverable,
+ * Buckets available: delivered, sent, pending, queued, failed, undeliverable,
  * suppressed, replied, opted-out.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -42,6 +42,7 @@ import {
     TableRow,
 } from '@/components/ui/table';
 import { cn } from '@/lib/utils';
+import { COUNT_DEFINITIONS } from '@/services/reports/reportsApi';
 import { isAgentRole } from '@/lib/agentAccess';
 import { resolveEffectiveRole } from '@/lib/sessionRole';
 import { useSocket } from '@/context/SocketContext';
@@ -65,22 +66,34 @@ interface Tile {
     value: (b: BroadcastSummary) => number;
     icon: typeof Send;
     tone: string;
+    /** Definition shown on hover — same wording as Reports. */
+    hint: string;
 }
 
 const TILES: Tile[] = [
-    { bucket: 'queued', label: 'Queued', value: (b) => b.queuedCount, icon: Clock, tone: 'text-sky-600' },
-    { bucket: 'sent', label: 'Sent', value: (b) => b.sentCount, icon: Send, tone: 'text-indigo-600' },
-    { bucket: 'delivered', label: 'Delivered', value: (b) => b.deliveredCount, icon: CheckCheck, tone: 'text-emerald-600' },
-    { bucket: 'failed', label: 'Failed', value: (b) => b.failedCount, icon: XCircle, tone: 'text-red-600' },
-    { bucket: 'suppressed', label: 'Suppressed', value: (b) => b.suppressedCount, icon: ShieldOff, tone: 'text-amber-600' },
-    { bucket: 'replied', label: 'Replied', value: (b) => b.repliedCount, icon: MessageSquare, tone: 'text-emerald-700' },
-    { bucket: 'opted-out', label: 'Opted out', value: (b) => b.optOutCount, icon: Ban, tone: 'text-rose-600' },
+    { bucket: 'queued', label: 'Queued', value: (b) => b.queuedCount, icon: Clock, tone: 'text-sky-600', hint: 'Not handed to the provider yet' },
+    { bucket: 'sent', label: 'Sent', value: (b) => b.sentCount, icon: Send, tone: 'text-indigo-600', hint: COUNT_DEFINITIONS.sent },
+    { bucket: 'delivered', label: 'Delivered', value: (b) => b.deliveredCount, icon: CheckCheck, tone: 'text-emerald-600', hint: COUNT_DEFINITIONS.delivered },
+    {
+        bucket: 'pending',
+        label: 'Awaiting report',
+        value: (b) => b.pendingCount ?? Math.max(0, b.sentCount - b.deliveredCount - (b.undeliverableCount ?? 0)),
+        icon: Clock,
+        tone: 'text-slate-500',
+        hint: COUNT_DEFINITIONS.pending,
+    },
+    { bucket: 'undeliverable', label: 'Undeliverable', value: (b) => b.undeliverableCount ?? 0, icon: XCircle, tone: 'text-amber-600', hint: COUNT_DEFINITIONS.undeliverable },
+    { bucket: 'failed', label: 'Failed', value: (b) => b.failedCount, icon: XCircle, tone: 'text-red-600', hint: COUNT_DEFINITIONS.failed },
+    { bucket: 'suppressed', label: 'Suppressed', value: (b) => b.suppressedCount, icon: ShieldOff, tone: 'text-amber-600', hint: 'Skipped before sending (opt-out, DNC or block)' },
+    { bucket: 'replied', label: 'Replied', value: (b) => b.repliedCount, icon: MessageSquare, tone: 'text-emerald-700', hint: COUNT_DEFINITIONS.repliers },
+    { bucket: 'opted-out', label: 'Opted out', value: (b) => b.optOutCount, icon: Ban, tone: 'text-rose-600', hint: 'Distinct contacts who replied STOP' },
 ];
 
 const BUCKET_LABEL: Record<string, string> = {
     all: 'All recipients',
     queued: 'Queued',
     sent: 'Sent',
+    pending: 'Awaiting delivery report',
     delivered: 'Delivered',
     failed: 'Failed',
     undeliverable: 'Undeliverable',
@@ -278,7 +291,7 @@ export default function BroadcastDetail() {
             </div>
 
             {/* Clickable stat tiles */}
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
+            <div className="grid grid-cols-2 gap-3 md:grid-cols-5 xl:grid-cols-9">
                 {TILES.map((tile) => {
                     const Icon = tile.icon;
                     const isActive = bucket === tile.bucket;
@@ -286,6 +299,7 @@ export default function BroadcastDetail() {
                         <button
                             key={tile.bucket}
                             type="button"
+                            title={tile.hint}
                             onClick={() => selectBucket(tile.bucket)}
                             className={cn(
                                 'rounded-lg border p-3 text-left transition-colors hover:bg-muted/60',

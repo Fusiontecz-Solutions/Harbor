@@ -104,6 +104,8 @@ export interface BroadcastSummary {
     approvedAt?: string | null;
     throttlePerSecond?: number | null;
     undeliverableCount?: number;
+    /** Accepted, no final delivery report yet (sent − delivered − undeliverable). */
+    pendingCount?: number;
     leadBatchName?: string | null;
     parentName?: string | null;
     createdByName?: string | null;
@@ -115,10 +117,16 @@ export interface BroadcastTotals {
     campaigns: number;
     byStatus: Record<string, number>;
     recipients: number;
+    /** Accepted by the provider (delivered + undeliverable + pending). */
     sent: number;
     delivered: number;
+    /** Accepted, carrier did not deliver (incl. expired). */
+    undeliverable?: number;
+    pending?: number;
+    /** Rejected / never accepted — not part of sent. */
     failed: number;
     suppressed: number;
+    /** Distinct contacts with a non-STOP reply. */
     replied: number;
     optedOut: number;
     queued: number;
@@ -200,6 +208,7 @@ export type AudienceBucket =
     | 'queued'
     | 'sending'
     | 'sent'
+    | 'pending'
     | 'delivered'
     | 'failed'
     | 'undeliverable'
@@ -771,6 +780,7 @@ export interface PerformanceUserRow {
     senderNumber: string | null;
     messagesSent: number;
     delivered: number;
+    undeliverable?: number;
     failed: number;
     campaigns: number;
     replies: number;
@@ -791,6 +801,7 @@ export interface PerformanceResult {
     totals: {
         messagesSent: number;
         delivered: number;
+        undeliverable?: number;
         failed: number;
         campaigns: number;
         replies: number;

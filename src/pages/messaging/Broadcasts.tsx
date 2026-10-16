@@ -116,7 +116,8 @@ function formatDuration(from: string | null | undefined, to: string | null | und
     return h ? `${h}h ${m}m` : `${m}m`;
 }
 
-const failedOf = (b: BroadcastSummary) => b.failedCount + (b.undeliverableCount ?? 0);
+/** Rejected / never accepted — not part of sent. Undeliverable is separate. */
+const failedOf = (b: BroadcastSummary) => b.failedCount;
 
 export default function Broadcasts() {
     const { socket } = useSocket();
@@ -270,9 +271,9 @@ export default function Broadcasts() {
                 <div className="grid grid-cols-2 divide-x divide-y sm:grid-cols-3 lg:grid-cols-6 lg:divide-y-0">
                     <Kpi icon={Megaphone} label="Campaigns" value={t?.campaigns} hint={`${byStatus.COMPLETED ?? 0} completed`} />
                     <Kpi icon={Users} label="Recipients" value={t?.recipients} hint={t ? `${(t.suppressed).toLocaleString()} suppressed` : undefined} />
-                    <Kpi icon={Send} label="Sent" value={t?.sent} hint={t && t.queued > 0 ? `${t.queued.toLocaleString()} still queued` : 'all handed to carrier'} />
+                    <Kpi icon={Send} label="Sent" value={t?.sent} hint={t && t.queued > 0 ? `${t.queued.toLocaleString()} still queued` : 'accepted by the provider'} />
                     <Kpi icon={CheckCheck} label="Delivered" value={t?.delivered} rateValue={t ? rate(t.delivered, t.sent) : null} rateLabel="delivery rate" tone="text-emerald-600" bar="bg-emerald-500" />
-                    <Kpi icon={MessageSquare} label="Replies" value={t?.replied} rateValue={t ? rate(t.replied, t.sent) : null} rateLabel="reply rate" tone="text-sky-600" bar="bg-sky-500" />
+                    <Kpi icon={MessageSquare} label="Replied" value={t?.replied} rateValue={t ? rate(t.replied, t.sent) : null} rateLabel="reply rate" tone="text-sky-600" bar="bg-sky-500" />
                     <Kpi icon={ShieldAlert} label="Opt-outs" value={t?.optedOut} rateValue={t ? rate(t.optedOut, t.sent) : null} rateLabel="opt-out rate" tone="text-rose-600" bar="bg-rose-500" />
                 </div>
 
@@ -281,7 +282,14 @@ export default function Broadcasts() {
                         <div className="mb-1.5 flex items-center justify-between text-xs text-muted-foreground">
                             <span className="font-medium text-foreground">Overall funnel</span>
                             <span>
-                                {t.failed.toLocaleString()} failed ({fmtRate(rate(t.failed, t.sent))} of sent)
+                                <span title="Accepted by the provider, but the carrier did not deliver it (includes expired)">
+                                    {(t.undeliverable ?? 0).toLocaleString()} undeliverable ({fmtRate(rate(t.undeliverable ?? 0, t.sent))} of sent)
+                                </span>
+                                {' · '}
+                                <span title="Rejected by the provider or never accepted — not counted as sent">
+                                    {t.failed.toLocaleString()} failed
+                                </span>
+                                {(t.pending ?? 0) > 0 && ` · ${(t.pending ?? 0).toLocaleString()} awaiting report`}
                             </span>
                         </div>
                         <FunnelStrip
@@ -572,10 +580,12 @@ function CampaignCard({
     onOpen: () => void;
 }) {
     const failed = failedOf(b);
+    const undeliverable = b.undeliverableCount ?? 0;
     const total = Math.max(1, b.totalRecipients);
-    const inFlight = Math.max(0, b.sentCount - b.deliveredCount - failed);
-    const notYet = Math.max(0, b.totalRecipients - b.sentCount - b.suppressedCount - (b.sentCount ? 0 : failed));
-    const progress = Math.min(100, Math.round(((b.sentCount + b.suppressedCount) / total) * 100));
+    // sent = delivered + undeliverable + pending (accepted, no final report).
+    const inFlight = b.pendingCount ?? Math.max(0, b.sentCount - b.deliveredCount - undeliverable);
+    const notYet = Math.max(0, b.totalRecipients - b.sentCount - b.suppressedCount - failed);
+    const progress = Math.min(100, Math.round(((b.sentCount + b.suppressedCount + failed) / total) * 100));
     const duration = formatDuration(b.startedAt, b.finishedAt);
     // Once a campaign is over, a missing delivery report will not arrive later.
     const isOver = b.status === 'COMPLETED' || b.status === 'CANCELLED' || b.status === 'FAILED';
@@ -583,7 +593,8 @@ function CampaignCard({
     const segments: Array<{ value: number; cls: string; label: string }> = [
         { value: b.deliveredCount, cls: 'bg-emerald-500', label: 'Delivered' },
         { value: inFlight, cls: 'bg-blue-400', label: isOver ? 'No delivery report' : 'Awaiting report' },
-        { value: failed, cls: 'bg-red-500', label: 'Failed' },
+        { value: undeliverable, cls: 'bg-amber-500', label: 'Undeliverable' },
+        { value: failed, cls: 'bg-red-500', label: 'Failed (not sent)' },
         { value: b.suppressedCount, cls: 'bg-zinc-400', label: 'Suppressed' },
         { value: notYet, cls: 'bg-muted-foreground/20', label: isOver ? 'Not sent' : 'Not sent yet' },
     ];
@@ -683,7 +694,12 @@ function CampaignCard({
                 <Metric label="Delivered" value={b.deliveredCount} sub={`${fmtRate(rate(b.deliveredCount, b.sentCount))} delivery`} tone="text-emerald-600" />
                 <Metric label="Replied" value={b.repliedCount} sub={`${fmtRate(rate(b.repliedCount, b.deliveredCount))} of delivered`} tone="text-sky-600" />
                 <Metric label="Opt-outs" value={b.optOutCount} sub={`${fmtRate(rate(b.optOutCount, b.sentCount))} of sent`} tone="text-rose-600" />
-                <Metric label="Failed" value={failed} sub={`${fmtRate(rate(failed, b.sentCount))} of sent`} tone={failed ? 'text-red-600' : undefined} />
+                <Metric
+                    label="Undeliverable"
+                    value={undeliverable}
+                    sub={`${fmtRate(rate(undeliverable, b.sentCount))} of sent${failed ? ` · ${failed.toLocaleString()} failed` : ''}`}
+                    tone={undeliverable || failed ? 'text-red-600' : undefined}
+                />
             </div>
 
             {/* Timeline */}
