@@ -19,6 +19,7 @@ import {
   listMessages,
   markConversationRead,
   markConversationUnread,
+  softDeleteConversation,
 } from '../services/messaging/conversation.service';
 import {
   getPushPublicKey,
@@ -56,9 +57,10 @@ const errorStatus = (err: unknown, fallback: number): number =>
 async function findVisibleConversation(req: Request, conversationId: string) {
   const conversation = await prisma.messagingConversation.findUnique({
     where: { id: conversationId },
-    select: { id: true, businessNumber: true, unreadCount: true },
+    select: { id: true, businessNumber: true, unreadCount: true, deletedAt: true },
   });
-  if (!conversation) return null;
+  // A soft-deleted thread is gone as far as the inbox is concerned.
+  if (!conversation || conversation.deletedAt) return null;
   const allowed = await visibleSendersForUser(actorId(req), req.user?.role);
   if (allowed && !allowed.includes(conversation.businessNumber)) return null;
   return conversation;
@@ -139,6 +141,7 @@ class MessagingController {
         businessNumber,
         contactNumber,
         ownerUserId: actorId(req),
+        restore: true,
       });
 
       res.status(201).json({ success: true, data: conversation });
@@ -336,8 +339,10 @@ class MessagingController {
   /**
    * DELETE /messaging/conversations/:id
    *
-   * Removes the thread and its history. `MessagingMessage.conversationId`
-   * cascades, so the single delete takes the messages with it.
+   * Hides the thread from the inbox (soft delete). Its messages are KEPT:
+   * hard-deleting them used to make campaign, report and performance counts
+   * drop after the fact. A new inbound message from the contact brings the
+   * thread back.
    *
    * Deliberately NOT deleted: the MessagingContact record and any suppression
    * entry. Deleting a chat is a housekeeping action on the inbox — it must
@@ -354,11 +359,11 @@ class MessagingController {
         return;
       }
 
-      await prisma.messagingConversation.delete({ where: { id: conversationId } });
+      await softDeleteConversation(conversationId);
 
       // The FE treats any conversation_update as "refetch page 1", which is
       // what we want here — the row simply stops coming back.
-      // The row is gone, so pass its number — the emit cannot look it up.
+      // Pass its number so the emit reaches the right sender room.
       emitConversationUpdate({ id: conversationId, deleted: true, businessNumber: existing.businessNumber });
       if (existing.unreadCount > 0) {
         emitUnreadCountUpdate(conversationId, existing.businessNumber);

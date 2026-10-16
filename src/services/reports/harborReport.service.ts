@@ -15,6 +15,8 @@ import { contactDisplayName } from '../messaging/contactName';
 import { collectBroadcastDetails } from './broadcastDetail.service';
 import { renderReportPdf } from './harborReportPdf.service';
 import { renderReportExcel } from './harborReportExcel.service';
+import { addDays, zonedDay, zonedMidnight } from './reportTime';
+import { SENT_MESSAGE_WHERE } from '../messaging/smsMetrics';
 
 export const REPORT_SECTIONS = ['broadcasts', 'inbox', 'agents', 'applications'] as const;
 export type ReportSection = (typeof REPORT_SECTIONS)[number];
@@ -33,18 +35,22 @@ export type Row = Record<string, string | number | boolean | Date | null>;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** `from` / `to` are YYYY-MM-DD (inclusive). Defaults to the last 30 days. */
+/**
+ * `from` / `to` are YYYY-MM-DD (inclusive) US Eastern days. Defaults to the
+ * last 30 Eastern days. Bounds are Eastern midnights, so a range and its daily
+ * buckets agree (both used to disagree by 4–5 hours with UTC midnights).
+ */
 export function parseReportRange(fromRaw: unknown, toRaw: unknown): ReportRange {
-  const parse = (v: unknown): Date | null => {
+  const parse = (v: unknown): string | null => {
     const s = String(v ?? '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
-    const d = new Date(`${s}T00:00:00.000Z`);
-    return Number.isNaN(d.getTime()) ? null : d;
+    return Number.isNaN(new Date(`${s}T00:00:00.000Z`).getTime()) ? null : s;
   };
-  const toDay = parse(toRaw) ?? new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z');
-  const from = parse(fromRaw) ?? new Date(toDay.getTime() - 29 * DAY_MS);
-  // Inclusive end date → exclusive bound at the start of the next day.
-  const to = new Date(toDay.getTime() + DAY_MS);
+  const toDay = parse(toRaw) ?? zonedDay(new Date());
+  const fromDay = parse(fromRaw) ?? addDays(toDay, -29);
+  const from = zonedMidnight(fromDay);
+  // Inclusive end date → exclusive bound at the start of the next Eastern day.
+  const to = zonedMidnight(addDays(toDay, 1));
   if (from >= to) throw Object.assign(new Error('"from" must be on or before "to"'), { statusCode: 400 });
   return { from, to };
 }
@@ -109,10 +115,12 @@ export async function buildReportSummary(range: ReportRange) {
         },
       }),
       prisma.smsBroadcast.count({ where: { createdAt: inRange(range) } }),
-      prisma.messagingMessage.count({ where: { direction: 'INBOUND', createdAt: inRange(range) } }),
-      prisma.messagingMessage.count({ where: { direction: 'OUTBOUND', createdAt: inRange(range) } }),
+      // Replies = non-STOP inbound; STOP is counted as an opt-out only.
+      prisma.messagingMessage.count({ where: { direction: 'INBOUND', isStopKeyword: false, createdAt: inRange(range) } }),
+      // Sent = accepted by the provider (smsMetrics), not every outbound row.
+      prisma.messagingMessage.count({ where: { ...SENT_MESSAGE_WHERE, createdAt: inRange(range) } }),
       prisma.messagingMessage.count({ where: { direction: 'INBOUND', isStopKeyword: true, createdAt: inRange(range) } }),
-      prisma.messagingConversation.count({ where: { lastMessageAt: inRange(range) } }),
+      prisma.messagingConversation.count({ where: { lastMessageAt: inRange(range), deletedAt: null } }),
       prisma.application.groupBy({
         by: ['currentQueue'],
         where: { createdAt: inRange(range), deletedAt: null },
@@ -130,13 +138,16 @@ export async function buildReportSummary(range: ReportRange) {
       recipients: s.totalRecipients ?? 0,
       sent,
       delivered: s.deliveredCount ?? 0,
-      failed: (s.failedCount ?? 0) + (s.undeliverableCount ?? 0),
+      failed: s.failedCount ?? 0,
+      undeliverable: s.undeliverableCount ?? 0,
+      pending: Math.max(0, sent - (s.deliveredCount ?? 0) - (s.undeliverableCount ?? 0)),
       suppressed: s.suppressedCount ?? 0,
       replied: s.repliedCount ?? 0,
       optedOut: s.optOutCount ?? 0,
       deliveryRate: pct(s.deliveredCount ?? 0, sent),
       replyRate: pct(s.repliedCount ?? 0, sent),
     },
+    // messagesReceived = replies (non-STOP inbound); optOuts = STOP inbound.
     inbox: { activeConversations: conversations, messagesSent: outbound, messagesReceived: inbound, optOuts },
     leads: { imported: leads },
     applications: {
@@ -189,7 +200,8 @@ export async function broadcastSheets(range: ReportRange, names: Map<string, str
     'Failed': b.failedCount,
     'Undeliverable': b.undeliverableCount,
     'Suppressed': b.suppressedCount,
-    'Replied': b.repliedCount,
+    'Pending': Math.max(0, b.sentCount - b.deliveredCount - b.undeliverableCount),
+    'Replied (contacts)': b.repliedCount,
     'Opted Out': b.optOutCount,
     'Delivery Rate %': pct(b.deliveredCount, b.sentCount),
     'Reply Rate %': pct(b.repliedCount, b.sentCount),
@@ -206,7 +218,7 @@ export async function broadcastSheets(range: ReportRange, names: Map<string, str
       ...cursorArgs(cursor),
     }),
   );
-  const repliedKey = new Set(replies.map((r) => `${r.broadcastId}|${r.fromNumber}`));
+  const repliedKey = new Set(replies.filter((r) => !r.isStopKeyword).map((r) => `${r.broadcastId}|${r.fromNumber}`));
   const optedKey = new Set(replies.filter((r) => r.isStopKeyword).map((r) => `${r.broadcastId}|${r.fromNumber}`));
   const firstReplyAt = new Map<string, Date>();
   for (const r of replies) {
@@ -219,7 +231,7 @@ export async function broadcastSheets(range: ReportRange, names: Map<string, str
   const outbound = await pageAll((cursor) =>
     prisma.messagingMessage.findMany({
       where: { broadcastId: { in: ids }, direction: 'OUTBOUND' },
-      select: { id: true, broadcastId: true, toNumber: true, status: true, deliveredAt: true, segmentCount: true, priceAmount: true, priceCurrency: true, errorMessage: true },
+      select: { id: true, broadcastId: true, toNumber: true, status: true, deliveredAt: true, segmentCount: true, priceAmount: true, priceCurrency: true, costAmount: true, costUsd: true, errorMessage: true },
       ...cursorArgs(cursor),
     }),
   );
@@ -252,8 +264,10 @@ export async function broadcastSheets(range: ReportRange, names: Map<string, str
       'Sent At': r.sentAt,
       'Delivered At': msg?.deliveredAt ?? null,
       'Segments': msg?.segmentCount ?? null,
-      'Price': num(msg?.priceAmount),
+      'Price / Segment': num(msg?.priceAmount),
+      'Cost': num(msg?.costAmount),
       'Currency': msg?.priceCurrency ?? null,
+      'Cost (USD)': num(msg?.costUsd),
       'Error Code': r.errorCode,
       'Error': r.errorMessage ?? msg?.errorMessage ?? null,
       'Suppressed Reason': r.suppressedReason,
@@ -307,6 +321,7 @@ export async function inboxSheets(range: ReportRange, names: Map<string, string>
       'Blocked': c.contact?.status === 'BLOCKED',
       'Disposition': c.contact?.disposition ?? null,
       'Archived': c.isArchived,
+      'Deleted At': c.deletedAt,
       'Last Message': c.lastMessageText,
       'Last Direction': c.lastMessageDirection,
       'Last Message At': c.lastMessageAt,
@@ -336,8 +351,10 @@ export async function inboxSheets(range: ReportRange, names: Map<string, string>
       'Sent By': m.sentById ? names.get(m.sentById) ?? m.sentById : null,
       'Is STOP': m.isStopKeyword,
       'Segments': m.segmentCount,
-      'Price': num(m.priceAmount),
+      'Price / Segment': num(m.priceAmount),
+      'Cost': num(m.costAmount),
       'Currency': m.priceCurrency,
+      'Cost (USD)': num(m.costUsd),
       'Sent At': m.sentAt,
       'Delivered At': m.deliveredAt,
       'Error Code': m.errorCode,
@@ -359,13 +376,13 @@ export async function agentSheet(range: ReportRange): Promise<Array<[string, Row
   const [leads, dispositions, convs, sent, broadcastSent, received, optOuts, campaigns] = await Promise.all([
     prisma.messagingContact.groupBy({ by: ['ownerUserId'], _count: { _all: true } }),
     prisma.messagingContact.groupBy({ by: ['ownerUserId', 'disposition'], _count: { _all: true } }),
-    prisma.messagingConversation.groupBy({ by: ['ownerUserId'], where: { lastMessageAt: inRange(range) }, _count: { _all: true } }),
-    prisma.messagingMessage.groupBy({ by: ['sentById'], where: { direction: 'OUTBOUND', broadcastId: null, createdAt: inRange(range) }, _count: { _all: true } }),
-    prisma.messagingMessage.groupBy({ by: ['sentById'], where: { direction: 'OUTBOUND', broadcastId: { not: null }, createdAt: inRange(range) }, _count: { _all: true } }),
+    prisma.messagingConversation.groupBy({ by: ['ownerUserId'], where: { lastMessageAt: inRange(range), deletedAt: null }, _count: { _all: true } }),
+    prisma.messagingMessage.groupBy({ by: ['sentById'], where: { ...SENT_MESSAGE_WHERE, broadcastId: null, createdAt: inRange(range) }, _count: { _all: true } }),
+    prisma.messagingMessage.groupBy({ by: ['sentById'], where: { ...SENT_MESSAGE_WHERE, broadcastId: { not: null }, createdAt: inRange(range) }, _count: { _all: true } }),
     prisma.$queryRaw<Array<{ ownerUserId: string | null; n: bigint }>>`
       SELECT c."ownerUserId", COUNT(*)::bigint AS n FROM "MessagingMessage" m
         JOIN "MessagingConversation" c ON c.id = m."conversationId"
-       WHERE m.direction = 'INBOUND' AND m."createdAt" >= ${range.from} AND m."createdAt" < ${range.to}
+       WHERE m.direction = 'INBOUND' AND NOT m."isStopKeyword" AND m."createdAt" >= ${range.from} AND m."createdAt" < ${range.to}
        GROUP BY c."ownerUserId"`,
     prisma.$queryRaw<Array<{ ownerUserId: string | null; n: bigint }>>`
       SELECT c."ownerUserId", COUNT(*)::bigint AS n FROM "MessagingMessage" m
@@ -511,9 +528,9 @@ export async function applicationSheet(range: ReportRange, names: Map<string, st
 export async function buildReportPdf(range: ReportRange, sections: ReportSection[]): Promise<Buffer> {
   const names = await userNames();
   const summary = await buildReportSummary(range);
-  const lastDay = new Date(range.to.getTime() - DAY_MS).toISOString().slice(0, 10);
+  const lastDay = zonedDay(new Date(range.to.getTime() - 1));
   return renderReportPdf({
-    periodLabel: `${range.from.toISOString().slice(0, 10)} to ${lastDay}`,
+    periodLabel: `${zonedDay(range.from)} to ${lastDay} (US Eastern)`,
     generatedAt: new Date(),
     summary,
     broadcasts: sections.includes('broadcasts') ? await collectBroadcastDetails(range, names) : [],
@@ -537,21 +554,23 @@ export async function buildReportWorkbook(range: ReportRange, sections: ReportSe
   if (sections.includes('agents')) sheets.push(...(await agentSheet(range)));
   if (sections.includes('applications')) sheets.push(...(await applicationSheet(range, names)));
 
-  const lastDay = new Date(range.to.getTime() - DAY_MS).toISOString().slice(0, 10);
+  const lastDay = zonedDay(new Date(range.to.getTime() - 1));
   const b = summary.broadcasts;
   const overview: Array<[string, string | number | null]> = [
     ['Broadcast campaigns', b.campaigns],
     ['Broadcast recipients', b.recipients],
     ['Broadcast messages sent', b.sent],
     ['Delivered', b.delivered],
-    ['Failed / undeliverable', b.failed],
+    ['Pending (no final receipt)', b.pending],
+    ['Undeliverable (carrier)', b.undeliverable],
+    ['Failed (rejected / not sent)', b.failed],
     ['Suppressed', b.suppressed],
-    ['Replied', b.replied],
+    ['Replied (contacts, excl. STOP)', b.replied],
     ['Opted out', b.optedOut],
     ['Delivery rate', b.deliveryRate],
     ['Reply rate', b.replyRate],
-    ['Messages sent (all)', summary.inbox.messagesSent],
-    ['Messages received', summary.inbox.messagesReceived],
+    ['Messages sent (accepted by provider)', summary.inbox.messagesSent],
+    ['Replies received (excl. STOP)', summary.inbox.messagesReceived],
     ['Opt-outs (STOP)', summary.inbox.optOuts],
     ['Active conversations', summary.inbox.activeConversations],
     ['Leads imported', summary.leads.imported],
@@ -563,7 +582,7 @@ export async function buildReportWorkbook(range: ReportRange, sections: ReportSe
     .map(([name]) => `Note: "${name}" is limited to the first ${MAX_SHEET_ROWS.toLocaleString()} rows.`);
 
   return renderReportExcel({
-    periodLabel: `${range.from.toISOString().slice(0, 10)} to ${lastDay}`,
+    periodLabel: `${zonedDay(range.from)} to ${lastDay} (US Eastern)`,
     generatedAt: new Date(),
     overview,
     broadcasts: details,

@@ -118,11 +118,12 @@ function hourChart(title: string, values: number[], cls: string): string {
 
 function breakdownTable(title: string, rows: Breakdown[]): string {
   return `<h3>${esc(title)}</h3>${table(
-    ['', 'Recipients', 'Delivered', 'Failed', 'Replied', 'Reply %', 'Opted out', 'Interested'],
+    ['', 'Recipients', 'Delivered', 'Undeliverable', 'Failed', 'Replied', 'Reply %', 'Opted out', 'Interested'],
     rows.map((r) => [
       esc(r.label),
       n(r.recipients),
       n(r.delivered),
+      n(r.undeliverable),
       n(r.failed),
       n(r.replied),
       p(r.delivered ? Math.round((r.replied / r.delivered) * 1000) / 10 : null),
@@ -137,7 +138,7 @@ function broadcastSection(b: BroadcastDetail): string {
   const f = b.funnel;
   const r = b.rates;
   const counterMismatch =
-    b.counters.delivered !== f.delivered || b.counters.replied !== f.totalReplies
+    b.counters.delivered !== f.delivered || b.counters.replied !== f.replied
       ? `<p class="note">Live counters on the campaign read ${n(b.counters.sent)} sent / ${n(b.counters.delivered)} delivered / ${n(
           b.counters.replied,
         )} replies; figures in this report are recounted from the individual message records.</p>`
@@ -158,7 +159,8 @@ function broadcastSection(b: BroadcastDetail): string {
     ${kpi('Recipients', n(f.recipients))}
     ${kpi('Sent', n(f.sent))}
     ${kpi('Delivered', n(f.delivered), 'good')}
-    ${kpi('Failed', n(f.failed), f.failed ? 'bad' : '')}
+    ${kpi('Undeliverable', n(f.undeliverable), f.undeliverable ? 'warn' : '')}
+    ${kpi('Failed (not sent)', n(f.failed), f.failed ? 'bad' : '')}
     ${kpi('Replied', n(f.replied), 'good')}
     ${kpi('Opted out', n(f.optedOut), f.optedOut ? 'warn' : '')}
   </div>
@@ -195,10 +197,11 @@ function broadcastSection(b: BroadcastDetail): string {
       ${kv([
         ['Suppressed before send', n(f.suppressed)],
         ['Delivered', `${n(f.delivered)} (${p(r.delivery)})`],
-        ['Failed / undeliverable', `${n(f.failed)} (${p(r.failure)})`],
+        ['Undeliverable (carrier, incl. expired)', `${n(f.undeliverable)} (${p(r.undeliverable)})`],
+        ['Failed (rejected / not sent)', `${n(f.failed)} (${p(r.failure)})`],
         ['Awaiting delivery report', n(f.pending)],
         ['Still queued', n(f.stillQueued)],
-        ['Unique repliers / total replies', `${n(f.replied)} / ${n(f.totalReplies)}`],
+        ['Unique repliers / total replies (excl. STOP)', `${n(f.replied)} / ${n(f.totalReplies)}`],
         ['Interested / not interested', `${n(f.interested)} / ${n(f.notInterested)}`],
       ])}
     </div>

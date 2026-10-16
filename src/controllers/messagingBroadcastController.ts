@@ -54,6 +54,7 @@ const AUDIENCE_BUCKETS = new Set<AudienceBucket>([
   'queued',
   'sending',
   'sent',
+  'pending',
   'delivered',
   'failed',
   'undeliverable',
@@ -365,6 +366,7 @@ class MessagingBroadcastController {
         success: true,
         data: items.map(({ createdBy, approvedBy, ...b }) => ({
           ...b,
+          pendingCount: Math.max(0, b.sentCount - b.deliveredCount - b.undeliverableCount),
           createdByName: fullName(createdBy),
           approvedByName: fullName(approvedBy),
           leadBatchName: b.leadBatchId ? batchName.get(b.leadBatchId) ?? null : null,
@@ -376,8 +378,16 @@ class MessagingBroadcastController {
           recipients: sums._sum.totalRecipients ?? 0,
           sent: sums._sum.sentCount ?? 0,
           delivered: sums._sum.deliveredCount ?? 0,
-          failed: (sums._sum.failedCount ?? 0) + (sums._sum.undeliverableCount ?? 0),
+          // Definitions: smsMetrics.ts. Failed (rejected / never accepted) and
+          // undeliverable (accepted, carrier did not deliver) are separate.
+          failed: sums._sum.failedCount ?? 0,
+          undeliverable: sums._sum.undeliverableCount ?? 0,
+          pending: Math.max(
+            0,
+            (sums._sum.sentCount ?? 0) - (sums._sum.deliveredCount ?? 0) - (sums._sum.undeliverableCount ?? 0),
+          ),
           suppressed: sums._sum.suppressedCount ?? 0,
+          // Distinct contacts with a non-STOP reply.
           replied: sums._sum.repliedCount ?? 0,
           optedOut: sums._sum.optOutCount ?? 0,
           queued: sums._sum.queuedCount ?? 0,

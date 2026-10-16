@@ -9,9 +9,11 @@ import prisma from '../../config/prismaClient';
 import { contactDisplayName } from '../messaging/contactName';
 import { analyzeSmsText } from '../messaging/smsSegments';
 import type { ReportRange } from './harborReport.service';
+import { isSentBucket, outboundBucket, type OutboundBucket } from '../messaging/smsMetrics';
 
 /** Send windows default to New York; hourly charts use the same clock. */
-export const REPORT_TIMEZONE = 'America/New_York';
+export { REPORT_TIMEZONE } from './reportTime';
+import { REPORT_TIMEZONE } from './reportTime';
 
 export interface RecipientDetail {
   phone: string;
@@ -29,10 +31,14 @@ export interface RecipientDetail {
   deliveredAt: Date | null;
   deliverySeconds: number | null;
   segments: number | null;
+  /** Total message cost in USD (segments × per-segment price, converted). */
   price: number | null;
+  /** smsMetrics bucket: delivered | undeliverable | pending | failed | suppressed | queued. */
+  bucket: OutboundBucket;
   errorCode: string | null;
   error: string | null;
   suppressedReason: string | null;
+  /** Non-STOP replies from this recipient. */
   replies: number;
   firstReplyAt: Date | null;
   replySeconds: number | null;
@@ -55,6 +61,7 @@ export interface Breakdown {
   label: string;
   recipients: number;
   delivered: number;
+  undeliverable: number;
   failed: number;
   replied: number;
   optedOut: number;
@@ -95,6 +102,7 @@ export interface BroadcastDetail {
     attempted: number;
     sent: number;
     delivered: number;
+    undeliverable: number;
     failed: number;
     pending: number;
     stillQueued: number;
@@ -106,6 +114,7 @@ export interface BroadcastDetail {
   };
   rates: {
     delivery: number | null;
+    undeliverable: number | null;
     failure: number | null;
     reply: number | null;
     replyOfDelivered: number | null;
@@ -168,16 +177,16 @@ function tally(values: Array<string | null | undefined>, fallback = 'Unknown'): 
   return [...map.entries()].map(([label, count]) => ({ label, count })).sort((a, b) => b.count - a.count);
 }
 
-const FAILED_STATUSES = new Set(['FAILED', 'UNDELIVERABLE', 'REJECTED', 'EXPIRED']);
 
 function breakdown(recipients: RecipientDetail[], keyOf: (r: RecipientDetail) => string): Breakdown[] {
   const map = new Map<string, Breakdown>();
   for (const r of recipients) {
     const label = keyOf(r);
-    const row = map.get(label) ?? { label, recipients: 0, delivered: 0, failed: 0, replied: 0, optedOut: 0, interested: 0 };
+    const row = map.get(label) ?? { label, recipients: 0, delivered: 0, undeliverable: 0, failed: 0, replied: 0, optedOut: 0, interested: 0 };
     row.recipients += 1;
-    if (r.messageStatus === 'DELIVERED') row.delivered += 1;
-    if (FAILED_STATUSES.has(r.messageStatus ?? '') || r.recipientStatus === 'FAILED') row.failed += 1;
+    if (r.bucket === 'delivered') row.delivered += 1;
+    if (r.bucket === 'undeliverable') row.undeliverable += 1;
+    if (r.bucket === 'failed') row.failed += 1;
     if (r.replies > 0) row.replied += 1;
     if (r.optedOut) row.optedOut += 1;
     if (r.disposition === 'INTERESTED') row.interested += 1;
@@ -228,7 +237,7 @@ export async function collectBroadcastDetails(
       }),
       prisma.messagingMessage.findMany({
         where: { broadcastId: b.id, direction: 'OUTBOUND' },
-        select: { toNumber: true, status: true, sentAt: true, deliveredAt: true, segmentCount: true, priceAmount: true, priceCurrency: true, errorMessage: true, createdAt: true },
+        select: { toNumber: true, status: true, providerMessageId: true, sentAt: true, deliveredAt: true, segmentCount: true, costUsd: true, errorMessage: true, createdAt: true },
       }),
       prisma.messagingMessage.findMany({
         where: { broadcastId: b.id, direction: 'INBOUND' },
@@ -252,7 +261,9 @@ export async function collectBroadcastDetails(
 
     const recipients: RecipientDetail[] = recipientRows.map((r) => {
       const msg = outByNumber.get(r.phoneNumber);
-      const replies = repliesByNumber.get(r.phoneNumber) ?? [];
+      const allInbound = repliesByNumber.get(r.phoneNumber) ?? [];
+      // A reply is a non-STOP inbound; STOP only marks the opt-out.
+      const replies = allInbound.filter((x) => !x.isStopKeyword);
       // The message row's sentAt is when the provider accepted it; the
       // recipient row's is written afterwards (often after delivery), so it
       // would make delivery times negative.
@@ -277,28 +288,36 @@ export async function collectBroadcastDetails(
         deliveredAt,
         deliverySeconds: sentAt && deliveredAt ? Math.max(0, Math.round((deliveredAt.getTime() - sentAt.getTime()) / 1000)) : null,
         segments: msg?.segmentCount ?? null,
-        price: msg?.priceAmount != null ? Number(msg.priceAmount) : null,
+        price: msg?.costUsd != null ? Number(msg.costUsd) : null,
+        bucket: outboundBucket({
+          status: msg?.status ?? r.status,
+          hasProviderId: Boolean(msg?.providerMessageId ?? r.providerMessageId),
+          suppressed: Boolean(r.suppressedReason),
+        }),
         errorCode: r.errorCode,
         error: r.errorMessage ?? msg?.errorMessage ?? null,
         suppressedReason: r.suppressedReason,
         replies: replies.length,
         firstReplyAt,
         replySeconds: sentAt && firstReplyAt ? Math.max(0, Math.round((firstReplyAt.getTime() - sentAt.getTime()) / 1000)) : null,
-        optedOut: replies.some((x) => x.isStopKeyword),
+        optedOut: allInbound.some((x) => x.isStopKeyword),
       };
     });
     const recipientByPhone = new Map(recipients.map((r) => [r.phone, r]));
 
-    const sent = recipients.filter((r) => r.sentAt || ['SENT', 'DELIVERED'].includes(r.recipientStatus)).length;
-    const delivered = recipients.filter((r) => r.messageStatus === 'DELIVERED').length;
-    const failed = recipients.filter((r) => !r.suppressedReason && (FAILED_STATUSES.has(r.messageStatus ?? '') || r.recipientStatus === 'FAILED')).length;
-    const suppressed = recipients.filter((r) => r.suppressedReason).length;
-    const stillQueued = recipients.filter((r) => ['QUEUED', 'SENDING'].includes(r.recipientStatus)).length;
+    // Definitions: smsMetrics.ts — one bucket per recipient.
+    const count = (b: OutboundBucket) => recipients.filter((r) => r.bucket === b).length;
+    const sent = recipients.filter((r) => isSentBucket(r.bucket)).length;
+    const delivered = count('delivered');
+    const undeliverable = count('undeliverable');
+    const failed = count('failed');
+    const pending = count('pending');
+    const suppressed = count('suppressed');
+    const stillQueued = count('queued');
     const replied = recipients.filter((r) => r.replies > 0).length;
     const optedOut = recipients.filter((r) => r.optedOut).length;
     const interested = recipients.filter((r) => r.disposition === 'INTERESTED').length;
     const notInterested = recipients.filter((r) => r.disposition === 'NOT_INTERESTED').length;
-    const pending = Math.max(0, sent - delivered - failed);
 
     const segments = recipients.reduce((n, r) => n + (r.segments ?? 0), 0);
     const priced = recipients.filter((r) => r.price != null);
@@ -315,7 +334,8 @@ export async function collectBroadcastDetails(
     const sendsByHour = Array.from({ length: 24 }, () => 0);
     for (const d of sentTimes) sendsByHour[hourOf(d)] += 1;
     const repliesByHour = Array.from({ length: 24 }, () => 0);
-    for (const r of inbound) repliesByHour[hourOf(r.createdAt)] += 1;
+    const realReplies = inbound.filter((r) => !r.isStopKeyword);
+    for (const r of realReplies) repliesByHour[hourOf(r.createdAt)] += 1;
 
     const analysis = analyzeSmsText(b.body ?? '');
     const mergeFields = [...new Set([...(b.body ?? '').matchAll(/\{\{?\s*([\w.]+)\s*\}?\}/g)].map((m) => m[1]))];
@@ -364,18 +384,21 @@ export async function collectBroadcastDetails(
         attempted: recipients.length - suppressed,
         sent,
         delivered,
+        undeliverable,
         failed,
         pending,
         stillQueued,
         replied,
-        totalReplies: inbound.length,
+        totalReplies: inbound.filter((r) => !r.isStopKeyword).length,
         optedOut,
         interested,
         notInterested,
       },
       rates: {
         delivery: pct(delivered, sent),
-        failure: pct(failed, sent),
+        undeliverable: pct(undeliverable, sent),
+        // Failed messages were never sent, so this is of attempted, not sent.
+        failure: pct(failed, recipients.length - suppressed),
         reply: pct(replied, sent),
         replyOfDelivered: pct(replied, delivered),
         optOut: pct(optedOut, sent),
@@ -384,7 +407,7 @@ export async function collectBroadcastDetails(
       cost: {
         segments,
         total: totalCost,
-        currency: priced.length ? outbound.find((m) => m.priceCurrency)?.priceCurrency ?? null : null,
+        currency: priced.length ? 'USD' : null,
         perSent: perUnit(sent),
         perDelivered: perUnit(delivered),
         perReply: perUnit(replied),
@@ -400,20 +423,20 @@ export async function collectBroadcastDetails(
           const s = quantile(recipients.map((r) => r.replySeconds).filter((v): v is number => v != null), 0.5);
           return s == null ? null : Math.round(s / 60);
         })(),
-        firstReplyAt: inbound[0]?.createdAt ?? null,
-        lastReplyAt: inbound[inbound.length - 1]?.createdAt ?? null,
+        firstReplyAt: realReplies[0]?.createdAt ?? null,
+        lastReplyAt: realReplies[realReplies.length - 1]?.createdAt ?? null,
       },
-      statusBreakdown: tally(recipients.map((r) => (r.suppressedReason ? 'SUPPRESSED' : r.messageStatus ?? r.recipientStatus))),
+      statusBreakdown: tally(recipients.map((r) => r.bucket.toUpperCase())),
       failureReasons: tally(
         recipients
-          .filter((r) => !r.suppressedReason && (FAILED_STATUSES.has(r.messageStatus ?? '') || r.recipientStatus === 'FAILED'))
+          .filter((r) => r.bucket === 'failed' || r.bucket === 'undeliverable')
           .map((r) => [r.errorCode, r.error].filter(Boolean).join(' — ') || null),
         'No reason recorded',
       ),
       suppressionReasons: tally(recipients.filter((r) => r.suppressedReason).map((r) => r.suppressedReason)),
       sendsByHour,
       repliesByHour,
-      repliesByDay: tally(inbound.map((r) => dayFormatter.format(r.createdAt))).sort((a, x) => a.label.localeCompare(x.label)),
+      repliesByDay: tally(realReplies.map((r) => dayFormatter.format(r.createdAt))).sort((a, x) => a.label.localeCompare(x.label)),
       byOwner: breakdown(recipients, (r) => r.leadOwner ?? 'Unassigned'),
       byState: breakdown(recipients, (r) => (r.state ?? '').trim().toUpperCase() || 'Unknown'),
       replies: inbound.map((r) => {

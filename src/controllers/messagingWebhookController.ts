@@ -19,11 +19,8 @@ import {
   parseInboundPayload,
   verifyWebhookSecret,
 } from '../services/messaging/infobip.service';
-import {
-  applyDeliveryReport,
-  recordInboundMessage,
-} from '../services/messaging/conversation.service';
-import { recordBroadcastCounter } from '../services/messaging/broadcast.service';
+import { recordInboundMessage } from '../services/messaging/conversation.service';
+import { applyProviderStatus, type ProviderStatus } from '../services/messaging/deliveryStatus.service';
 import { normalizePhoneNumber, normalizeSender } from '../services/messaging/phone';
 import { applyStartKeyword, applyStopKeyword, isStartKeyword } from '../services/messaging/suppression.service';
 import {
@@ -112,8 +109,8 @@ class MessagingWebhookController {
         processed += 1;
         touchedConversations.add(result.conversationId);
 
-        // The campaign's replied/optOut counters were already incremented inside
-        // recordInboundMessage; STOP's suppression was applied above.
+        // recordInboundMessage scheduled the campaign's counter recompute;
+        // STOP's suppression was applied above.
         if (!result.isStop && isStartKeyword(message.text)) {
           await applyStartKeyword(message.from, result.conversationId);
         }
@@ -180,41 +177,30 @@ class MessagingWebhookController {
 
     for (const report of reports) {
       try {
-        const applied = await applyDeliveryReport({
+        // One shared path (webhook, reconciler, backfill): forward-only status,
+        // price/cost, recipient mirror, and a counter recompute from rows.
+        const applied = await applyProviderStatus({
           providerMessageId: report.providerMessageId,
-          status: report.status as 'SENT' | 'DELIVERED' | 'FAILED' | 'UNDELIVERABLE',
+          status: report.status as ProviderStatus,
           errorCode: report.errorCode,
           errorMessage: report.errorMessage,
           doneAt: report.doneAt,
           segmentCount: report.segmentCount,
           priceAmount: report.priceAmount,
           priceCurrency: report.priceCurrency,
+          callbackData: report.callbackData,
         });
 
         if (!applied) continue;
         processed += 1;
 
-        // Mirror the outcome onto the broadcast recipient row and counters.
-        const broadcastId = applied.broadcastId ?? report.callbackData;
-        if (broadcastId) {
-          await prisma.smsBroadcastRecipient.updateMany({
-            where: { broadcastId, providerMessageId: report.providerMessageId },
-            data: {
-              status: report.status as never,
-              errorCode: report.errorCode,
-              errorMessage: report.errorMessage,
-            },
-          });
-
-          if (report.status === 'DELIVERED') recordBroadcastCounter(broadcastId, 'deliveredCount');
-          if (report.status === 'FAILED') recordBroadcastCounter(broadcastId, 'failedCount');
-          if (report.status === 'UNDELIVERABLE') recordBroadcastCounter(broadcastId, 'undeliverableCount');
-        }
+        // A duplicate or late receipt changes nothing — don't repaint the UI.
+        if (!applied.changed) continue;
 
         emitMessageStatusUpdate(applied.conversationId, {
           messageId: report.providerMessageId,
           providerMessageId: report.providerMessageId,
-          status: report.status,
+          status: applied.to,
           errorMessage: report.errorMessage,
         });
       } catch (err) {

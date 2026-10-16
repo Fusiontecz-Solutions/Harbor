@@ -24,6 +24,8 @@
  * conversation. Neither is expressible in groupBy.
  */
 import prisma from '../../config/prismaClient';
+import { addDays, REPORT_TIMEZONE, zonedDay, zonedMidnight } from '../reports/reportTime';
+import { SQL_IS_DELIVERED, SQL_IS_FAILED, SQL_IS_SENT, SQL_IS_UNDELIVERABLE } from './smsMetrics';
 
 export interface PerformanceRow {
   userId: string | null;
@@ -32,10 +34,15 @@ export interface PerformanceRow {
   role: string | null;
   /** The number their inbound traffic is attributed through. */
   senderNumber: string | null;
+  /** Accepted by the provider (smsMetrics). */
   messagesSent: number;
   delivered: number;
+  /** Accepted, carrier did not deliver (incl. expired). */
+  undeliverable: number;
+  /** Rejected / never accepted — not part of messagesSent. */
   failed: number;
   campaigns: number;
+  /** Non-STOP inbound. */
   replies: number;
   optOuts: number;
 }
@@ -54,6 +61,7 @@ export interface PerformanceResult {
   totals: {
     messagesSent: number;
     delivered: number;
+    undeliverable: number;
     failed: number;
     campaigns: number;
     replies: number;
@@ -71,18 +79,25 @@ export interface PerformanceResult {
   unattributedOptOuts: number;
 }
 
-/** Inclusive-start, exclusive-end day window; defaults to the last 30 days. */
+/**
+ * Inclusive US Eastern days → [start, end) instants; defaults to the last 30
+ * days. YYYY-MM-DD is read as an Eastern day (it used to be the server's local
+ * day, i.e. UTC in production).
+ */
 function resolveRange(from?: string, to?: string): { start: Date; end: Date } {
-  const end = to ? new Date(to) : new Date();
-  const start = from ? new Date(from) : new Date(end.getTime() - 30 * 24 * 60 * 60 * 1000);
-
-  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
-    throw new Error('Invalid date range');
-  }
-
-  // Normalize to whole days so a range never half-includes one.
-  start.setHours(0, 0, 0, 0);
-  end.setHours(23, 59, 59, 999);
+  const isDay = (v?: string) => Boolean(v && /^\d{4}-\d{2}-\d{2}$/.test(v));
+  const dayOf = (v: string | undefined, fallback: string): string => {
+    if (!v) return fallback;
+    if (isDay(v)) return v;
+    const d = new Date(v);
+    if (Number.isNaN(d.getTime())) throw new Error('Invalid date range');
+    return zonedDay(d);
+  };
+  const toDay = dayOf(to, zonedDay(new Date()));
+  const fromDay = dayOf(from, addDays(toDay, -30));
+  const start = zonedMidnight(fromDay);
+  const end = zonedMidnight(addDays(toDay, 1));
+  if (start >= end) throw new Error('Invalid date range');
   return { start, end };
 }
 
@@ -96,26 +111,27 @@ export async function messagingPerformance(params: {
 
   const [outbound, inbound, campaigns, users] = await Promise.all([
     prisma.$queryRaw<
-      Array<{ userId: string | null; day: Date; sent: bigint; delivered: bigint; failed: bigint }>
+      Array<{ userId: string | null; day: string; sent: bigint; delivered: bigint; undeliverable: bigint; failed: bigint }>
     >`
       SELECT COALESCE(m."sentById", b."createdById") AS "userId",
-             date_trunc('day', m."createdAt") AS day,
-             COUNT(*) AS sent,
-             COUNT(*) FILTER (WHERE m."status" = 'DELIVERED') AS delivered,
-             COUNT(*) FILTER (WHERE m."status" IN ('FAILED', 'UNDELIVERABLE')) AS failed
+             to_char((m."createdAt" AT TIME ZONE 'UTC') AT TIME ZONE ${REPORT_TIMEZONE}, 'YYYY-MM-DD') AS day,
+             COUNT(*) FILTER (WHERE ${SQL_IS_SENT}) AS sent,
+             COUNT(*) FILTER (WHERE ${SQL_IS_DELIVERED}) AS delivered,
+             COUNT(*) FILTER (WHERE ${SQL_IS_UNDELIVERABLE}) AS undeliverable,
+             COUNT(*) FILTER (WHERE ${SQL_IS_FAILED}) AS failed
       FROM "MessagingMessage" m
       LEFT JOIN "SmsBroadcast" b ON b."id" = m."broadcastId"
       WHERE m."direction" = 'OUTBOUND'
         AND m."createdAt" >= ${start}
-        AND m."createdAt" <= ${end}
+        AND m."createdAt" < ${end}
       GROUP BY 1, 2
     `,
 
     prisma.$queryRaw<
-      Array<{ userId: string | null; day: Date; replies: bigint; optouts: bigint }>
+      Array<{ userId: string | null; day: string; replies: bigint; optouts: bigint }>
     >`
       SELECT u."id" AS "userId",
-             date_trunc('day', m."createdAt") AS day,
+             to_char((m."createdAt" AT TIME ZONE 'UTC') AT TIME ZONE ${REPORT_TIMEZONE}, 'YYYY-MM-DD') AS day,
              COUNT(*) FILTER (WHERE NOT m."isStopKeyword") AS replies,
              COUNT(*) FILTER (WHERE m."isStopKeyword") AS optouts
       FROM "MessagingMessage" m
@@ -124,7 +140,7 @@ export async function messagingPerformance(params: {
       LEFT JOIN "User" u ON u."messagingSenderId" = s."id"
       WHERE m."direction" = 'INBOUND'
         AND m."createdAt" >= ${start}
-        AND m."createdAt" <= ${end}
+        AND m."createdAt" < ${end}
       GROUP BY 1, 2
     `,
 
@@ -132,7 +148,7 @@ export async function messagingPerformance(params: {
       by: ['createdById'],
       // A campaign counts once it actually went out; drafts, rejected and
       // still-awaiting-approval ones never reached anyone.
-      where: { startedAt: { gte: start, lte: end } },
+      where: { startedAt: { gte: start, lt: end } },
       _count: { _all: true },
     }),
 
@@ -165,6 +181,7 @@ export async function messagingPerformance(params: {
       senderNumber: user?.messagingSender?.phoneNumber ?? null,
       messagesSent: 0,
       delivered: 0,
+      undeliverable: 0,
       failed: 0,
       campaigns: 0,
       replies: 0,
@@ -175,10 +192,10 @@ export async function messagingPerformance(params: {
   };
 
   const daily: PerformanceDayRow[] = [];
-  const dayKey = (day: Date) => day.toISOString().slice(0, 10);
+  const dayKey = (day: string) => day;
   const dailyIndex = new Map<string, PerformanceDayRow>();
 
-  const dailyFor = (userId: string | null, day: Date): PerformanceDayRow => {
+  const dailyFor = (userId: string | null, day: string): PerformanceDayRow => {
     const key = `${userId ?? 'none'}:${dayKey(day)}`;
     const existing = dailyIndex.get(key);
     if (existing) return existing;
@@ -204,6 +221,7 @@ export async function messagingPerformance(params: {
     const user = rowFor(row.userId);
     user.messagesSent += toInt(row.sent);
     user.delivered += toInt(row.delivered);
+    user.undeliverable += toInt(row.undeliverable);
     user.failed += toInt(row.failed);
   }
 
@@ -236,6 +254,7 @@ export async function messagingPerformance(params: {
     totals: {
       messagesSent: userRows.reduce((sum, r) => sum + r.messagesSent, 0),
       delivered: userRows.reduce((sum, r) => sum + r.delivered, 0),
+      undeliverable: userRows.reduce((sum, r) => sum + r.undeliverable, 0),
       failed: userRows.reduce((sum, r) => sum + r.failed, 0),
       campaigns: userRows.reduce((sum, r) => sum + r.campaigns, 0),
       replies: userRows.reduce((sum, r) => sum + r.replies, 0),

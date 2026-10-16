@@ -121,6 +121,9 @@ export async function dispatchOutboundMessage(input: DispatchInput): Promise<Dis
     businessNumber: fromNumber,
     contactNumber: toNumber,
     ownerUserId: input.sentById ?? null,
+    // An agent's direct message brings a deleted thread back; a broadcast
+    // send does not (broadcast threads stay hidden until the contact replies).
+    restore: !input.broadcastId,
   });
 
   const message = await recordOutboundMessage({

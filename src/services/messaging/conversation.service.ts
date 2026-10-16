@@ -24,6 +24,7 @@ import { normalizePhoneNumber, normalizeSender } from './phone';
 import { isStartKeyword, isStopKeyword } from './suppression.service';
 import { normalizeInboxTab, tabSkipsBroadcastVisibility } from './inboxTabs';
 import { deductPrepaidAfterInbound } from '../tenantControl/prepaid';
+import { scheduleBroadcastRecompute } from './broadcastCounters';
 
 /** Short TTL: the inbox is realtime via sockets, the cache only absorbs bursts. */
 const CONVERSATION_LIST_TTL_SECONDS = 15;
@@ -67,6 +68,8 @@ export async function ensureConversation(input: {
   contactNumber: string;
   ownerUserId?: string | null;
   tx?: Prisma.TransactionClient;
+  /** Un-delete a soft-deleted thread (an agent deliberately opening / writing to it). */
+  restore?: boolean;
 }): Promise<{ id: string; isOptedOut: boolean }> {
   const businessNumber = normalizeSender(input.businessNumber);
   const contactNumber = normalizePhoneNumber(input.contactNumber);
@@ -89,7 +92,10 @@ export async function ensureConversation(input: {
       ownerUserId: input.ownerUserId ?? null,
     },
     // Only backfill the contact link; never clobber ownership or counters here.
-    update: contact?.id ? { contactId: contact.id } : {},
+    update: {
+      ...(contact?.id ? { contactId: contact.id } : {}),
+      ...(input.restore ? { deletedAt: null } : {}),
+    },
     select: { id: true, isOptedOut: true },
   });
 
@@ -177,6 +183,9 @@ export async function recordInboundMessage(input: {
         unreadCount: { increment: 1 },
         // An inbound reply un-archives the thread — it needs attention again.
         isArchived: false,
+        // …and un-deletes it: a deleted thread the contact writes to again
+        // comes back with its full history.
+        deletedAt: null,
         ...(isStop ? { isOptedOut: true } : {}),
         ...(isStart ? { isOptedOut: false } : {}),
         ...(input.broadcastId ? { hasBroadcastMessage: true } : {}),
@@ -184,21 +193,14 @@ export async function recordInboundMessage(input: {
       },
     });
 
-    // Count the reply against the campaign that prompted it.
-    if (input.broadcastId) {
-      await tx.smsBroadcast.update({
-        where: { id: input.broadcastId },
-        data: {
-          repliedCount: { increment: 1 },
-          ...(isStop ? { optOutCount: { increment: 1 } } : {}),
-        },
-      });
-    }
-
     return { conversationId: conversation.id, messageId: message.id };
   });
 
   await invalidateConversationCaches(result.conversationId);
+
+  // The campaign's replied / opt-out counters are recounted from rows (distinct
+  // non-STOP repliers, distinct STOP senders) — never incremented here.
+  if (input.broadcastId) scheduleBroadcastRecompute(input.broadcastId);
 
   void deductPrepaidAfterInbound(1);
 
@@ -287,67 +289,10 @@ export async function markOutboundSubmitted(input: {
   await invalidateConversationCaches(input.conversationId);
 }
 
-/**
- * Apply a delivery report.
- *
- * Guards against out-of-order callbacks: Infobip can deliver a `DELIVERED`
- * receipt before the `SENT` one, and letting a late SENT overwrite DELIVERED
- * would make the funnel counts drift backwards.
+/*
+ * Delivery reports are applied by deliveryStatus.service.ts (applyProviderStatus),
+ * shared by the webhook, the reconciler and the backfill.
  */
-const STATUS_RANK: Record<string, number> = {
-  QUEUED: 0,
-  SENDING: 1,
-  SENT: 2,
-  DELIVERED: 4,
-  RECEIVED: 4,
-  FAILED: 3,
-  UNDELIVERABLE: 3,
-};
-
-export async function applyDeliveryReport(input: {
-  providerMessageId: string;
-  status: 'SENT' | 'DELIVERED' | 'FAILED' | 'UNDELIVERABLE';
-  errorCode?: string | null;
-  errorMessage?: string | null;
-  doneAt?: Date | null;
-  segmentCount?: number | null;
-  priceAmount?: number | null;
-  priceCurrency?: string | null;
-}): Promise<{ conversationId: string; broadcastId: string | null } | null> {
-  const message = await prisma.messagingMessage.findUnique({
-    where: { providerMessageId: input.providerMessageId },
-    select: { id: true, conversationId: true, broadcastId: true, status: true, toNumber: true },
-  });
-
-  if (!message) {
-    console.warn('[messaging:conversation] delivery report for unknown message:', input.providerMessageId);
-    return null;
-  }
-
-  const currentRank = STATUS_RANK[message.status] ?? 0;
-  const incomingRank = STATUS_RANK[input.status] ?? 0;
-  if (incomingRank < currentRank) {
-    // Late/duplicate receipt for an already-terminal message — ignore.
-    return { conversationId: message.conversationId, broadcastId: message.broadcastId };
-  }
-
-  await prisma.messagingMessage.update({
-    where: { id: message.id },
-    data: {
-      status: input.status,
-      errorCode: input.errorCode ?? null,
-      errorMessage: input.errorMessage ?? null,
-      deliveredAt: input.status === 'DELIVERED' ? input.doneAt ?? new Date() : null,
-      segmentCount: input.segmentCount ?? undefined,
-      priceAmount: input.priceAmount ?? undefined,
-      priceCurrency: input.priceCurrency ?? undefined,
-    },
-  });
-
-  await invalidateConversationCaches(message.conversationId);
-
-  return { conversationId: message.conversationId, broadcastId: message.broadcastId };
-}
 
 export interface ConversationListItem {
   id: string;
@@ -385,7 +330,7 @@ export async function listConversations(params: ConversationListParams): Promise
   const cached = await cacheGet<{ items: ConversationListItem[]; page: number; hasMore: boolean }>(cacheKey);
   if (cached) return cached;
 
-  const where: Prisma.MessagingConversationWhereInput = { isArchived: false };
+  const where: Prisma.MessagingConversationWhereInput = { isArchived: false, deletedAt: null };
 
   // Scope to the caller's sender(s). An empty array means the user has no
   // usable sender, so they see nothing rather than everything — failing closed
@@ -564,6 +509,7 @@ export async function getTotalUnread(senderNumbers?: string[] | null): Promise<n
     _sum: { unreadCount: true },
     where: {
       isArchived: false,
+      deletedAt: null,
       // Same scoping as the list: the badge must not count threads the user
       // cannot open.
       ...(Array.isArray(senderNumbers) ? { businessNumber: { in: senderNumbers } } : {}),
@@ -581,6 +527,19 @@ export async function getTotalUnread(senderNumbers?: string[] | null): Promise<n
  * generation. This runs on every outbound broadcast message, so it must stay
  * O(1) — never a keyspace SCAN.
  */
-async function invalidateConversationCaches(conversationId: string): Promise<void> {
+export async function invalidateConversationCaches(conversationId: string): Promise<void> {
   await cacheBumpGeneration(messagesGeneration(conversationId), LIST_GENERATION);
+}
+
+/**
+ * Soft-delete a thread: hidden from the inbox, search, unread badge and push,
+ * but every message is kept, so campaign and report counts never drop. A new
+ * inbound message on the same pair clears `deletedAt` (recordInboundMessage).
+ */
+export async function softDeleteConversation(conversationId: string): Promise<void> {
+  await prisma.messagingConversation.update({
+    where: { id: conversationId },
+    data: { deletedAt: new Date(), unreadCount: 0 },
+  });
+  await invalidateConversationCaches(conversationId);
 }

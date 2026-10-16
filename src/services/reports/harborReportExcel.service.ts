@@ -230,6 +230,7 @@ function breakdownRows(rows: Breakdown[]): Cell[][] {
     r.label,
     r.recipients,
     r.delivered,
+    r.undeliverable,
     r.failed,
     r.replied,
     r.delivered ? Math.round((r.replied / r.delivered) * 1000) / 10 : null,
@@ -256,7 +257,8 @@ function writeBroadcastSheet(wb: ExcelJS.Workbook, b: BroadcastDetail, name: str
     { label: 'Recipients', value: f.recipients, fmt: INT_FMT },
     { label: 'Sent', value: f.sent, fmt: INT_FMT },
     { label: 'Delivered', value: f.delivered, fmt: INT_FMT, color: GREEN },
-    { label: 'Failed', value: f.failed, fmt: INT_FMT, color: f.failed ? RED : INK },
+    { label: 'Undeliverable', value: f.undeliverable, fmt: INT_FMT, color: f.undeliverable ? AMBER : INK },
+    { label: 'Failed (not sent)', value: f.failed, fmt: INT_FMT, color: f.failed ? RED : INK },
     { label: 'Replied (people)', value: f.replied, fmt: INT_FMT, color: GREEN },
     { label: 'Opted out', value: f.optedOut, fmt: INT_FMT, color: f.optedOut ? AMBER : INK },
   ]);
@@ -309,10 +311,11 @@ function writeBroadcastSheet(wb: ExcelJS.Workbook, b: BroadcastDetail, name: str
   const rightEnd = w.kv(
     [
       ['Suppressed before send', f.suppressed, INT_FMT],
-      ['Failed / undeliverable', f.failed, INT_FMT],
+      ['Undeliverable (carrier, incl. expired)', f.undeliverable, INT_FMT],
+      ['Failed (rejected / not sent)', f.failed, INT_FMT],
       ['Awaiting delivery report', f.pending, INT_FMT],
       ['Still queued', f.stillQueued, INT_FMT],
-      ['Total replies', f.totalReplies, INT_FMT],
+      ['Total replies (excl. STOP)', f.totalReplies, INT_FMT],
       ['Interested / not interested', `${f.interested} / ${f.notInterested}`],
     ],
     7,
@@ -353,7 +356,7 @@ function writeBroadcastSheet(wb: ExcelJS.Workbook, b: BroadcastDetail, name: str
   const costEnd = w.kv(
     [
       ['Segments billed', b.cost.segments, INT_FMT],
-      ['Total cost', b.cost.total, MONEY_FMT],
+      ['Total cost (USD)', b.cost.total, MONEY_FMT],
       ['Per message sent', b.cost.perSent, '0.0000'],
       ['Per delivered', b.cost.perDelivered, '0.0000'],
       ['Per replier', b.cost.perReply, MONEY_FMT],
@@ -402,10 +405,10 @@ function writeBroadcastSheet(wb: ExcelJS.Workbook, b: BroadcastDetail, name: str
   rightRow = w.table(['Day', 'Replies'], b.repliesByDay.map((x) => [x.label, x.count]), { col: 7, startRow: rightRow + 3, bars: [{ index: 1, color: 'FF8B5CF6' }], fmts: { 1: INT_FMT } });
   w.row = Math.max(hourEnd, rightRow) + 2;
 
-  const bdHeaders = ['', 'Recipients', 'Delivered', 'Failed', 'Replied', 'Reply % (of delivered)', 'Opted out', 'Interested'];
-  const bdFmts = { 1: INT_FMT, 2: INT_FMT, 3: INT_FMT, 4: INT_FMT, 5: PCT_FMT, 6: INT_FMT, 7: INT_FMT };
+  const bdHeaders = ['', 'Recipients', 'Delivered', 'Undeliverable', 'Failed', 'Replied', 'Reply % (of delivered)', 'Opted out', 'Interested'];
+  const bdFmts = { 1: INT_FMT, 2: INT_FMT, 3: INT_FMT, 4: INT_FMT, 5: INT_FMT, 6: PCT_FMT, 7: INT_FMT, 8: INT_FMT };
   w.heading('By lead owner');
-  w.row = w.table(bdHeaders, breakdownRows(b.byOwner), { bars: [{ index: 4, color: 'FF0EA5E9' }], fmts: bdFmts }) + 2;
+  w.row = w.table(bdHeaders, breakdownRows(b.byOwner), { bars: [{ index: 5, color: 'FF0EA5E9' }], fmts: bdFmts }) + 2;
   w.heading('By state');
   w.row = w.table(bdHeaders, breakdownRows(b.byState), { bars: [{ index: 1, color: 'FF94A3B8' }], fmts: bdFmts }) + 2;
 
@@ -522,7 +525,7 @@ export async function renderReportExcel(input: ExcelReportInput): Promise<Buffer
     const iw = new Writer(idx, 14);
     iw.band('Campaign Index', 'Every broadcast in the period. Click a campaign name to open its detailed sheet.');
     const end = iw.table(
-      ['#', 'Campaign', 'Status', 'Created', 'Created by', 'Recipients', 'Sent', 'Delivered', 'Delivery %', 'Replied', 'Reply %', 'Opted out', 'Opt-out %', 'Cost'],
+      ['#', 'Campaign', 'Status', 'Created', 'Created by', 'Recipients', 'Sent', 'Delivered', 'Delivery %', 'Replied', 'Reply %', 'Opted out', 'Opt-out %', 'Cost (USD)'],
       input.broadcasts.map((b) => [
         b.index,
         b.name,

@@ -8,8 +8,8 @@
  * Two of the buckets are not stored on the recipient row and have to be derived
  * from the message table:
  *
- *   replied    — inbound messages attributed to this campaign
- *   opted-out  — those inbound messages that matched a stop keyword
+ *   replied    — contacts with a non-STOP inbound attributed to this campaign
+ *   opted-out  — contacts whose inbound matched a stop keyword
  *
  * Deriving them keeps the recipient row as a pure record of *our* send attempt,
  * so a reply arriving days later can never race a counter update.
@@ -23,6 +23,7 @@ export type AudienceBucket =
   | 'queued'
   | 'sending'
   | 'sent'
+  | 'pending'
   | 'delivered'
   | 'failed'
   | 'undeliverable'
@@ -58,7 +59,7 @@ export interface AudiencePage {
 const DIRECT_STATUS: Partial<Record<AudienceBucket, string>> = {
   queued: 'QUEUED',
   sending: 'SENDING',
-  sent: 'SENT',
+  pending: 'SENT',
   delivered: 'DELIVERED',
   failed: 'FAILED',
   undeliverable: 'UNDELIVERABLE',
@@ -80,6 +81,13 @@ function buildRecipientWhere(broadcastId: string, bucket: AudienceBucket): Prism
     where.suppressedReason = { not: null };
   }
 
+  // "Sent" = accepted by the provider, whatever the outcome since (smsMetrics).
+  if (bucket === 'sent') {
+    where.providerMessageId = { not: null };
+    where.status = { in: ['SENT', 'DELIVERED', 'UNDELIVERABLE'] };
+    where.suppressedReason = null;
+  }
+
   return where;
 }
 
@@ -88,21 +96,29 @@ function buildRecipientWhere(broadcastId: string, bucket: AudienceBucket): Prism
  * One query, then grouped in memory — a campaign's reply count is orders of
  * magnitude smaller than its recipient count.
  */
-async function loadReplies(broadcastId: string): Promise<Map<string, { text: string | null; at: Date; isStop: boolean }>> {
+async function loadReplies(
+  broadcastId: string,
+): Promise<Map<string, { text: string | null; at: Date; isStop: boolean; hasReply: boolean }>> {
   const replies = await prisma.messagingMessage.findMany({
     where: { broadcastId, direction: 'INBOUND' },
     orderBy: { createdAt: 'asc' },
     select: { fromNumber: true, body: true, createdAt: true, isStopKeyword: true },
   });
 
-  const byNumber = new Map<string, { text: string | null; at: Date; isStop: boolean }>();
+  const byNumber = new Map<string, { text: string | null; at: Date; isStop: boolean; hasReply: boolean }>();
   for (const reply of replies) {
     const existing = byNumber.get(reply.fromNumber);
     // Keep the earliest reply, but let a later STOP win the opt-out flag.
     if (!existing) {
-      byNumber.set(reply.fromNumber, { text: reply.body, at: reply.createdAt, isStop: reply.isStopKeyword });
-    } else if (reply.isStopKeyword) {
-      existing.isStop = true;
+      byNumber.set(reply.fromNumber, {
+        text: reply.body,
+        at: reply.createdAt,
+        isStop: reply.isStopKeyword,
+        hasReply: !reply.isStopKeyword,
+      });
+    } else {
+      if (reply.isStopKeyword) existing.isStop = true;
+      if (!reply.isStopKeyword) existing.hasReply = true;
     }
   }
 
@@ -121,7 +137,7 @@ export async function getBroadcastAudience(
   /* ---- Derived buckets: driven by the message table, not the recipient row ---- */
   if (bucket === 'replied' || bucket === 'opted-out') {
     const replies = await loadReplies(broadcastId);
-    const wanted = [...replies.entries()].filter(([, r]) => (bucket === 'opted-out' ? r.isStop : true));
+    const wanted = [...replies.entries()].filter(([, r]) => (bucket === 'opted-out' ? r.isStop : r.hasReply));
 
     const total = wanted.length;
     const slice = wanted.slice((safePage - 1) * safeSize, safePage * safeSize);

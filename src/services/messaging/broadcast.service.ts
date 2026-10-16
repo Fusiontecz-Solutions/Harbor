@@ -9,25 +9,24 @@
  *    alternative — deriving progress from messages that exist — cannot
  *    distinguish "not sent yet" from "lost".
  *
- * 2. **Counters are flushed on a debounce, not per message.** A 50k-recipient
+ * 2. **Counters are recomputed on a debounce, not per message.** A 50k-recipient
  *    campaign generates 50k sends and 50k delivery receipts; writing a counter
  *    UPDATE for each would serialize the whole campaign behind row locks on one
- *    `SmsBroadcast` row. Increments accumulate in memory and flush every couple
- *    of seconds, or when a batch threshold is hit.
+ *    `SmsBroadcast` row. Changes are coalesced per broadcast and the counters
+ *    are recounted from rows (broadcastCounters.ts), so they cannot drift.
  */
 import prisma from '../../config/prismaClient';
-import { emitBroadcastProgress } from '../../socket/messagingEvents';
 import {
   BROADCAST_CHUNK_SIZE,
   enqueueBroadcastChunks,
   isSmsBroadcastQueueEnabled,
   removeBroadcastJobs,
 } from '../../queues/smsBroadcastQueue';
-import { cacheDel, cacheKeys } from './cache.service';
 import { getDefaultSender } from './infobip.service';
 import { resolveSenderForUser } from './sender.service';
 import { normalizePhoneNumber, normalizeSender } from './phone';
 import { checkSuppressionBulk } from './suppression.service';
+import { completeBroadcastIfDrained, computeBroadcastCounters } from './broadcastCounters';
 
 export interface BroadcastRecipientInput {
   phoneNumber: string;
@@ -313,141 +312,28 @@ export async function cancelBroadcast(broadcastId: string): Promise<void> {
 }
 
 /* ============================================================================
- * Debounced counter flushing
+ * Counters — derived from rows, see broadcastCounters.ts
  * ==========================================================================*/
 
-type CounterField =
-  | 'sentCount'
-  | 'deliveredCount'
-  | 'failedCount'
-  | 'undeliverableCount'
-  | 'suppressedCount'
-  | 'queuedCount';
-
-interface PendingCounters {
-  increments: Partial<Record<CounterField, number>>;
-  timer: NodeJS.Timeout | null;
-  eventsSinceFlush: number;
-}
-
-const pendingByBroadcast = new Map<string, PendingCounters>();
-
-/** Flush at least this often while a campaign is active. */
-const FLUSH_DEBOUNCE_MS = Number(process.env.BROADCAST_STATS_DEBOUNCE_MS ?? '2000');
-/** …or immediately once this many increments have piled up. */
-const FLUSH_BATCH_SIZE = Number(process.env.BROADCAST_STATS_BATCH_SIZE ?? '50');
+export {
+  completeBroadcastIfDrained,
+  flushBroadcastCounters,
+  recomputeBroadcastCounters,
+  recordBroadcastCounter,
+  scheduleBroadcastRecompute,
+} from './broadcastCounters';
 
 /**
- * Record a counter change. Cheap and synchronous — the database write happens
- * later, on the debounce.
- *
- * Each broadcast gets its own timer, so concurrent campaigns flush
- * independently instead of queueing behind one shared timer.
+ * Stats for one campaign. The counters are recounted from rows on read (cheap:
+ * two indexed aggregates over one broadcast), so the detail view is exact even
+ * between debounced recomputes; `pendingCount` is only available this way.
  */
-export function recordBroadcastCounter(broadcastId: string, field: CounterField, delta = 1): void {
-  let pending = pendingByBroadcast.get(broadcastId);
-  if (!pending) {
-    pending = { increments: {}, timer: null, eventsSinceFlush: 0 };
-    pendingByBroadcast.set(broadcastId, pending);
-  }
-
-  pending.increments[field] = (pending.increments[field] ?? 0) + delta;
-  pending.eventsSinceFlush += 1;
-
-  if (pending.eventsSinceFlush >= FLUSH_BATCH_SIZE) {
-    void flushBroadcastCounters(broadcastId);
-    return;
-  }
-
-  if (!pending.timer) {
-    pending.timer = setTimeout(() => {
-      void flushBroadcastCounters(broadcastId);
-    }, FLUSH_DEBOUNCE_MS);
-    // Never hold the process open just for a stats flush.
-    pending.timer.unref?.();
-  }
-}
-
-/**
- * Write accumulated increments and notify the UI.
- *
- * Increments are taken out of the map *before* the await so counts recorded
- * while the update is in flight are not lost or double-counted.
- */
-export async function flushBroadcastCounters(broadcastId: string): Promise<void> {
-  const pending = pendingByBroadcast.get(broadcastId);
-  if (!pending) return;
-
-  if (pending.timer) {
-    clearTimeout(pending.timer);
-    pending.timer = null;
-  }
-
-  const increments = pending.increments;
-  pending.increments = {};
-  pending.eventsSinceFlush = 0;
-
-  const fields = Object.entries(increments).filter(([, value]) => value && value !== 0);
-  if (fields.length === 0) return;
-
-  try {
-    const data: Record<string, { increment: number } | { decrement: number }> = {};
-    for (const [field, value] of fields) {
-      // queuedCount only ever goes down as recipients leave the queue.
-      data[field] = field === 'queuedCount' ? { decrement: Math.abs(value as number) } : { increment: value as number };
-    }
-
-    const updated = await prisma.smsBroadcast.update({
-      where: { id: broadcastId },
-      data,
-      select: {
-        id: true,
-        status: true,
-        totalRecipients: true,
-        queuedCount: true,
-        sentCount: true,
-        deliveredCount: true,
-        failedCount: true,
-        undeliverableCount: true,
-        suppressedCount: true,
-        repliedCount: true,
-        optOutCount: true,
-      },
-    });
-
-    await cacheDel(cacheKeys.broadcastStats(broadcastId));
-    emitBroadcastProgress(broadcastId, updated);
-
-    // A campaign with nothing left queued is finished.
-    if (updated.status === 'RUNNING' && updated.queuedCount <= 0) {
-      await completeBroadcastIfDrained(broadcastId);
-    }
-  } catch (err) {
-    // Put the increments back so they are retried on the next flush rather
-    // than silently lost.
-    for (const [field, value] of fields) {
-      pending.increments[field as CounterField] = (pending.increments[field as CounterField] ?? 0) + (value as number);
-    }
-    console.error('[messaging:broadcast] counter flush failed:', broadcastId, (err as Error)?.message);
-  }
-}
-
-/** Mark a campaign complete once no recipient rows remain in QUEUED. */
-export async function completeBroadcastIfDrained(broadcastId: string): Promise<void> {
-  const remaining = await prisma.smsBroadcastRecipient.count({
-    where: { broadcastId, status: { in: ['QUEUED', 'SENDING'] } },
-  });
-  if (remaining > 0) return;
-
-  await prisma.smsBroadcast.updateMany({
-    where: { id: broadcastId, status: 'RUNNING' },
-    data: { status: 'COMPLETED', finishedAt: new Date() },
-  });
-
-  pendingByBroadcast.delete(broadcastId);
-}
-
 export async function getBroadcastStats(broadcastId: string) {
+  const [row, live] = await Promise.all([findBroadcastStatsRow(broadcastId), computeBroadcastCounters(broadcastId)]);
+  return row ? { ...row, ...live } : null;
+}
+
+function findBroadcastStatsRow(broadcastId: string) {
   return prisma.smsBroadcast.findUnique({
     where: { id: broadcastId },
     select: {

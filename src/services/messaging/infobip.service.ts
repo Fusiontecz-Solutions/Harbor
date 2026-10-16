@@ -151,6 +151,26 @@ function client(): AxiosInstance {
   return clientInstance;
 }
 
+/**
+ * Loud startup check. Without INFOBIP_CALLBACK_BASE_URL no `notifyUrl` is sent,
+ * Infobip never POSTs delivery receipts, and every outcome has to be pulled by
+ * the reconciler from the logs API (which only keeps ~48h). Called once at boot.
+ */
+export function warnIfCallbackUrlMissing(): void {
+  if (env('INFOBIP_CALLBACK_BASE_URL') || !isInfobipConfigured()) return;
+  const msg =
+    '[messaging:infobip] INFOBIP_CALLBACK_BASE_URL is NOT set — Infobip will not send delivery reports. ' +
+    'Messages will sit on "sent" until the reconciler pulls them. Set it to the public backend origin ' +
+    '(e.g. https://api.example.com; receipts go to /api/v1/messaging/webhooks/infobip/delivery).';
+  if (process.env.NODE_ENV === 'production') {
+    console.error('*'.repeat(100));
+    console.error(msg);
+    console.error('*'.repeat(100));
+  } else {
+    console.warn(msg);
+  }
+}
+
 /** Public URL Infobip posts delivery receipts to, or undefined when not exposed. */
 function notifyUrl(): string | undefined {
   const base = env('INFOBIP_CALLBACK_BASE_URL').replace(/\/+$/, '');
@@ -369,33 +389,63 @@ export function parseInboundPayload(body: unknown): InboundMessage[] {
   });
 }
 
-/** Parse a delivery-report callback body. Same envelope as inbound. */
 /**
- * Pull the provider's own record for specific messages.
+ * Message ids per `/sms/3/logs` request. Infobip caps the combined length of
+ * the messageId values at 2048 characters (SMSAP-103), i.e. ~50 UUIDs, so
+ * chunks are cut by length as well as by count.
+ */
+const LOGS_IDS_PER_REQUEST = Math.max(1, Number(process.env.INFOBIP_LOGS_IDS_PER_REQUEST ?? '50'));
+const LOGS_MAX_ID_CHARS = 2000;
+
+export function chunkLogIds(ids: string[], maxCount = LOGS_IDS_PER_REQUEST, maxChars = LOGS_MAX_ID_CHARS): string[][] {
+  const chunks: string[][] = [];
+  let current: string[] = [];
+  let chars = 0;
+  for (const id of ids) {
+    const len = id.length + 1;
+    if (current.length && (current.length >= maxCount || chars + len > maxChars)) {
+      chunks.push(current);
+      current = [];
+      chars = 0;
+    }
+    current.push(id);
+    chars += len;
+  }
+  if (current.length) chunks.push(current);
+  return chunks;
+}
+
+/**
+ * Pull the provider's own record for specific messages (GET only).
  *
  * Delivery receipts are fire-and-forget: Infobip posts a DLR once and if the
  * callback is unreachable, misconfigured, or was never registered for the
  * message, the final status simply never arrives and the message sits on
- * "sent" forever — even though Infobip may have rejected it seconds later.
- * This is the pull-side backstop, used by the reconciler.
+ * "sent" forever. This is the pull-side backstop, used by the reconciler and
+ * the backfill script.
  *
- * `/sms/1/logs` returns the same entry shape as the DLR webhook, so the
- * existing parser applies unchanged.
+ * Uses `/sms/3/logs` (entries carry `messageCount`, `price.pricePerMessage`
+ * per segment, `status.groupName`), batched by LOGS_IDS_PER_REQUEST. Infobip
+ * keeps logs for a limited window; ids it no longer knows simply do not come back.
  */
 export async function fetchMessageLogs(providerMessageIds: string[]): Promise<DeliveryReport[]> {
-  const ids = providerMessageIds.filter(Boolean);
-  if (ids.length === 0) return [];
+  const ids = [...new Set(providerMessageIds.filter(Boolean))];
+  const out: DeliveryReport[] = [];
 
-  const params = new URLSearchParams();
-  // Infobip accepts the parameter repeated, not a comma-joined list.
-  for (const id of ids.slice(0, 50)) params.append('messageId', id);
+  for (const slice of chunkLogIds(ids)) {
+    const params = new URLSearchParams();
+    // Infobip accepts the parameter repeated, not a comma-joined list.
+    for (const id of slice) params.append('messageId', id);
+    params.set('limit', String(slice.length));
 
-  const response = await client().get(`/sms/1/logs?${params.toString()}`);
-  if (response.status < 200 || response.status >= 300) {
-    throw classifyHttpFailure(response.status, response.data);
+    const response = await client().get(`/sms/3/logs?${params.toString()}`);
+    if (response.status < 200 || response.status >= 300) {
+      throw classifyHttpFailure(response.status, response.data);
+    }
+    out.push(...parseDeliveryReportPayload(response.data));
   }
 
-  return parseDeliveryReportPayload(response.data);
+  return out;
 }
 
 export function parseDeliveryReportPayload(body: unknown): DeliveryReport[] {
@@ -423,7 +473,10 @@ export function parseDeliveryReportPayload(body: unknown): DeliveryReport[] {
         errorCode: hasError ? String(errorGroup?.id ?? errorGroup?.name ?? '') : null,
         errorMessage: hasError ? String(errorGroup?.description ?? errorGroup?.name ?? '') : null,
         doneAt: doneAt && !Number.isNaN(doneAt.getTime()) ? doneAt : null,
-        segmentCount: typeof item?.smsCount === 'number' ? item.smsCount : null,
+        // v1 logs / DLR webhook say smsCount; v3 logs say messageCount.
+        segmentCount:
+          typeof item?.smsCount === 'number' ? item.smsCount : typeof item?.messageCount === 'number' ? item.messageCount : null,
+        // Per segment — total cost is computed in smsMetrics.messageCost.
         priceAmount: typeof item?.price?.pricePerMessage === 'number' ? item.price.pricePerMessage : null,
         priceCurrency: item?.price?.currency ? String(item.price.currency) : null,
         callbackData: item?.callbackData ? String(item.callbackData) : null,
