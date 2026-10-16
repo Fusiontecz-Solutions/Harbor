@@ -170,6 +170,14 @@ export const SQL_IS_PENDING = Prisma.sql`("providerMessageId" IS NOT NULL AND st
 /** Never accepted, or rejected — includes the (theoretical) final row with no provider id. */
 export const SQL_IS_FAILED = Prisma.sql`(status = 'FAILED' OR ("providerMessageId" IS NULL AND status IN ('SENT','DELIVERED','UNDELIVERABLE')))`;
 
+/**
+ * One message's cost in its account currency (`priceCurrency`). Rows written
+ * before `costAmount` existed carry only the per-segment price, so they are
+ * extended by their segment count — the same rule as messageCost(). Null when
+ * the message was never priced.
+ */
+export const SQL_MESSAGE_COST = Prisma.sql`COALESCE("costAmount", "priceAmount" * COALESCE(NULLIF("segmentCount", 0), 1))`;
+
 /** Prisma where for "sent" outbound messages. */
 export const SENT_MESSAGE_WHERE: Prisma.MessagingMessageWhereInput = {
   direction: 'OUTBOUND',

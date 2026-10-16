@@ -5,7 +5,11 @@ import { getLimitState, type LimitState } from './quota';
 import { getPrepaidState, type PrepaidState } from './prepaid';
 import { getSendingState, type SendingState } from './state';
 
-export const CAPABILITIES = ['usage', 'broadcasts', 'reps', 'limit', 'prepaid'] as const;
+/**
+ * `metrics`: /usage, /broadcasts and /reps carry a `metrics` block with the shared
+ * SMS definitions (../messaging/smsMetrics.ts) and accept a `tz` query param.
+ */
+export const CAPABILITIES = ['usage', 'broadcasts', 'reps', 'limit', 'prepaid', 'metrics'] as const;
 
 /** Shape of GET /api/tenant-control/v1/status (Tenant Control API v2, a superset of v1). */
 export interface TenantStatus {

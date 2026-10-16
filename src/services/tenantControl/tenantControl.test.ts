@@ -11,8 +11,9 @@ jest.mock('./state', () => ({
 
 import { getQuotaConfig, getSendingState } from './state';
 import { periodStart, resetQuotaCache } from './quota';
-import { resolveRange } from './counting';
-import { toBroadcastStatus } from './reports';
+import { resolveRange, zonedDayKey, zonedDayStart } from './counting';
+import { BadRequest, collectUsage, toBroadcastStatus } from './reports';
+import { accFromRow, addAcc, emptyAcc, toMetrics } from './metrics';
 import { InfobipRequestError, sendSms } from '../messaging/infobip.service';
 
 const SECRET = 'test-secret';
@@ -128,5 +129,81 @@ describe('report helpers', () => {
     expect(toBroadcastStatus('QUEUED', null, now)).toBe('sending');
     expect(toBroadcastStatus('RUNNING', null, now)).toBe('sending');
     expect(toBroadcastStatus('COMPLETED', null, now)).toBe('completed');
+  });
+});
+
+describe('tz bucketing', () => {
+  const ET = 'America/New_York';
+
+  it('keeps UTC days when no tz is sent', () => {
+    const r = resolveRange({ from: '2026-10-05', to: '2026-10-15' }, new Date());
+    expect([r.start.toISOString(), r.end.toISOString(), r.tz]).toEqual(['2026-10-05T00:00:00.000Z', '2026-10-16T00:00:00.000Z', 'UTC']);
+  });
+
+  it('reads bounds as Eastern days, across the November DST change', () => {
+    const r = resolveRange({ from: '2026-10-31', to: '2026-11-01' }, new Date(), ET);
+    expect(r.start.toISOString()).toBe('2026-10-31T04:00:00.000Z'); // EDT
+    expect(r.end.toISOString()).toBe('2026-11-02T05:00:00.000Z'); // EST — 1 Nov is a 25-hour day
+    expect(zonedDayStart('2026-03-08', ET).toISOString()).toBe('2026-03-08T05:00:00.000Z');
+    expect(zonedDayStart('2026-03-09', ET).toISOString()).toBe('2026-03-09T04:00:00.000Z'); // 8 Mar is 23 hours
+  });
+
+  it('puts an evening-ET message on the Eastern day, not the next UTC day', () => {
+    const evening = Date.parse('2026-10-15T23:30:00-04:00'); // 03:30Z on the 16th
+    expect(zonedDayKey(evening, ET)).toBe('2026-10-15');
+    expect(zonedDayKey(evening, 'UTC')).toBe('2026-10-16');
+    expect(zonedDayKey(Date.parse('2026-11-01T23:59:00-05:00'), ET)).toBe('2026-11-01');
+  });
+
+  it('defaults "to" to today in the requested zone', () => {
+    const now = new Date('2026-10-16T02:00:00Z'); // 22:00 ET on the 15th
+    expect(resolveRange({}, now, ET).to).toBe('2026-10-15');
+    expect(resolveRange({}, now).to).toBe('2026-10-16');
+  });
+});
+
+describe('GET /usage metrics', () => {
+  beforeEach(() => queryRaw.mockReset());
+
+  const day = (date: string | null, extra: Record<string, unknown> = {}) => ({
+    day: date, sent: 5n, delivered: 3n, failed: 2n, segments: 7n, blocked: 1n, replied: 4n, optOut: 1n,
+    m_accepted: 4n, m_delivered: 3n, m_undeliverable: 1n, m_pending: 0n, m_failed: 1n, m_segments: 6n,
+    m_cost: '1.100001', m_priced: 4n, m_currencies: 1n, m_currency: 'BDT', m_cost_usd: '0.015', m_cost_usd_missing: 1n,
+    m_inbound: 4n, m_replies: 3n, m_repliers: 2n, m_opt_outs: 1n, ...extra,
+  });
+
+  it('rejects an unknown zone', async () => {
+    await expect(collectUsage({ tz: 'Mars/Olympus' })).rejects.toBeInstanceOf(BadRequest);
+  });
+
+  it('passes tz to the bucket expression and keeps every legacy field', async () => {
+    queryRaw.mockResolvedValue([day('2026-11-01'), day('2026-10-31'), day(null, { m_repliers: 3n, m_opt_outs: 1n })]);
+    const out = await collectUsage({ from: '2026-10-31', to: '2026-11-01', tz: 'America/New_York' });
+    const [, ...values] = queryRaw.mock.calls[0];
+    expect(JSON.stringify(values)).toContain('"America/New_York"');
+    expect(out.tz).toBe('America/New_York');
+    expect(out.daily.map((d) => d.date)).toEqual(['2026-10-31', '2026-11-01']);
+    expect(out.daily[0]).toMatchObject({ sent: 5, delivered: 3, failed: 2, segments: 7, blocked: 1, replied: 4, optOut: 1 });
+    expect(out.daily[0].metrics).toEqual({
+      accepted: 4, delivered: 3, undeliverable: 1, pending: 0, failedNotSent: 1, segments: 6,
+      costAccount: 1.100001, currency: 'BDT', costUsd: 0.015, costUsdMissing: 1,
+      inboundTotal: 4, replies: 3, repliers: 2, optOuts: 1,
+    });
+    // Additive totals are the exact sum of days; distinct ones come from the period row.
+    expect(out.totals.metrics).toMatchObject({ accepted: 8, segments: 12, costAccount: 2.200002, costUsd: 0.03, repliers: 3, optOuts: 1 });
+  });
+});
+
+describe('metrics definitions', () => {
+  it('sums money in micro-units so days reconcile exactly with the period', () => {
+    const total = emptyAcc();
+    for (let i = 0; i < 10; i++) addAcc(total, accFromRow({ m_cost: '0.1', m_currency: 'BDT', m_currencies: 1n, m_cost_usd: '0.1' }));
+    expect(toMetrics(total)).toMatchObject({ costAccount: 1, costUsd: 1 }); // not 0.9999999999999999
+  });
+
+  it('reports MIXED, not a meaningless sum, across currencies', () => {
+    const total = addAcc(accFromRow({ m_cost: '1', m_currency: 'BDT', m_currencies: 1n }), accFromRow({ m_cost: '1', m_currency: 'USD', m_currencies: 1n }));
+    expect(toMetrics(total)).toMatchObject({ costAccount: null, currency: 'MIXED' });
+    expect(toMetrics(emptyAcc())).toMatchObject({ costAccount: null, currency: null, costUsd: 0 });
   });
 });
