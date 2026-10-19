@@ -13,7 +13,30 @@ import {
   flushBroadcastCounters,
   recordBroadcastCounter,
 } from '../services/messaging/broadcast.service';
+import { randomUUID } from 'crypto';
 import { dispatchOutboundMessage, renderTemplate } from '../services/messaging/sms.service';
+import {
+  ensureBroadcastConversations,
+  markBroadcastBatchSubmitted,
+  recordOutboundMessagesBulk,
+  type BroadcastSubmitOutcome,
+} from '../services/messaging/conversation.service';
+import {
+  INFOBIP_BATCH_SIZE,
+  isInfobipConfigured,
+  sendSmsBatch,
+  toInfobipError,
+  type SendSmsBatchResult,
+} from '../services/messaging/infobip.service';
+import { normalizePhoneNumber } from '../services/messaging/phone';
+import { checkSuppressionBulk } from '../services/messaging/suppression.service';
+import {
+  acquireTokens,
+  getAccountBucket,
+  getBroadcastBucket,
+  getSenderBucket,
+  type TokenBucket,
+} from '../services/messaging/tokenBucket';
 import {
   acquireBroadcastChunkLock,
   broadcastChunkLockRetryDelayMs,
@@ -44,8 +67,11 @@ const createRedisConnection = (): ConnectionOptions =>
 
 const resolveConcurrency = (): number => {
   const raw = Number(process.env.BROADCAST_WORKER_CONCURRENCY);
-  if (!Number.isFinite(raw) || raw <= 0) return 10;
-  return Math.min(100, Math.max(1, Math.floor(raw)));
+  // Each active job is one campaign (the chunk lock), and a job waiting on its
+  // campaign's token bucket costs nothing — so this is "how many campaigns can
+  // progress at once", not a database load knob (MAX_CONCURRENT_SENDS is).
+  if (!Number.isFinite(raw) || raw <= 0) return 25;
+  return Math.min(200, Math.max(1, Math.floor(raw)));
 };
 
 /**
@@ -109,6 +135,26 @@ async function withSendSlot<T>(fn: () => Promise<T>): Promise<T> {
     sendWaiters.shift()?.();
   }
 }
+
+/** Bookkeeping attempts after the provider accepted a batch. */
+const BOOKKEEPING_ATTEMPTS = 3;
+
+/**
+ * Text broadcasts go through the batched path; MMS (one request per message
+ * at Infobip) and BROADCAST_BATCH_SEND=false use the per-message path.
+ */
+export const useBatchedSend = (mediaUrls: string[] | null | undefined): boolean =>
+  process.env.BROADCAST_BATCH_SEND !== 'false' && !(mediaUrls && mediaUrls.length > 0) && isInfobipConfigured();
+
+/** Connection never established — the request certainly did not reach Infobip. */
+const NOT_SENT_NETWORK_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH', 'ERR_INVALID_URL']);
+
+/**
+ * A network failure with no HTTP response where the request may still have
+ * been accepted (timeout, connection reset after sending).
+ */
+export const isAmbiguousNetworkFailure = (error: { statusCode: number; retryable: boolean; providerCode: string | null }): boolean =>
+  error.statusCode === 0 && error.retryable && !NOT_SENT_NETWORK_CODES.has(String(error.providerCode ?? ''));
 
 /** Give up on a recipient after this many requeue passes. */
 const MAX_RETRY_PASSES = (() => {
@@ -240,7 +286,7 @@ export async function recoverStalledBroadcasts(now = new Date()): Promise<{ resu
   return { resumed, paused };
 }
 
-async function processChunk(data: SmsBroadcastJobData): Promise<void> {
+export async function processChunk(data: SmsBroadcastJobData): Promise<void> {
   const pass = data.pass ?? 0;
   const broadcast = await prisma.smsBroadcast.findUnique({
     where: { id: data.broadcastId },
@@ -303,125 +349,402 @@ async function processChunk(data: SmsBroadcastJobData): Promise<void> {
   /** Recipients to try again on a later pass. */
   const retryIds: string[] = [];
 
-  const sendOne = async (recipient: (typeof recipients)[number]): Promise<void> => {
-    if (await isHalted()) {
-      // Hand the remainder back to QUEUED so a resume picks them up.
-      await prisma.smsBroadcastRecipient.updateMany({
-        where: { id: recipient.id, status: 'SENDING' },
-        data: { status: 'QUEUED' },
-      });
-      return;
-    }
+  /** Legacy path: one provider request and ~11 DB round trips per message. Used for MMS. */
+  const sendPerMessage = async (): Promise<void> => {
 
-    const body = renderTemplate(
-      broadcast.body,
-      (recipient.mergeData as Record<string, unknown> | null) ?? null,
-    );
-
-    const result = await dispatchOutboundMessage({
-      toNumber: recipient.phoneNumber,
-      fromNumber: broadcast.fromNumber,
-      body,
-      mediaUrls: broadcast.mediaUrls,
-      broadcastId: broadcast.id,
-      // Attribute campaign messages to whoever created the campaign, so
-      // per-user stats count them. Without this every broadcast message is
-      // sent by nobody.
-      sentById: broadcast.createdById ?? null,
-      bulkId: broadcast.campaignKey,
-      broadcastThrottlePerSecond: broadcast.throttlePerSecond,
-      rateLimitWaitMs: 60_000,
-    });
-
-    if (result.status === 'failed' && result.errorCode && PLATFORM_BLOCK_CODES.has(result.errorCode)) {
-      // Sending is switched off or the quota is used up: nothing else in this
-      // campaign can go out either. Pause it with the recipient still queued so
-      // an admin can resume once sending is allowed again.
-      halted = true;
-      await prisma.smsBroadcastRecipient.update({
-        where: { id: recipient.id },
-        data: { status: 'QUEUED', errorMessage: result.reason },
-      });
-      await prisma.smsBroadcast.updateMany({
-        where: { id: broadcast.id, status: 'RUNNING' },
-        data: { status: 'PAUSED' },
-      });
-      console.warn('[smsBroadcastWorker] pausing broadcast, platform refused sends:', broadcast.id, result.reason);
-      return;
-    }
-
-    switch (result.status) {
-      case 'sent':
-        await prisma.smsBroadcastRecipient.update({
-          where: { id: recipient.id },
-          data: {
-            status: 'SENT',
-            providerMessageId: result.providerMessageId,
-            sentAt: new Date(),
-            errorCode: null,
-            errorMessage: null,
-          },
+    const sendOne = async (recipient: (typeof recipients)[number]): Promise<void> => {
+      if (await isHalted()) {
+        // Hand the remainder back to QUEUED so a resume picks them up.
+        await prisma.smsBroadcastRecipient.updateMany({
+          where: { id: recipient.id, status: 'SENDING' },
+          data: { status: 'QUEUED' },
         });
-        recordBroadcastCounter(broadcast.id, 'sentCount');
-        recordBroadcastCounter(broadcast.id, 'queuedCount');
-        break;
+        return;
+      }
 
-      case 'suppressed':
-        await prisma.smsBroadcastRecipient.update({
-          where: { id: recipient.id },
-          data: { status: 'FAILED', errorMessage: result.reason, suppressedReason: 'MANUAL_BLOCK' },
-        });
-        recordBroadcastCounter(broadcast.id, 'suppressedCount');
-        recordBroadcastCounter(broadcast.id, 'queuedCount');
-        break;
+      const body = renderTemplate(
+        broadcast.body,
+        (recipient.mergeData as Record<string, unknown> | null) ?? null,
+      );
 
-      case 'rate_limited':
-        // Not a failure — return it to the queue for the next pass.
+      const result = await dispatchOutboundMessage({
+        toNumber: recipient.phoneNumber,
+        fromNumber: broadcast.fromNumber,
+        body,
+        mediaUrls: broadcast.mediaUrls,
+        broadcastId: broadcast.id,
+        // Attribute campaign messages to whoever created the campaign, so
+        // per-user stats count them. Without this every broadcast message is
+        // sent by nobody.
+        sentById: broadcast.createdById ?? null,
+        bulkId: broadcast.campaignKey,
+        broadcastThrottlePerSecond: broadcast.throttlePerSecond,
+        rateLimitWaitMs: 60_000,
+      });
+
+      if (result.status === 'failed' && result.errorCode && PLATFORM_BLOCK_CODES.has(result.errorCode)) {
+        // Sending is switched off or the quota is used up: nothing else in this
+        // campaign can go out either. Pause it with the recipient still queued so
+        // an admin can resume once sending is allowed again.
+        halted = true;
         await prisma.smsBroadcastRecipient.update({
           where: { id: recipient.id },
           data: { status: 'QUEUED', errorMessage: result.reason },
         });
-        retryIds.push(recipient.id);
-        break;
+        await prisma.smsBroadcast.updateMany({
+          where: { id: broadcast.id, status: 'RUNNING' },
+          data: { status: 'PAUSED' },
+        });
+        console.warn('[smsBroadcastWorker] pausing broadcast, platform refused sends:', broadcast.id, result.reason);
+        return;
+      }
 
-      case 'failed':
-      default:
-        if (result.retryable) {
+      switch (result.status) {
+        case 'sent':
+          await prisma.smsBroadcastRecipient.update({
+            where: { id: recipient.id },
+            data: {
+              status: 'SENT',
+              providerMessageId: result.providerMessageId,
+              sentAt: new Date(),
+              errorCode: null,
+              errorMessage: null,
+            },
+          });
+          recordBroadcastCounter(broadcast.id, 'sentCount');
+          recordBroadcastCounter(broadcast.id, 'queuedCount');
+          break;
+
+        case 'suppressed':
+          await prisma.smsBroadcastRecipient.update({
+            where: { id: recipient.id },
+            data: { status: 'FAILED', errorMessage: result.reason, suppressedReason: 'MANUAL_BLOCK' },
+          });
+          recordBroadcastCounter(broadcast.id, 'suppressedCount');
+          recordBroadcastCounter(broadcast.id, 'queuedCount');
+          break;
+
+        case 'rate_limited':
+          // Not a failure — return it to the queue for the next pass.
           await prisma.smsBroadcastRecipient.update({
             where: { id: recipient.id },
             data: { status: 'QUEUED', errorMessage: result.reason },
           });
           retryIds.push(recipient.id);
-        } else {
-          await prisma.smsBroadcastRecipient.update({
-            where: { id: recipient.id },
-            data: { status: 'FAILED', errorMessage: result.reason, sentAt: new Date() },
-          });
-          recordBroadcastCounter(broadcast.id, 'failedCount');
-          recordBroadcastCounter(broadcast.id, 'queuedCount');
-        }
-        break;
-    }
+          break;
 
-    await sleep(sendGapMs());
+        case 'failed':
+        default:
+          if (result.retryable) {
+            await prisma.smsBroadcastRecipient.update({
+              where: { id: recipient.id },
+              data: { status: 'QUEUED', errorMessage: result.reason },
+            });
+            retryIds.push(recipient.id);
+          } else {
+            await prisma.smsBroadcastRecipient.update({
+              where: { id: recipient.id },
+              data: { status: 'FAILED', errorMessage: result.reason, sentAt: new Date() },
+            });
+            recordBroadcastCounter(broadcast.id, 'failedCount');
+            recordBroadcastCounter(broadcast.id, 'queuedCount');
+          }
+          break;
+      }
+
+      await sleep(sendGapMs());
+    };
+
+    // A fixed pool of lanes pulling from a shared cursor.
+    let cursor = 0;
+    const lanes = Array.from({ length: Math.min(resolveChunkParallelism(), recipients.length) }, async () => {
+      while (cursor < recipients.length) {
+        const recipient = recipients[cursor++];
+        try {
+          await withSendSlot(() => sendOne(recipient));
+        } catch (err) {
+          // A DB hiccup on one recipient must not strand the rest of the lane;
+          // the row stays SENDING and recoverOrphanedRows settles it on retry.
+          console.error('[smsBroadcastWorker] send failed:', broadcast.id, recipient.id, (err as Error)?.message);
+          retryIds.push(recipient.id);
+        }
+      }
+    });
+    await Promise.all(lanes);
   };
 
-  // A fixed pool of lanes pulling from a shared cursor.
-  let cursor = 0;
-  const lanes = Array.from({ length: Math.min(resolveChunkParallelism(), recipients.length) }, async () => {
-    while (cursor < recipients.length) {
-      const recipient = recipients[cursor++];
-      try {
-        await withSendSlot(() => sendOne(recipient));
-      } catch (err) {
-        // A DB hiccup on one recipient must not strand the rest of the lane;
-        // the row stays SENDING and recoverOrphanedRows settles it on retry.
-        console.error('[smsBroadcastWorker] send failed:', broadcast.id, recipient.id, (err as Error)?.message);
-        retryIds.push(recipient.id);
+  /**
+   * Batched path (text broadcasts). Per provider batch of up to
+   * INFOBIP_BATCH_SIZE messages: one suppression lookup (2 queries), one Redis
+   * call for all rate-limit buckets, one conversation upsert, one message
+   * insert, ONE Infobip request, one bookkeeping statement.
+   */
+  const sendBatched = async (): Promise<void> => {
+    type Ready = (typeof recipients)[number] & { to: string };
+    const buckets = [
+      getAccountBucket(),
+      getBroadcastBucket(broadcast.id, broadcast.throttlePerSecond),
+      getSenderBucket(broadcast.fromNumber),
+    ].filter((b): b is TokenBucket => Boolean(b));
+    const parallel = resolveChunkParallelism();
+    const sentById = broadcast.createdById ?? null;
+
+    let cursor = 0;
+    const ready: Ready[] = [];
+    /** Set on a 429 / token timeout: hand the rest of the chunk to a later pass. */
+    let backOff = false;
+    const inflight = new Set<Promise<void>>();
+
+    const setRows = async (ids: string[], data: Record<string, unknown>, from: string[] = ['SENDING']) => {
+      if (ids.length === 0) return 0;
+      const res = await prisma.smsBroadcastRecipient.updateMany({
+        where: { id: { in: ids }, status: { in: from as never } },
+        data: data as never,
+      });
+      return res.count;
+    };
+
+    /** Take the next window of claimed rows, settle unparseable/suppressed ones, queue the rest. */
+    const refill = async (): Promise<void> => {
+      const window = recipients.slice(cursor, cursor + INFOBIP_BATCH_SIZE);
+      cursor += window.length;
+      const good: Ready[] = [];
+      const bad: string[] = [];
+      for (const r of window) {
+        const to = normalizePhoneNumber(r.phoneNumber);
+        if (to) good.push({ ...r, to });
+        else bad.push(r.id);
       }
+      if (bad.length) {
+        await setRows(bad, { status: 'FAILED', sentAt: new Date(), errorMessage: 'Unparseable destination number' });
+        recordBroadcastCounter(broadcast.id, 'failedCount', bad.length);
+      }
+      if (good.length === 0) return;
+
+      let verdicts: Awaited<ReturnType<typeof checkSuppressionBulk>>;
+      try {
+        // Checked per batch, right before sending, so a STOP that lands
+        // mid-campaign is honoured from the next batch on.
+        verdicts = await checkSuppressionBulk(good.map((r) => r.to));
+      } catch (err) {
+        // Fail closed: cannot prove these are safe to message — retry later.
+        console.error('[smsBroadcastWorker] suppression lookup failed, requeueing batch:', (err as Error)?.message);
+        await setRows(good.map((r) => r.id), { status: 'QUEUED' });
+        retryIds.push(...good.map((r) => r.id));
+        return;
+      }
+
+      const suppressedBy = new Map<string, { reason: string; message: string; ids: string[] }>();
+      for (const r of good) {
+        const v = verdicts.get(r.to);
+        if (!v?.suppressed) {
+          ready.push(r);
+          continue;
+        }
+        const reason = v.reason ?? 'MANUAL_BLOCK';
+        const message = v.reason ? `${v.reason}${v.source ? ` (${v.source})` : ''}` : 'suppressed';
+        const key = `${reason}|${message}`;
+        const group = suppressedBy.get(key) ?? { reason, message, ids: [] };
+        group.ids.push(r.id);
+        suppressedBy.set(key, group);
+      }
+      for (const g of suppressedBy.values()) {
+        await setRows(g.ids, { status: 'FAILED', errorMessage: g.message, suppressedReason: g.reason });
+        recordBroadcastCounter(broadcast.id, 'suppressedCount', g.ids.length);
+      }
+    };
+
+    const sendSlice = async (slice: Ready[]): Promise<void> => {
+      const items = slice.map((r) => ({
+        r,
+        messageId: randomUUID(),
+        body: renderTemplate(broadcast.body, (r.mergeData as Record<string, unknown> | null) ?? null),
+      }));
+
+      // 1. Persist QUEUED message rows (their ids are the provider messageIds).
+      const convs = await withSendSlot(async () => {
+        const byNumber = await ensureBroadcastConversations({
+          businessNumber: broadcast.fromNumber,
+          contactNumbers: items.map((i) => i.r.to),
+          ownerUserId: sentById,
+        });
+        await recordOutboundMessagesBulk(
+          items.map((i) => {
+            const conversationId = byNumber.get(i.r.to);
+            if (!conversationId) throw new Error(`no conversation for ${i.r.to}`);
+            return {
+              id: i.messageId,
+              conversationId,
+              fromNumber: broadcast.fromNumber,
+              toNumber: i.r.to,
+              body: i.body,
+              sentById,
+              broadcastId: broadcast.id,
+            };
+          }),
+        );
+        return byNumber;
+      });
+
+      const messageIds = items.map((i) => i.messageId);
+      const recipientIds = items.map((i) => i.r.id);
+
+      // 2. One provider request for the whole slice. No DB connection held.
+      let results: SendSmsBatchResult[];
+      try {
+        results = await sendSmsBatch(
+          items.map((i) => ({ to: i.r.to, text: i.body, messageId: i.messageId })),
+          { from: broadcast.fromNumber, bulkId: broadcast.campaignKey, callbackData: broadcast.id },
+        );
+      } catch (err) {
+        const error = toInfobipError(err);
+        await withSendSlot(() => settleRequestFailure(error, messageIds, recipientIds));
+        return;
+      }
+
+      // 3. Bookkeeping. The provider has accepted the request, so a DB hiccup
+      // here must never turn these into FAILED — retry, then log.
+      const byMessage = new Map(results.map((r) => [r.messageId, r]));
+      const outcomes: BroadcastSubmitOutcome[] = items.map((i) => {
+        const r = byMessage.get(i.messageId)!;
+        const terminal = r.status === 'FAILED' || r.status === 'UNDELIVERABLE';
+        return {
+          messageId: i.messageId,
+          conversationId: convs.get(i.r.to)!,
+          recipientId: i.r.id,
+          providerMessageId: r.providerMessageId,
+          status: terminal ? (r.status as 'FAILED' | 'UNDELIVERABLE') : 'SENT',
+          errorCode: r.errorCode,
+          errorMessage: r.errorMessage,
+          segmentCount: r.segmentCount,
+          body: i.body,
+        };
+      });
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          await withSendSlot(() =>
+            markBroadcastBatchSubmitted({ providerBulkId: results[0]?.providerBulkId ?? null, outcomes }),
+          );
+          break;
+        } catch (err) {
+          if (attempt >= BOOKKEEPING_ATTEMPTS) {
+            console.error(
+              '[smsBroadcastWorker] provider accepted a batch but recording it failed:',
+              broadcast.id,
+              messageIds.length,
+              (err as Error)?.message,
+            );
+            break;
+          }
+          await sleep(1_000 * attempt);
+        }
+      }
+      recordBroadcastCounter(broadcast.id, 'sentCount', outcomes.length);
+    };
+
+    /** The whole request failed: decide per cause whether anything may have gone out. */
+    const settleRequestFailure = async (
+      error: ReturnType<typeof toInfobipError>,
+      messageIds: string[],
+      recipientIds: string[],
+    ): Promise<void> => {
+      const setMessages = (data: Record<string, unknown>) =>
+        prisma.messagingMessage.updateMany({ where: { id: { in: messageIds } }, data: data as never });
+
+      if (error.providerCode && PLATFORM_BLOCK_CODES.has(error.providerCode)) {
+        // Kill switch / quota / prepaid: nothing was sent and nothing else can
+        // be. Pause with the recipients still queued for an admin to resume.
+        halted = true;
+        await setMessages({ status: 'FAILED', errorCode: error.providerCode, errorMessage: error.message });
+        await setRows(recipientIds, { status: 'QUEUED', errorMessage: error.message });
+        await prisma.smsBroadcast.updateMany({ where: { id: broadcast.id, status: 'RUNNING' }, data: { status: 'PAUSED' } });
+        console.warn('[smsBroadcastWorker] pausing broadcast, platform refused sends:', broadcast.id, error.message);
+        return;
+      }
+
+      if (isAmbiguousNetworkFailure(error)) {
+        // The request may have reached Infobip (timeout / reset after send).
+        // Never resend — a duplicate is worse than a miss — and never claim
+        // FAILED for something that may be out: the message keeps our id as
+        // providerMessageId, so a late DLR or the log reconciler records the
+        // real outcome and lifts the recipient to DELIVERED.
+        await prisma.$executeRaw`
+          UPDATE "MessagingMessage"
+             SET "providerMessageId" = "id"::text,
+                 "errorCode" = ${error.providerCode},
+                 "errorMessage" = ${`No response from provider: ${error.message}`},
+                 "updatedAt" = NOW()
+           WHERE "id" = ANY(${messageIds}::uuid[])`;
+        const n = await prisma.$executeRaw`
+          UPDATE "SmsBroadcastRecipient" r
+             SET "status" = 'FAILED',
+                 "providerMessageId" = m."id"::text,
+                 "sentAt" = NOW(),
+                 "errorMessage" = 'No response from provider; delivery unknown. Not retried to avoid a duplicate message.',
+                 "updatedAt" = NOW()
+            FROM unnest(${recipientIds}::uuid[], ${messageIds}::uuid[]) AS m(rid, "id")
+           WHERE r."id" = m.rid AND r."status" = 'SENDING'`;
+        recordBroadcastCounter(broadcast.id, 'failedCount', Number(n) || 0);
+        return;
+      }
+
+      if (error.retryable) {
+        // 429 / 5xx with a response, or a connect failure: nothing was accepted.
+        await setMessages({ status: 'QUEUED', errorCode: error.providerCode, errorMessage: error.message });
+        await setRows(recipientIds, { status: 'QUEUED', errorMessage: error.message });
+        retryIds.push(...recipientIds);
+        if (error.statusCode === 429 || error.statusCode >= 500) backOff = true;
+        return;
+      }
+
+      await setMessages({ status: 'FAILED', errorCode: error.providerCode, errorMessage: error.message });
+      const n = await setRows(recipientIds, { status: 'FAILED', errorMessage: error.message, sentAt: new Date() });
+      recordBroadcastCounter(broadcast.id, 'failedCount', n);
+    };
+
+    while (!backOff) {
+      if (await isHalted()) break;
+      if (ready.length === 0) {
+        if (cursor >= recipients.length) break;
+        await withSendSlot(refill);
+        continue;
+      }
+
+      const granted = await acquireTokens(buckets, Math.min(INFOBIP_BATCH_SIZE, ready.length), 60_000);
+      if (granted === 0) {
+        backOff = true; // rate limited for a whole minute — not a failure
+        break;
+      }
+
+      while (inflight.size >= parallel) await Promise.race(inflight);
+      const slice = ready.splice(0, granted);
+      const task: Promise<void> = sendSlice(slice)
+        .catch(async (err) => {
+          // DB error before the provider call: nothing was sent. Rows still
+          // SENDING are settled by recoverOrphanedRows on the retry pass.
+          console.error('[smsBroadcastWorker] batch failed:', broadcast.id, slice.length, (err as Error)?.message);
+          retryIds.push(...slice.map((r) => r.id));
+        })
+        .finally(() => inflight.delete(task));
+      inflight.add(task);
+      await sleep(sendGapMs());
     }
-  });
-  await Promise.all(lanes);
+    await Promise.all(inflight);
+
+    // Whatever was not attempted goes back to QUEUED: a resume picks it up
+    // after a pause; a back-off schedules it for the next pass.
+    const leftover = [...ready.map((r) => r.id), ...recipients.slice(cursor).map((r) => r.id)];
+    if (leftover.length) {
+      await setRows(leftover, { status: 'QUEUED' });
+      if (!halted) retryIds.push(...leftover);
+    }
+  };
+
+  if (useBatchedSend(broadcast.mediaUrls)) {
+    await sendBatched();
+  } else {
+    await sendPerMessage();
+  }
 
   if (retryIds.length > 0 && !halted) {
     if (pass + 1 > MAX_RETRY_PASSES) {

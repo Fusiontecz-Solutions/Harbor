@@ -42,10 +42,14 @@ export interface SmsBroadcastJobData {
   pass?: number;
 }
 
-/** Recipients per job. Override with BROADCAST_CHUNK_SIZE. */
+/**
+ * Recipients per job. Override with BROADCAST_CHUNK_SIZE. 500 = 10 provider
+ * batches: big enough that the hand-off between chunks (lock release, job
+ * pickup, a ~1s lock-retry delay) is a small share of a chunk's runtime.
+ */
 export const BROADCAST_CHUNK_SIZE = (() => {
   const raw = Number(process.env.BROADCAST_CHUNK_SIZE);
-  if (!Number.isFinite(raw) || raw <= 0) return 100;
+  if (!Number.isFinite(raw) || raw <= 0) return 500;
   return Math.min(1_000, Math.max(1, Math.floor(raw)));
 })();
 

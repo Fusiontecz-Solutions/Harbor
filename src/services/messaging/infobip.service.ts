@@ -29,7 +29,12 @@ import axios, { AxiosError, type AxiosInstance } from 'axios';
 import { toInfobipDestination, toInfobipSender } from './phone';
 import { getSendingState, SENDING_DISABLED_CODE } from '../tenantControl/state';
 import { isOverQuota, LIMIT_REACHED_CODE, recordQuotaUse } from '../tenantControl/quota';
-import { assertPrepaidBalance, deductPrepaidAfterSend, PrepaidExhaustedError } from '../tenantControl/prepaid';
+import {
+  assertPrepaidBalance,
+  deductPrepaidAfterSend,
+  deductPrepaidAfterSendBatch,
+  PrepaidExhaustedError,
+} from '../tenantControl/prepaid';
 
 export type NormalizedStatus =
   | 'QUEUED'
@@ -226,13 +231,8 @@ function classifyHttpFailure(status: number, body: unknown): InfobipRequestError
   return new InfobipRequestError(message, status, providerCode, retryable);
 }
 
-/**
- * Send one SMS (or MMS when `mediaUrls` is present).
- *
- * `messageId` is our own uuid — Infobip echoes it on every delivery report, so
- * the DLR handler can find the row without a secondary lookup table.
- */
-export async function sendSms(input: SendSmsInput): Promise<SendSmsResult> {
+/** Platform gates (console kill switch, quota, prepaid) — checked once per request. */
+async function assertPlatformAllowsSend(count: number): Promise<void> {
   const sending = await getSendingState();
   if (!sending.enabled) {
     throw new InfobipRequestError(
@@ -255,13 +255,23 @@ export async function sendSms(input: SendSmsInput): Promise<SendSmsResult> {
     );
   }
   try {
-    await assertPrepaidBalance(null);
+    await assertPrepaidBalance(null, count);
   } catch (err) {
     if (err instanceof PrepaidExhaustedError) {
       throw new InfobipRequestError(err.message, 429, LIMIT_REACHED_CODE, false);
     }
     throw err;
   }
+}
+
+/**
+ * Send one SMS (or MMS when `mediaUrls` is present).
+ *
+ * `messageId` is our own uuid — Infobip echoes it on every delivery report, so
+ * the DLR handler can find the row without a secondary lookup table.
+ */
+export async function sendSms(input: SendSmsInput): Promise<SendSmsResult> {
+  await assertPlatformAllowsSend(1);
 
   const from = toInfobipSender(input.from?.trim() || getDefaultSender());
   if (!from) throw new InfobipNotConfiguredError(['INFOBIP_SENDER']);
@@ -312,6 +322,90 @@ async function sendText(input: SendSmsInput, from: string): Promise<SendSmsResul
     errorCode: result?.status?.groupName === 'REJECTED' ? String(result?.status?.id ?? '') || null : null,
     errorMessage: failureDescription(result?.status),
   };
+}
+
+/** Messages per `/sms/2/text/advanced` request in batch sends. */
+export const INFOBIP_BATCH_SIZE = (() => {
+  const raw = Number(process.env.INFOBIP_BATCH_SIZE);
+  if (!Number.isFinite(raw) || raw <= 0) return 50;
+  return Math.min(200, Math.max(1, Math.floor(raw)));
+})();
+
+export interface SendSmsBatchItem {
+  to: string;
+  text: string;
+  /** Our own uuid — required in a batch: it is how results map back to rows. */
+  messageId: string;
+}
+
+export interface SendSmsBatchResult extends SendSmsResult {
+  messageId: string;
+}
+
+/**
+ * Send several text messages (each with its own body) in ONE HTTP request.
+ *
+ * `/sms/2/text/advanced` takes an array of `messages`, each with its own
+ * text and destinations; we put exactly one destination with our own
+ * `messageId` in each, so every result maps back to its row and every DLR
+ * still joins on our id. Platform gates run once for the whole request.
+ *
+ * Throws like `sendSms` when the REQUEST fails (nothing was accepted, or — on
+ * a network error with no response — acceptance is unknown). Per-message
+ * rejections come back as results with status FAILED.
+ */
+export async function sendSmsBatch(
+  items: SendSmsBatchItem[],
+  options: { from: string; bulkId?: string | null; callbackData?: string | null },
+): Promise<SendSmsBatchResult[]> {
+  if (items.length === 0) return [];
+  await assertPlatformAllowsSend(items.length);
+
+  const from = toInfobipSender(options.from?.trim() || getDefaultSender());
+  if (!from) throw new InfobipNotConfiguredError(['INFOBIP_SENDER']);
+
+  const url = notifyUrl();
+  const payload: Record<string, unknown> = {
+    messages: items.map((item) => ({
+      from,
+      destinations: [{ to: toInfobipDestination(item.to), messageId: item.messageId }],
+      text: item.text,
+      ...(url ? { notifyUrl: url, notifyContentType: 'application/json' } : {}),
+      ...(options.callbackData ? { callbackData: options.callbackData } : {}),
+    })),
+  };
+  if (options.bulkId) payload.bulkId = options.bulkId;
+
+  const response = await client().post('/sms/2/text/advanced', payload);
+  if (response.status < 200 || response.status >= 300) {
+    throw classifyHttpFailure(response.status, response.data);
+  }
+
+  const data = response.data as { bulkId?: string; messages?: Array<Record<string, any>> };
+  const byId = new Map<string, Record<string, any>>();
+  for (const m of data?.messages ?? []) if (m?.messageId) byId.set(String(m.messageId), m);
+
+  const results = items.map((item, index): SendSmsBatchResult => {
+    // Infobip echoes our messageId; fall back to position if it ever does not.
+    const r = byId.get(item.messageId) ?? data?.messages?.[index];
+    return {
+      messageId: item.messageId,
+      // The request was accepted (2xx): the provider id is ours even when the
+      // per-message entry is missing, so the DLR can still find the row.
+      providerMessageId: r?.messageId ?? item.messageId,
+      providerBulkId: data?.bulkId ?? options.bulkId ?? null,
+      status: normalizeStatusGroup(r?.status?.groupName),
+      segmentCount: typeof r?.smsCount === 'number' ? r.smsCount : null,
+      rawStatusName: r?.status?.name ?? null,
+      errorCode: r?.status?.groupName === 'REJECTED' ? String(r?.status?.id ?? '') || null : null,
+      errorMessage: failureDescription(r?.status),
+    };
+  });
+
+  const accepted = results.filter((r) => r.status !== 'FAILED');
+  for (const r of accepted) recordQuotaUse(r.segmentCount);
+  await deductPrepaidAfterSendBatch(accepted.map((r) => r.segmentCount));
+  return results;
 }
 
 /** MMS uses a different endpoint and one request per destination. */

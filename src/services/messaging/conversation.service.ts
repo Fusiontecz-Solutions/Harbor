@@ -543,3 +543,162 @@ export async function softDeleteConversation(conversationId: string): Promise<vo
   });
   await invalidateConversationCaches(conversationId);
 }
+
+/* ============================================================================
+ * Batch variants for the broadcast sender.
+ *
+ * A broadcast batch of N messages used to cost ~11 sequential database round
+ * trips per message (contact lookup, conversation upsert, message insert, a
+ * 4-statement summary transaction, recipient update…). These do the same
+ * writes for the whole batch in 3 statements, with the same semantics as the
+ * single-message functions above.
+ * ==========================================================================*/
+
+/**
+ * Bulk {@link ensureConversation} for broadcast sends (restore: false):
+ * creates missing threads with the contact link and owner, and on an existing
+ * thread only backfills the contact link — never ownership, counters or
+ * deletedAt. One INSERT … ON CONFLICT for the whole batch.
+ */
+export async function ensureBroadcastConversations(input: {
+  businessNumber: string;
+  contactNumbers: string[];
+  ownerUserId?: string | null;
+}): Promise<Map<string, string>> {
+  const businessNumber = normalizeSender(input.businessNumber);
+  const numbers = [
+    ...new Set(input.contactNumbers.map((n) => normalizePhoneNumber(n)).filter((n): n is string => Boolean(n))),
+  ];
+  const byNumber = new Map<string, string>();
+  if (numbers.length === 0) return byNumber;
+
+  const rows = await prisma.$queryRaw<Array<{ id: string; contactNumber: string }>>`
+    INSERT INTO "MessagingConversation"
+           ("id", "businessNumber", "contactNumber", "contactId", "ownerUserId", "createdAt", "updatedAt")
+    SELECT gen_random_uuid(), ${businessNumber}, t.n,
+           (SELECT c."id" FROM "MessagingContact" c WHERE c."phoneNumber" = t.n LIMIT 1),
+           ${input.ownerUserId ?? null}::uuid, NOW(), NOW()
+      FROM unnest(${numbers}::text[]) AS t(n)
+    ON CONFLICT ("businessNumber", "contactNumber") DO UPDATE
+       SET "contactId" = COALESCE(EXCLUDED."contactId", "MessagingConversation"."contactId")
+    RETURNING "id", "contactNumber"`;
+
+  for (const row of rows) byNumber.set(row.contactNumber, row.id);
+  return byNumber;
+}
+
+/** Bulk {@link recordOutboundMessage}: QUEUED rows with caller-chosen ids (the provider messageId). */
+export async function recordOutboundMessagesBulk(
+  rows: Array<{
+    id: string;
+    conversationId: string;
+    fromNumber: string;
+    toNumber: string;
+    body: string;
+    sentById?: string | null;
+    broadcastId?: string | null;
+  }>,
+): Promise<void> {
+  if (rows.length === 0) return;
+  await prisma.messagingMessage.createMany({
+    data: rows.map((r) => ({
+      id: r.id,
+      conversationId: r.conversationId,
+      direction: 'OUTBOUND' as const,
+      fromNumber: normalizeSender(r.fromNumber),
+      toNumber: normalizePhoneNumber(r.toNumber) ?? r.toNumber,
+      body: r.body,
+      mediaUrls: [],
+      status: 'QUEUED' as const,
+      sentById: r.sentById ?? null,
+      broadcastId: r.broadcastId ?? null,
+    })),
+  });
+}
+
+export interface BroadcastSubmitOutcome {
+  messageId: string;
+  conversationId: string;
+  recipientId: string;
+  providerMessageId: string | null;
+  status: 'SENT' | 'FAILED' | 'UNDELIVERABLE';
+  errorCode: string | null;
+  errorMessage: string | null;
+  segmentCount: number | null;
+  body: string;
+}
+
+/**
+ * Bulk {@link markOutboundSubmitted} + the recipient-row update, in ONE
+ * statement (data-modifying CTEs run atomically): message rows get the
+ * provider outcome, conversation summaries roll forward, and recipient rows
+ * still in SENDING move to SENT/FAILED. Returns how many recipient rows moved.
+ */
+export async function markBroadcastBatchSubmitted(input: {
+  providerBulkId: string | null;
+  outcomes: BroadcastSubmitOutcome[];
+}): Promise<number> {
+  const o = input.outcomes;
+  if (o.length === 0) return 0;
+  const now = new Date();
+
+  const moved = await prisma.$executeRaw`
+    WITH v AS (
+      SELECT * FROM unnest(
+        ${o.map((x) => x.messageId)}::uuid[],
+        ${o.map((x) => x.conversationId)}::uuid[],
+        ${o.map((x) => x.recipientId)}::uuid[],
+        ${o.map((x) => x.providerMessageId)}::text[],
+        ${o.map((x) => x.status)}::text[],
+        ${o.map((x) => x.errorCode)}::text[],
+        ${o.map((x) => x.errorMessage)}::text[],
+        ${o.map((x) => x.segmentCount)}::int[],
+        ${o.map((x) => x.body.slice(0, 500))}::text[]
+      ) AS t(message_id, conversation_id, recipient_id, provider_id, status, error_code, error_message, segments, body)
+    ), m AS (
+      UPDATE "MessagingMessage" mm
+         SET "providerMessageId" = v.provider_id,
+             "providerBulkId"    = ${input.providerBulkId},
+             "status"            = v.status::"MessagingMessageStatus",
+             "errorCode"         = v.error_code,
+             "errorMessage"      = v.error_message,
+             "segmentCount"      = v.segments,
+             "sentAt"            = ${now},
+             "updatedAt"         = ${now}
+        FROM v
+       WHERE mm."id" = v.message_id
+      RETURNING mm."id"
+    ), c AS (
+      UPDATE "MessagingConversation" mc
+         SET "lastMessageId"        = v.message_id,
+             "lastMessageText"      = v.body,
+             "lastMessageAt"        = ${now},
+             "lastMessageDirection" = 'OUTBOUND',
+             "lastMessageHasMedia"  = false,
+             "messageCount"         = mc."messageCount" + 1,
+             "updatedAt"            = ${now}
+        FROM v
+       WHERE mc."id" = v.conversation_id
+      RETURNING mc."id"
+    )
+    UPDATE "SmsBroadcastRecipient" r
+       SET "status"            = (CASE WHEN v.status = 'SENT' THEN 'SENT' ELSE 'FAILED' END)::"MessagingMessageStatus",
+           "providerMessageId" = v.provider_id,
+           "sentAt"            = ${now},
+           "errorCode"         = CASE WHEN v.status = 'SENT' THEN NULL ELSE v.error_code END,
+           "errorMessage"      = CASE WHEN v.status = 'SENT' THEN NULL ELSE v.error_message END,
+           "updatedAt"         = ${now}
+      FROM v
+     WHERE r."id" = v.recipient_id
+       AND r."status" = 'SENDING'`;
+
+  await invalidateConversationCachesMany(o.map((x) => x.conversationId));
+  return Number(moved) || 0;
+}
+
+/** One Redis pipeline for a whole batch of touched threads. */
+export async function invalidateConversationCachesMany(conversationIds: string[]): Promise<void> {
+  const unique = [...new Set(conversationIds)];
+  if (unique.length === 0) return;
+  await cacheBumpGeneration(...unique.map(messagesGeneration), LIST_GENERATION);
+}

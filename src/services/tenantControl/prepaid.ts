@@ -112,11 +112,14 @@ function unitCost(state: PrepaidState, segments: number | null, direction: 'outb
   return units * rate;
 }
 
-/** Refuses the send when prepaid is configured and balance is too low. */
-export async function assertPrepaidBalance(segments: number | null): Promise<void> {
+/**
+ * Refuses the send when prepaid is configured and balance is too low.
+ * `count` lets a provider batch check its whole cost once.
+ */
+export async function assertPrepaidBalance(segments: number | null, count = 1): Promise<void> {
   const state = await getPrepaidState();
   if (!state || state.pricePerUnit <= 0) return;
-  const cost = unitCost(state, segments, 'outbound');
+  const cost = unitCost(state, segments, 'outbound') * Math.max(1, count);
   if (state.balance + 1e-9 < cost) throw new PrepaidExhaustedError();
 }
 
@@ -134,6 +137,24 @@ export async function deductPrepaidAfterSend(segments: number | null): Promise<v
     cache = null;
   } catch (err) {
     console.error('[tenant-control] prepaid deduct failed:', (err as Error)?.message);
+  }
+}
+
+/** Batch variant: one read + one UPDATE for every message a provider batch accepted. */
+export async function deductPrepaidAfterSendBatch(segments: Array<number | null>): Promise<void> {
+  if (segments.length === 0) return;
+  const state = await getPrepaidState({ fresh: true });
+  if (!state || state.pricePerUnit <= 0) return;
+  const cost = segments.reduce<number>((sum, s) => sum + unitCost(state, s, 'outbound'), 0);
+  try {
+    await prisma.$executeRaw`
+      UPDATE "TenantControl"
+         SET "prepaidBalance" = GREATEST(0, COALESCE("prepaidBalance", 0) - ${cost}),
+             "prepaidUpdatedAt" = NOW()
+       WHERE "id" = ${ROW_ID}`;
+    cache = null;
+  } catch (err) {
+    console.error('[tenant-control] prepaid batch deduct failed:', (err as Error)?.message);
   }
 }
 

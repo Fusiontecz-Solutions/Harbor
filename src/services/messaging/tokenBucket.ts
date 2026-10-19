@@ -62,9 +62,9 @@ export interface TokenBucketOptions {
 }
 
 export class TokenBucket {
-  private readonly key: string;
-  private readonly capacity: number;
-  private readonly refillPerSecond: number;
+  readonly key: string;
+  readonly capacity: number;
+  readonly refillPerSecond: number;
 
   constructor(key: string, options: TokenBucketOptions) {
     this.key = key;
@@ -148,6 +148,77 @@ export class TokenBucket {
   }
 }
 
+/**
+ * Take up to `wanted` tokens from several buckets at once, atomically: the
+ * grant is the smallest whole number every bucket can afford, and that many is
+ * deducted from each. One Redis call per provider batch instead of two per
+ * message, and no bucket is drained for a send another bucket refused.
+ *
+ * KEYS = bucket keys; ARGV = wanted, now, then capacity/refill per key.
+ * Keys share the `{harbor-rate}` hash tag so this also works on Redis Cluster.
+ */
+const TAKE_UP_TO_SCRIPT = `
+local wanted = tonumber(ARGV[1])
+local now = tonumber(ARGV[2])
+local grant = wanted
+local levels = {}
+for i, key in ipairs(KEYS) do
+  local cap = tonumber(ARGV[1 + i * 2])
+  local refill = tonumber(ARGV[2 + i * 2])
+  local tokens = tonumber(redis.call('HGET', key, 'tokens'))
+  local ts = tonumber(redis.call('HGET', key, 'ts'))
+  if tokens == nil then tokens = cap end
+  if ts == nil then ts = now end
+  tokens = math.min(cap, tokens + math.max(0, now - ts) / 1000.0 * refill)
+  levels[i] = tokens
+  local whole = math.floor(tokens)
+  if whole < grant then grant = whole end
+end
+if grant < 0 then grant = 0 end
+for i, key in ipairs(KEYS) do
+  redis.call('HMSET', key, 'tokens', levels[i] - grant, 'ts', now)
+  redis.call('PEXPIRE', key, 60000)
+end
+return grant
+`;
+
+/** Non-blocking: how many of `wanted` sends every bucket allows right now (0..wanted). */
+export async function takeUpTo(buckets: TokenBucket[], wanted: number): Promise<number> {
+  const want = Math.max(0, Math.floor(wanted));
+  if (want === 0 || buckets.length === 0) return want;
+  const redis = getRedisClient();
+  if (!redis) return want; // fail-open, same as TokenBucket.take
+
+  const args: string[] = [String(want), String(Date.now())];
+  for (const b of buckets) args.push(String(b.capacity), String(b.refillPerSecond));
+  try {
+    const granted = await redis.eval(TAKE_UP_TO_SCRIPT, buckets.length, ...buckets.map((b) => b.key), ...args);
+    return Math.max(0, Math.min(want, Number(granted) || 0));
+  } catch (err) {
+    console.warn('[messaging:tokenBucket] takeUpTo failed, allowing send:', (err as Error)?.message);
+    return want;
+  }
+}
+
+/**
+ * Wait until at least one token is available in every bucket, then take as
+ * many as are available up to `wanted`. Returns 0 on timeout. Returning a
+ * partial grant immediately (instead of waiting for all `wanted`) keeps a
+ * slow campaign sending steadily in small batches.
+ */
+export async function acquireTokens(buckets: TokenBucket[], wanted: number, timeoutMs = 60_000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  const slowest = Math.min(...buckets.map((b) => b.refillPerSecond), Number.POSITIVE_INFINITY);
+  const sleepMs = Number.isFinite(slowest) ? Math.min(1_000, Math.max(25, Math.ceil(1000 / slowest))) : 25;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const granted = await takeUpTo(buckets, wanted);
+    if (granted > 0) return granted;
+    if (Date.now() >= deadline) return 0;
+    await new Promise((resolve) => setTimeout(resolve, sleepMs));
+  }
+}
+
 const envInt = (name: string, fallback: number): number => {
   const raw = Number(process.env[name]);
   return Number.isFinite(raw) && raw > 0 ? raw : fallback;
@@ -159,7 +230,7 @@ const envInt = (name: string, fallback: number): number => {
  */
 export function getAccountBucket(): TokenBucket {
   const perSecond = envInt('INFOBIP_RATE_PER_SECOND', 30);
-  return new TokenBucket('harbor:msg:rate:infobip:account', {
+  return new TokenBucket('harbor:msg:rate:{harbor-rate}:account', {
     capacity: envInt('INFOBIP_RATE_BURST', perSecond * 2),
     refillPerSecond: perSecond,
   });
@@ -174,7 +245,22 @@ export function getBroadcastBucket(broadcastId: string, throttlePerSecond?: numb
     ? throttlePerSecond
     : envInt('BROADCAST_RATE_PER_SECOND', 10);
 
-  return new TokenBucket(`harbor:msg:rate:infobip:bcast:${broadcastId}`, {
+  return new TokenBucket(`harbor:msg:rate:{harbor-rate}:bcast:${broadcastId}`, {
+    capacity: Math.max(1, Math.ceil(perSecond)),
+    refillPerSecond: perSecond,
+  });
+}
+
+/**
+ * Optional per-sender bucket (one long code / toll-free number). Carriers rate
+ * limit per number and per 10DLC campaign, not per broadcast, so several
+ * campaigns on the same number must share one budget. Unset
+ * SENDER_RATE_PER_SECOND (default) = no per-sender limit.
+ */
+export function getSenderBucket(fromNumber: string): TokenBucket | null {
+  const perSecond = Number(process.env.SENDER_RATE_PER_SECOND);
+  if (!Number.isFinite(perSecond) || perSecond <= 0) return null;
+  return new TokenBucket(`harbor:msg:rate:{harbor-rate}:sender:${fromNumber}`, {
     capacity: Math.max(1, Math.ceil(perSecond)),
     refillPerSecond: perSecond,
   });
