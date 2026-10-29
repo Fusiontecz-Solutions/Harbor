@@ -118,6 +118,8 @@ export async function recordInboundMessage(input: {
   receivedAt?: Date;
   /** Set when the reply is to a broadcast — surfaces the campaign in chat. */
   broadcastId?: string | null;
+  /** Segments as counted by the provider. */
+  segmentCount?: number | null;
 }): Promise<{ conversationId: string; messageId: string; duplicate: boolean; isStop: boolean } | null> {
   const contactNumber = normalizePhoneNumber(input.fromNumber);
   const businessNumber = normalizeSender(input.toNumber);
@@ -163,6 +165,7 @@ export async function recordInboundMessage(input: {
         body: input.body,
         mediaUrls: input.mediaUrls ?? [],
         status: 'RECEIVED',
+        segmentCount: input.segmentCount ?? null,
         broadcastId: input.broadcastId ?? null,
         isStopKeyword: isStop,
         sentAt: receivedAt,

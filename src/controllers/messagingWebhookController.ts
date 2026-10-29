@@ -86,6 +86,7 @@ class MessagingWebhookController {
           mediaUrls: message.mediaUrls,
           receivedAt: message.receivedAt,
           broadcastId,
+          segmentCount: message.segmentCount,
         });
 
         if (!result) continue;

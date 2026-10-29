@@ -79,6 +79,8 @@ export interface InboundMessage {
   /** Infobip's own keyword extraction, when the number is keyword-enabled. */
   keyword: string | null;
   campaignReference: string | null;
+  /** Segments Infobip received (`smsCount`); null when the callback omits it. */
+  segmentCount: number | null;
 }
 
 export interface DeliveryReport {
@@ -478,6 +480,7 @@ export function parseInboundPayload(body: unknown): InboundMessage[] {
         receivedAt: Number.isNaN(receivedAt.getTime()) ? new Date() : receivedAt,
         keyword: item?.keyword ? String(item.keyword) : null,
         campaignReference: item?.callbackData ? String(item.callbackData) : null,
+        segmentCount: typeof item?.smsCount === 'number' ? item.smsCount : null,
       },
     ];
   });
