@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { Controller, useForm } from "react-hook-form"
 import { Card, CardContent, CardHeader, CardTitle } from "../ui/card"
 import { Textarea } from "../ui/textarea"
@@ -21,6 +21,9 @@ import { useTheme } from "@/context/ThemeContext";
 import { formatDate as formatDateUtil } from "@/lib/utils";
 import { Avatar, AvatarFallback } from "../ui/avatar";
 // Yup validation schema
+/** Comments fetched per "Load older comments" step. */
+const COMMENTS_PAGE_SIZE = 50;
+
 const commentSchema = yup.object({
     comment: yup.string().required("Comment is required").min(1, "Comment must not be empty"),
     commentType: yup.string().oneOf(["internal", "external"]).required("Comment type is required"),
@@ -93,7 +96,7 @@ const CommentSection = ({
     // console.log("loggedInUser", loggedInUser);
 
     // Redux selectors
-    const { loading: commentsLoading, data: comments } = useSelector(
+    const { loading: commentsLoading, data: comments, pagination: commentsPagination } = useSelector(
         (state: RootState) => state.comments
     );
     const { loading: createLoading, success: createSuccess, error: createError } = useSelector(
@@ -146,12 +149,34 @@ const CommentSection = ({
         return { replyToId, quoteText, bodyText };
     };
 
+    // Comments load newest-first, COMMENTS_PAGE_SIZE at a time. Refreshes
+    // (after posting, editing, deleting) re-request everything loaded so far
+    // in one call, so the list never shrinks under the user.
+    const [commentPages, setCommentPages] = useState(1);
+    const commentsLimitRef = useRef(COMMENTS_PAGE_SIZE);
+    commentsLimitRef.current = COMMENTS_PAGE_SIZE * commentPages;
+    const commentsLoadedOnce = useRef(false);
+
     // Fetch comments when applicationId changes
     useEffect(() => {
+        setCommentPages(1);
+        commentsLoadedOnce.current = false;
         if (applicationId) {
-            dispatch(getCommentsByApplication({ applicationId }));
+            dispatch(getCommentsByApplication({ applicationId, params: { page: 1, limit: COMMENTS_PAGE_SIZE } }));
         }
     }, [dispatch, applicationId]);
+
+    useEffect(() => {
+        if (!commentsLoading) commentsLoadedOnce.current = true;
+    }, [commentsLoading]);
+
+    const loadOlderComments = () => {
+        if (!applicationId) return;
+        const nextPages = commentPages + 1;
+        setCommentPages(nextPages);
+        dispatch(getCommentsByApplication({ applicationId, params: { page: 1, limit: COMMENTS_PAGE_SIZE * nextPages } }));
+    };
+    const hasOlderComments = Boolean(commentsPagination?.hasMore);
 
     // Fetch document requests when applicationId changes
     useEffect(() => {
@@ -175,7 +200,7 @@ const CommentSection = ({
             setReplyDraft("");
             // Refresh comments list
             if (applicationId) {
-                dispatch(getCommentsByApplication({ applicationId }));
+                dispatch(getCommentsByApplication({ applicationId, params: { page: 1, limit: commentsLimitRef.current } }));
             }
             dispatch(resetCreateComment());
         }
@@ -197,7 +222,7 @@ const CommentSection = ({
             });
             setEditingComment(null);
             if (applicationId) {
-                dispatch(getCommentsByApplication({ applicationId }));
+                dispatch(getCommentsByApplication({ applicationId, params: { page: 1, limit: commentsLimitRef.current } }));
             }
             dispatch(resetUpdateComment());
         }
@@ -256,7 +281,7 @@ const CommentSection = ({
             toast.success("Comment deleted successfully");
             // Refresh comments list
             if (applicationId) {
-                dispatch(getCommentsByApplication({ applicationId }));
+                dispatch(getCommentsByApplication({ applicationId, params: { page: 1, limit: commentsLimitRef.current } }));
             }
             dispatch(resetDeleteComment());
         }
@@ -1080,7 +1105,7 @@ const CommentSection = ({
                                 isDark ? "bg-[#0F1115] border-[#222A35]" : "bg-[#F8FAFC] border-[#E6EDF5]"
                             }`}
                         >
-                            {commentsLoading ? (
+                            {commentsLoading && !(commentsLoadedOnce.current && comments.length > 0) ? (
                                 <div className={`flex items-center justify-center ${compactLayout ? "py-4" : "py-8"}`}>
                                     <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                                     <span className="ml-2 text-sm text-muted-foreground">Loading comments...</span>
@@ -1095,6 +1120,20 @@ const CommentSection = ({
                             ) : (
                                 <>
                                     {commentsThread.roots.map((comment) => renderCommentThread(comment, 0))}
+                                    {hasOlderComments && (
+                                        <div className="flex justify-center pt-2">
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                size="sm"
+                                                onClick={loadOlderComments}
+                                                disabled={commentsLoading}
+                                            >
+                                                {commentsLoading && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
+                                                Load older comments
+                                            </Button>
+                                        </div>
+                                    )}
                                 </>
                             )}
                         </div>

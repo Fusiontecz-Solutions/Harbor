@@ -4,6 +4,7 @@ import { invalidateClientsListCache } from "@/lib/clientsListCache";
 import { invalidateClientDetailCache } from "@/lib/clientDetailCache";
 import { clearDealPipelineListCache } from "@/lib/dealPipelineListCache";
 import { idbClearAll } from "@/lib/persistentCache/idbStore";
+import { clearInboxCaches } from "@/utils/inboxIdb";
 
 /** Wipe all client persistent caches (logout / user switch). */
 export async function clearAllPersistentCaches(): Promise<void> {
@@ -12,5 +13,5 @@ export async function clearAllPersistentCaches(): Promise<void> {
   invalidateClientsListCache();
   invalidateClientDetailCache();
   clearDealPipelineListCache();
-  await idbClearAll();
+  await Promise.all([idbClearAll(), clearInboxCaches()]);
 }

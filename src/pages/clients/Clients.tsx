@@ -52,7 +52,6 @@ import {
   type PaginationState,
   getCoreRowModel,
   getFilteredRowModel,
-  getSortedRowModel,
   getPaginationRowModel,
   useReactTable,
 } from "@tanstack/react-table";
@@ -61,6 +60,9 @@ import { useTheme } from "@/context/ThemeContext";
 import * as XLSX from "xlsx-js-style";
 import type { CreateClientPayload } from "@/types/clientTypes";
 import { formatUSPhoneNumber } from "@/utils/formatPhoneNumber";
+
+/** Column ids GET /clients can sort by (see clientController.getAll). */
+const CLIENT_SORT_FIELDS = new Set(["clientId", "createdAt"]);
 
 const getClientOwnerNames = (client: Client): string => {
   const owners =
@@ -542,13 +544,13 @@ export default function Clients() {
     onSortingChange: setSorting,
     onColumnFiltersChange: setColumnFilters,
     getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
     onColumnVisibilityChange: setColumnVisibility,
     onRowSelectionChange: setRowSelection,
     onPaginationChange: setPagination,
     manualPagination: true, // Server-side pagination
+    manualSorting: true, // Server-side sorting (GET /clients sortBy/sortOrder)
     state: {
       sorting,
       columnFilters,
@@ -572,10 +574,18 @@ export default function Clients() {
       limit: number;
       search?: string;
       status?: string;
+      sortBy?: string;
+      sortOrder?: "asc" | "desc";
     } = {
       page: pagination.pageIndex + 1, // API uses 1-based index
       limit: pagination.pageSize,
     };
+    // Only columns the API can order by; anything else keeps its default.
+    const sortRule = sorting[0];
+    if (sortRule && CLIENT_SORT_FIELDS.has(sortRule.id)) {
+      params.sortBy = sortRule.id;
+      params.sortOrder = sortRule.desc ? "desc" : "asc";
+    }
     if (searchTerm) {
       params.search = searchTerm;
     }
@@ -589,7 +599,13 @@ export default function Clients() {
     pagination.pageSize,
     searchTerm,
     statusFilter,
+    sorting,
   ]);
+
+  // A new sort order starts from the first page.
+  useEffect(() => {
+    setPagination((prev) => (prev.pageIndex === 0 ? prev : { ...prev, pageIndex: 0 }));
+  }, [sorting]);
 
   // Bulk delete: delete selected clients via API, then refresh list and clear selection
   const handleBulkDelete = useCallback(async () => {

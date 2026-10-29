@@ -98,11 +98,47 @@ export interface BroadcastSummary {
     startedAt: string | null;
     finishedAt: string | null;
     createdAt: string;
+    /** Present on the list endpoint. */
+    body?: string;
+    scheduledAt?: string | null;
+    approvedAt?: string | null;
+    throttlePerSecond?: number | null;
+    undeliverableCount?: number;
+    /** Accepted, no final delivery report yet (sent − delivered − undeliverable). */
+    pendingCount?: number;
+    leadBatchName?: string | null;
+    parentName?: string | null;
+    createdByName?: string | null;
+    approvedByName?: string | null;
+}
+
+/** Totals across every campaign the caller can see (not just one page). */
+export interface BroadcastTotals {
+    campaigns: number;
+    byStatus: Record<string, number>;
+    recipients: number;
+    /** Accepted by the provider (delivered + undeliverable + pending). */
+    sent: number;
+    delivered: number;
+    /** Accepted, carrier did not deliver (incl. expired). */
+    undeliverable?: number;
+    pending?: number;
+    /** Rejected / never accepted — not part of sent. */
+    failed: number;
+    suppressed: number;
+    /** Distinct contacts with a non-STOP reply. */
+    replied: number;
+    optedOut: number;
+    queued: number;
 }
 
 export interface MessagingContact {
     id: string;
     phoneNumber: string;
+    /** "Owners Name" from the lead sheet — the name shown for a lead. */
+    ownerName?: string | null;
+    ein?: string | null;
+    ssn?: string | null;
     firstName: string | null;
     lastName: string | null;
     emailAddress: string | null;
@@ -129,6 +165,15 @@ export interface ContactProfile extends Omit<MessagingContact, 'id' | 'createdAt
     id: string | null;
     createdAt: string | null;
     source: 'contact' | 'crm-client';
+    /** What the Inbox profile card shows. EIN and SSN come from the CRM client. */
+    identity?: {
+        ownerName: string | null;
+        businessName: string | null;
+        ein: string | null;
+        ssn: string | null;
+        phoneNumber: string;
+        email: string | null;
+    };
     client: {
         id: string;
         clientNumber: number;
@@ -163,6 +208,7 @@ export type AudienceBucket =
     | 'queued'
     | 'sending'
     | 'sent'
+    | 'pending'
     | 'delivered'
     | 'failed'
     | 'undeliverable'
@@ -240,7 +286,7 @@ export async function fetchConversations(params: {
         params: {
             page: params.page ?? 1,
             ...(params.search ? { search: params.search } : {}),
-            ...(params.filter && params.filter !== 'all' ? { filter: params.filter } : {}),
+            filter: params.filter ?? 'regular',
         },
     });
     return response.data;
@@ -267,6 +313,30 @@ export async function sendMessage(input: {
     clientId?: string;
 }) {
     const response = await axiosPost(`${BASE}/send`, input);
+    return response.data.data;
+}
+
+/** Flag a conversation unread again ("come back to this"). */
+export async function markConversationUnread(conversationId: string): Promise<{ id: string; unreadCount: number }> {
+    const response = await axiosPatch(`${BASE}/conversations/${conversationId}/unread`);
+    return response.data.data;
+}
+
+export async function fetchPushConfig(): Promise<{ enabled: boolean; publicKey: string | null }> {
+    const response = await axiosGet(`${BASE}/push/config`);
+    return response.data.data;
+}
+
+export async function savePushSubscription(subscription: PushSubscriptionJSON) {
+    await axiosPost(`${BASE}/push/subscribe`, { subscription });
+}
+
+export async function deletePushSubscription(endpoint: string) {
+    await axiosPost(`${BASE}/push/unsubscribe`, { endpoint });
+}
+
+export async function sendTestPush(): Promise<{ delivered: number }> {
+    const response = await axiosPost(`${BASE}/push/test`);
     return response.data.data;
 }
 
@@ -339,8 +409,15 @@ export async function importContacts(
     if (assigneeUserIds?.length) formData.append('assigneeUserIds', assigneeUserIds.join(','));
     if (batchName?.trim()) formData.append('batchName', batchName.trim());
 
-    const response = await axiosPostFormData(`${BASE}/contacts/import`, formData);
-    return response.data.data;
+    const response = await axiosPostFormData(`${BASE}/contacts/import`, formData, {
+        // Large sheets can run 1–2 minutes server-side; stay above typical proxy limits.
+        timeout: 300_000,
+    });
+    const summary = (response.data?.data ?? response.data) as ImportSummary | undefined;
+    if (!summary || typeof summary.totalRows !== 'number') {
+        throw new Error('Unexpected import response from server');
+    }
+    return summary;
 }
 
 /** Lead counts per owner, for the distribution screen. */
@@ -389,7 +466,13 @@ export async function fetchContactStatus(phoneNumber: string) {
 /* Broadcasts                                                            */
 /* -------------------------------------------------------------------- */
 
-export async function fetchBroadcasts(params: { page?: number; status?: string }): Promise<Paginated<BroadcastSummary>> {
+export async function fetchBroadcasts(params: {
+    page?: number;
+    pageSize?: number;
+    status?: string;
+    search?: string;
+    sort?: 'newest' | 'replies' | 'replyRate' | 'delivery' | 'optouts';
+}): Promise<Paginated<BroadcastSummary> & { totals?: BroadcastTotals }> {
     const response = await axiosGet(`${BASE}/broadcasts`, { params });
     return response.data;
 }
@@ -468,6 +551,49 @@ export async function createBroadcastFromFile(input: {
     return response.data.data;
 }
 
+export interface AudiencePreview {
+    /** Every lead / row supplied, before anything is left out. */
+    totalLeads: number;
+    excluded: {
+        blocked: number;
+        interested: number;
+        notInterested: number;
+        /** No owner name in the lead sheet — never broadcast to. */
+        missingOwnerName: number;
+        /** Replied STOP earlier — kept out even when the lead is re-uploaded. */
+        optedOut: number;
+        dnc: number;
+        otherSuppressed: number;
+        invalid: number;
+        duplicates: number;
+    };
+    /** Who the broadcast will actually go to. */
+    willSend: number;
+    /** Of those numbers, how many a campaign has messaged before. */
+    previouslyMessaged: number;
+    optedOut: Array<{ phoneNumber: string; name: string | null; optedOutAt: string | null }>;
+    optedOutMore: number;
+    skippedClients?: Array<{ clientId: string; businessName: string; reason: string }>;
+}
+
+/** Step-2 breakdown: exactly what create would send, without creating anything. */
+export async function previewBroadcastAudience(input: {
+    leadBatchId?: string;
+    clientIds?: string[];
+    recipients?: Array<{ phoneNumber: string }>;
+    file?: File | null;
+}): Promise<AudiencePreview> {
+    if (input.file) {
+        const formData = new FormData();
+        formData.append('file', input.file);
+        const response = await axiosPostFormData(`${BASE}/broadcasts/audience-preview`, formData);
+        return response.data.data;
+    }
+    const { file: _file, ...json } = input;
+    const response = await axiosPost(`${BASE}/broadcasts/audience-preview`, json);
+    return response.data.data;
+}
+
 export interface CreateBroadcastResult {
     id: string;
     campaignKey: string;
@@ -478,10 +604,12 @@ export interface CreateBroadcastResult {
     invalidDropped: number;
     skippedClients?: Array<{ clientId: string; businessName: string; reason: string }>;
     /** Leads left out of a batch audience, and why. */
-    batchExcluded?: { blocked: number; disposed: number } | null;
+    batchExcluded?: { total?: number; blocked: number; disposed: number; interested?: number; notInterested?: number } | null;
     scheduledAt?: string | null;
     /** True when the creator was an agent, so a Super Admin must release it. */
     awaitingApproval?: boolean;
+    /** Leads skipped because the sheet had no owner name for them. */
+    missingOwnerName?: number;
 }
 
 /** Create from CRM clients, saved contacts, and/or an explicit number list. */
@@ -652,6 +780,7 @@ export interface PerformanceUserRow {
     senderNumber: string | null;
     messagesSent: number;
     delivered: number;
+    undeliverable?: number;
     failed: number;
     campaigns: number;
     replies: number;
@@ -672,6 +801,7 @@ export interface PerformanceResult {
     totals: {
         messagesSent: number;
         delivered: number;
+        undeliverable?: number;
         failed: number;
         campaigns: number;
         replies: number;
@@ -805,9 +935,12 @@ export async function rejectBroadcast(id: string) {
     return response.data.data;
 }
 
+export type FollowUpAudience = 'unreplied' | 'failed' | 'all';
+
 export interface FollowUpPreview {
     parentId: string;
     parentName: string;
+    audience: FollowUpAudience;
     /** Earliest instant a follow-up may be scheduled for — an hour after the original. */
     earliestSendAt: string;
     eligibleCount: number;
@@ -815,15 +948,26 @@ export interface FollowUpPreview {
 }
 
 /** Who a follow-up would reach, without creating anything. */
-export async function fetchFollowUpPreview(id: string): Promise<FollowUpPreview> {
-    const response = await axiosGet(`${BASE}/broadcasts/${id}/follow-up`);
+export async function fetchFollowUpPreview(
+    id: string,
+    audience: FollowUpAudience = 'all',
+): Promise<FollowUpPreview> {
+    const response = await axiosGet(`${BASE}/broadcasts/${id}/follow-up`, {
+        params: { audience },
+    });
     return response.data.data;
 }
 
 /** Chase a campaign's non-responders. Needs a window or a time — never immediate. */
 export async function createFollowUp(
     id: string,
-    input: { body: string; name?: string; sendWindowId?: string; scheduledAt?: string },
+    input: {
+        body: string;
+        name?: string;
+        sendWindowId?: string;
+        scheduledAt?: string;
+        audience?: FollowUpAudience;
+    },
 ): Promise<CreateBroadcastResult & { awaitingApproval: boolean; scheduledAt: string }> {
     const response = await axiosPost(`${BASE}/broadcasts/${id}/follow-up`, input);
     return response.data.data;

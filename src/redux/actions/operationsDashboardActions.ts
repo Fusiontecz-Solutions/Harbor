@@ -206,31 +206,53 @@ export const fetchOperationsDashboardSummary = createAsyncThunk<
   },
 );
 
+export type OperationsDashboardRecentCasesPage = {
+  cases: OperationsDashboardRecentCase[];
+  /** Matching rows across every page (server-side search applied). */
+  total: number;
+};
+
+/** First page size fetched up front; covers both list (5) and grid (6) views. */
+export const OPERATIONS_RECENT_PREFETCH_SIZE = 6;
+
+/** One page of recent cases; search and paging are done by the backend. */
+export async function fetchOperationsDashboardRecentCasesPage(params: {
+  page: number;
+  pageSize: number;
+  search?: string;
+}): Promise<OperationsDashboardRecentCasesPage> {
+  const qs = new URLSearchParams({
+    page: String(params.page),
+    limit: String(params.pageSize),
+  });
+  if (params.search?.trim()) qs.set("search", params.search.trim());
+  const response = await axiosGet(
+    `/applications/operations-dashboard-recent-cases?${qs.toString()}`,
+  );
+  const payload = response?.data ?? {};
+  const applications = Array.isArray(payload?.data) ? payload.data : [];
+  const cases: OperationsDashboardRecentCase[] = applications.map(
+    (application: Record<string, unknown>) =>
+      mapRawApplicationToOperationsRecentCase(application),
+  );
+  const total = Number(payload?.pagination?.total);
+  return { cases, total: Number.isFinite(total) ? total : cases.length };
+}
+
 export const fetchOperationsDashboardRecentCases = createAsyncThunk<
-  OperationsDashboardRecentCase[],
+  OperationsDashboardRecentCasesPage,
   void,
   { rejectValue: string }
 >(
   "operationsDashboard/fetchRecentCases",
   async (_, { rejectWithValue }) => {
     try {
-      const response = await axiosGet(
-        "/applications/operations-dashboard-recent-cases?limit=200",
-      );
-      const payload = response?.data ?? {};
-      const applications = Array.isArray(payload?.data) ? payload.data : [];
-
-      const mapped: OperationsDashboardRecentCase[] = applications
-        .map((application: Record<string, unknown>) =>
-          mapRawApplicationToOperationsRecentCase(application),
-        );
-
-      mapped.sort(
-          (a: OperationsDashboardRecentCase, b: OperationsDashboardRecentCase) =>
-            new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
-      );
-
-      return mapped;
+      // Only the first page is cached in the store (login prefetch + session
+      // restore); later pages are fetched by the dashboard itself.
+      return await fetchOperationsDashboardRecentCasesPage({
+        page: 1,
+        pageSize: OPERATIONS_RECENT_PREFETCH_SIZE,
+      });
     } catch (error: unknown) {
       const message =
         error &&

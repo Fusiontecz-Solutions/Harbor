@@ -36,9 +36,24 @@ import {
     createFollowUp,
     fetchFollowUpPreview,
     fetchUpcomingSendWindows,
+    type FollowUpAudience,
     type FollowUpPreview,
     type UpcomingSendWindow,
 } from '@/services/messaging/messagingApi';
+
+const AUDIENCE_OPTIONS: { value: FollowUpAudience; label: string; hint: string }[] = [
+    {
+        value: 'unreplied',
+        label: 'Unreplied leads',
+        hint: 'Sent or delivered, no reply yet',
+    },
+    { value: 'failed', label: 'Failed leads', hint: 'Original send failed (retry)' },
+    {
+        value: 'all',
+        label: 'All eligible',
+        hint: 'Unreplied plus failed, excluding undeliverable',
+    },
+];
 
 interface Props {
     broadcastId: string;
@@ -63,6 +78,7 @@ export default function FollowUpModal({ broadcastId, open, onOpenChange, onCreat
     const [body, setBody] = useState('');
     const [sendWindowId, setSendWindowId] = useState('');
     const [scheduledAt, setScheduledAt] = useState('');
+    const [audience, setAudience] = useState<FollowUpAudience>('all');
     const [isSubmitting, setIsSubmitting] = useState(false);
     const smsInfo = useSmsSegmentInfo(body);
 
@@ -70,7 +86,7 @@ export default function FollowUpModal({ broadcastId, open, onOpenChange, onCreat
         if (!open) return;
 
         setIsLoading(true);
-        Promise.all([fetchFollowUpPreview(broadcastId), fetchUpcomingSendWindows()])
+        Promise.all([fetchFollowUpPreview(broadcastId, audience), fetchUpcomingSendWindows()])
             .then(([previewResult, windowResult]) => {
                 setPreview(previewResult);
                 // Only windows that clear the one-hour minimum are offered —
@@ -88,7 +104,7 @@ export default function FollowUpModal({ broadcastId, open, onOpenChange, onCreat
                 toast.error(error?.response?.data?.message || 'Failed to load the follow-up audience'),
             )
             .finally(() => setIsLoading(false));
-    }, [broadcastId, open]);
+    }, [audience, broadcastId, open]);
 
     const earliestLabel = useMemo(
         () => (preview ? new Date(preview.earliestSendAt).toLocaleString() : null),
@@ -109,6 +125,7 @@ export default function FollowUpModal({ broadcastId, open, onOpenChange, onCreat
             const result = await createFollowUp(broadcastId, {
                 body: body.trim(),
                 name: name.trim() || undefined,
+                audience,
                 ...(sendWindowId
                     ? { sendWindowId }
                     : { scheduledAt: new Date(scheduledAt).toISOString() }),
@@ -125,7 +142,18 @@ export default function FollowUpModal({ broadcastId, open, onOpenChange, onCreat
         } finally {
             setIsSubmitting(false);
         }
-    }, [body, broadcastId, name, onCreated, onOpenChange, preview?.eligibleCount, scheduledAt, sendWindowId, smsInfo]);
+    }, [
+        audience,
+        body,
+        broadcastId,
+        name,
+        onCreated,
+        onOpenChange,
+        preview?.eligibleCount,
+        scheduledAt,
+        sendWindowId,
+        smsInfo,
+    ]);
 
     return (
         <Dialog open={open} onOpenChange={onOpenChange}>
@@ -133,8 +161,8 @@ export default function FollowUpModal({ broadcastId, open, onOpenChange, onCreat
                 <DialogHeader>
                     <DialogTitle>Follow up</DialogTitle>
                     <DialogDescription>
-                        Sends a second message to everyone who was reached by this campaign and
-                        never replied.
+                        Sends a second message to non-responders, including leads whose first
+                        send failed (for example quota or transient errors).
                     </DialogDescription>
                 </DialogHeader>
 
@@ -144,6 +172,24 @@ export default function FollowUpModal({ broadcastId, open, onOpenChange, onCreat
                     </p>
                 ) : !preview ? null : (
                     <div className="space-y-4">
+                        <div className="space-y-1.5">
+                            <Label htmlFor="fu-audience">Send to</Label>
+                            <select
+                                id="fu-audience"
+                                value={audience}
+                                onChange={(event) =>
+                                    setAudience(event.target.value as FollowUpAudience)
+                                }
+                                className="h-9 w-full rounded-md border bg-background px-2 text-sm"
+                            >
+                                {AUDIENCE_OPTIONS.map((option) => (
+                                    <option key={option.value} value={option.value}>
+                                        {option.label} — {option.hint}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+
                         <div className="rounded-lg border bg-muted/30 p-3">
                             <p className="text-2xl leading-none font-semibold">
                                 {preview.eligibleCount.toLocaleString()}
@@ -158,8 +204,8 @@ export default function FollowUpModal({ broadcastId, open, onOpenChange, onCreat
                                     Not Interested, or blocked
                                 </li>
                                 <li>
-                                    {preview.excluded.notDelivered.toLocaleString()} were never
-                                    reached by the original
+                                    {preview.excluded.notDelivered.toLocaleString()} excluded
+                                    (undeliverable, suppressed, or still queued)
                                 </li>
                             </ul>
                         </div>
@@ -167,7 +213,7 @@ export default function FollowUpModal({ broadcastId, open, onOpenChange, onCreat
                         {preview.eligibleCount === 0 ? (
                             <p className="text-sm text-muted-foreground">
                                 Nobody is left to chase. Every recipient either answered, was
-                                marked, or was never reached.
+                                marked, or is excluded from follow-up.
                             </p>
                         ) : (
                             <>

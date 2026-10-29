@@ -15,6 +15,7 @@ import Dialpad from "@mui/icons-material/Dialpad";
 import GroupAdd from "@mui/icons-material/GroupAdd";
 import Insights from "@mui/icons-material/Insights";
 import Schedule from "@mui/icons-material/Schedule";
+import Assessment from "@mui/icons-material/Assessment";
 import {
   Sidebar as UISidebar,
   SidebarHeader,
@@ -157,6 +158,10 @@ const sidebarSections: SidebarNavSection[] = [
     ],
   },
   {
+    title: "REPORTS",
+    items: [{ label: "Reports", url: "/reports", icon: Assessment, adminOnly: true }],
+  },
+  {
     title: "SETTINGS",
     items: [
       {
@@ -294,8 +299,13 @@ function isNavItemActive(
 }
 
 const Sidebar = () => {
-  const { state } = useSidebar();
-  const { pathname } = useLocation();
+  const { state, isMobile, setOpenMobile } = useSidebar();
+  const { pathname, search } = useLocation();
+
+  // On phones the sidebar is a drawer: close it once a menu item navigates.
+  useEffect(() => {
+    if (isMobile) setOpenMobile(false);
+  }, [isMobile, pathname, search, setOpenMobile]);
   const [searchParams] = useSearchParams();
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === "dark";
@@ -423,7 +433,10 @@ const Sidebar = () => {
                     items: section.items.filter((item) => isAgentAllowedPath(item.url)),
                   }))
               : sidebarSections
-            ).map((section, sectionIndex) => (
+            )
+              // A group whose items are all admin-only would otherwise leave a bare heading.
+              .filter((section) => section.items.some((item) => !item.adminOnly || isAdmin))
+              .map((section, sectionIndex) => (
               <div
                 key={`${section.title || "section"}-${sectionIndex}`}
                 className="w-full"

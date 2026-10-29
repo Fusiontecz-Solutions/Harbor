@@ -31,11 +31,10 @@ import {
   type PaginationState,
   getCoreRowModel,
   getFilteredRowModel,
-  getSortedRowModel,
   getPaginationRowModel,
   useReactTable,
 } from "@tanstack/react-table";
-import { DataTableContent, DataTablePagination } from "@/components/DataTable";
+import { DataTableContent, DataTablePagination, DataTableSortHeader } from "@/components/DataTable";
 import { useTheme } from "@/context/ThemeContext";
 import {
   CONTRACT_OUT_QUEUE_BADGE_CLASS,
@@ -49,6 +48,7 @@ import { formatCurrency, formatDate as formatDateUtil } from "@/lib/utils";
 import { getClientByClientId } from "@/redux/actions/clientActions";
 import ApplicationDetailsSheet from "@/components/application/ApplicationDetailsSheet";
 import {
+  applicationsListSortFromTable,
   buildApplicationsListParams,
   DEFAULT_APPLICATIONS_PAGE_SIZE,
 } from "@/lib/applicationsListParams";
@@ -305,10 +305,8 @@ export default function ApplicationsBrowsePage() {
     const dataColumns: ColumnDef<Application>[] = [
       {
         accessorKey: "applicationId",
-        header: () => (
-          <div className="flex items-center gap-2">
-            <span className="font-medium text-foreground">ID</span>
-          </div>
+        header: ({ column }) => (
+          <DataTableSortHeader column={column} label="ID" />
         ),
         cell: ({ row }) => (
           <span className="font-medium text-foreground">
@@ -319,10 +317,8 @@ export default function ApplicationsBrowsePage() {
       {
         id: "businessName",
         accessorFn: (row) => getApplicationBusinessDisplayName(row),
-        header: () => (
-          <div className="flex items-center gap-2">
-            <span className="font-medium text-foreground">BUSINESS NAME</span>
-          </div>
+        header: ({ column }) => (
+          <DataTableSortHeader column={column} label="BUSINESS NAME" />
         ),
         cell: ({ row }) => (
           <span className="text-foreground">
@@ -333,10 +329,8 @@ export default function ApplicationsBrowsePage() {
       {
         id: "email",
         accessorFn: (row) => getClientEmail(row.client),
-        header: () => (
-          <div className="flex items-center gap-2">
-            <span className="font-medium text-foreground">EMAIL</span>
-          </div>
+        header: ({ column }) => (
+          <DataTableSortHeader column={column} label="EMAIL" />
         ),
         cell: ({ row }) => (
           <span className="text-foreground">{getClientEmail(row.original.client)}</span>
@@ -345,6 +339,8 @@ export default function ApplicationsBrowsePage() {
       {
         id: "iso",
         accessorFn: (row) => getApplicationIsoLabel(row),
+        // Not a sort field on GET /applications.
+        enableSorting: false,
         header: () => (
           <div className="flex items-center gap-2">
             <span className="font-medium text-foreground">ISO</span>
@@ -357,10 +353,8 @@ export default function ApplicationsBrowsePage() {
       {
         id: "loanAmount",
         accessorFn: (row) => resolveApplicationDisplayLoanAmount(row),
-        header: () => (
-          <div className="flex items-center gap-2">
-            <span className="font-medium text-foreground">Loan Amount</span>
-          </div>
+        header: ({ column }) => (
+          <DataTableSortHeader column={column} label="Loan Amount" />
         ),
         cell: ({ row }) => {
           const loanAmount = resolveApplicationDisplayLoanAmount(row.original);
@@ -374,10 +368,8 @@ export default function ApplicationsBrowsePage() {
       },
       {
         accessorKey: "status",
-        header: () => (
-          <div className="flex items-center gap-2">
-            <span className="font-medium text-foreground">Current State</span>
-          </div>
+        header: ({ column }) => (
+          <DataTableSortHeader column={column} label="Current State" />
         ),
         cell: ({ row }) => {
           const queueLabel = getApplicationQueueLabel(row.original);
@@ -392,10 +384,8 @@ export default function ApplicationsBrowsePage() {
       },
       {
         accessorKey: "createdAt",
-        header: () => (
-          <div className="flex items-center gap-2">
-            <span className="font-medium text-foreground">CREATED AT</span>
-          </div>
+        header: ({ column }) => (
+          <DataTableSortHeader column={column} label="CREATED AT" />
         ),
         cell: ({ row }) => (
           <span className="text-foreground">{formatDate(row.original.createdAt)}</span>
@@ -403,10 +393,8 @@ export default function ApplicationsBrowsePage() {
       },
       {
         accessorKey: "lastModifiedAt",
-        header: () => (
-          <div className="flex items-center gap-2">
-            <span className="font-medium text-foreground">Last Modified Date</span>
-          </div>
+        header: ({ column }) => (
+          <DataTableSortHeader column={column} label="Last Modified Date" />
         ),
         cell: ({ row }) => (
           <span className="text-foreground">
@@ -462,13 +450,14 @@ export default function ApplicationsBrowsePage() {
     onSortingChange: setSorting,
     onColumnFiltersChange: setColumnFilters,
     getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
     getPaginationRowModel: getPaginationRowModel(),
     onColumnVisibilityChange: setColumnVisibility,
     onRowSelectionChange: setRowSelection,
     onPaginationChange: setPagination,
     manualPagination: true,
+    // Sorting runs on the server across every page, not just the rows loaded.
+    manualSorting: true,
     state: {
       sorting,
       columnFilters,
@@ -496,6 +485,7 @@ export default function ApplicationsBrowsePage() {
       searchTerm: debouncedSearchTerm,
       dashboardStateFilter: "",
       statusFilter: statsBucketFilter ? "all" : statusFilter,
+      ...applicationsListSortFromTable(sorting),
     });
     const params: GetApplicationsParams = {
       ...base,
@@ -520,7 +510,13 @@ export default function ApplicationsBrowsePage() {
     pagination.pageIndex,
     pagination.pageSize,
     debouncedSearchTerm,
+    sorting,
   ]);
+
+  // A new sort order starts from the first page.
+  useEffect(() => {
+    setPagination((prev) => (prev.pageIndex === 0 ? prev : { ...prev, pageIndex: 0 }));
+  }, [sorting]);
 
   const {
     refetch: refetchApplicationsList,

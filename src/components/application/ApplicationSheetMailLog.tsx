@@ -34,6 +34,9 @@ import {
   TableRow,
 } from '@/components/ui/table';
 
+/** Activity entries per "Load older" step (mail rows are a subset of these). */
+const ACTIVITY_PAGE_SIZE = 100;
+
 type ApplicationSheetMailLogProps = {
   applicationId: string;
   /** When false, polling pauses (e.g. mail log dialog closed). Defaults to true. */
@@ -281,14 +284,23 @@ export default function ApplicationSheetMailLog({
   const [viewError, setViewError] = useState<string | null>(null);
   const [viewDelivery, setViewDelivery] = useState<DeliveryMeta | null>(null);
 
+  // Activity is fetched newest-first, ACTIVITY_PAGE_SIZE entries per page;
+  // mail rows are picked out of it below. Each poll re-requests every page
+  // loaded so far in one call, so "Load older" results survive the refresh.
+  const [pages, setPages] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
+
   const refreshActivityMailLogs = useCallback(() => {
     if (!applicationId) return;
     setLoading(true);
-    void dispatch(getApplicationActivityLogs(applicationId))
+    void dispatch(
+      getApplicationActivityLogs({ applicationId, page: 1, pageSize: ACTIVITY_PAGE_SIZE * pages }),
+    )
       .unwrap()
       .then((payload) => {
         const rows = (payload as { data?: ApplicationActivityLog[] })?.data ?? payload ?? [];
         setLogs(Array.isArray(rows) ? rows : []);
+        setHasMore(Boolean((payload as { pagination?: { hasMore?: boolean } })?.pagination?.hasMore));
         setError(null);
       })
       .catch((err: unknown) => {
@@ -298,10 +310,11 @@ export default function ApplicationSheetMailLog({
         setLoading(false);
         setInitialLoadDone(true);
       });
-  }, [applicationId, dispatch]);
+  }, [applicationId, dispatch, pages]);
 
   useEffect(() => {
     setInitialLoadDone(false);
+    setPages(1);
   }, [applicationId]);
 
   useEffect(() => {
@@ -498,6 +511,19 @@ export default function ApplicationSheetMailLog({
             </Table>
           </div>
         ) : null}
+
+        {hasMore && !isLoading && (
+          <div className="flex justify-center pt-3">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setPages((p) => p + 1)}
+            >
+              Load older activity
+            </Button>
+          </div>
+        )}
       </div>
 
       <Dialog open={viewOpen} onOpenChange={setViewOpen}>

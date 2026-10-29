@@ -188,7 +188,9 @@ function Sidebar({
           data-sidebar="sidebar"
           data-slot="sidebar"
           data-mobile="true"
-          className="bg-sidebar text-sidebar-foreground w-(--sidebar-width) p-0 [&>button]:hidden"
+          // The sheet overlay sits at z-[9998]; the panel must be above it or
+          // every tap lands on the overlay and the drawer cannot be used.
+          className="bg-sidebar text-sidebar-foreground z-[9999] w-(--sidebar-width) p-0 [&>button]:hidden"
           style={
             {
               "--sidebar-width": SIDEBAR_WIDTH_MOBILE,

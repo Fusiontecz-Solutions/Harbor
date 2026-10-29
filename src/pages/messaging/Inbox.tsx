@@ -9,17 +9,26 @@
  * DOM rows. The message pane is not — a thread page is capped at 50 messages
  * server-side, and virtualizing it would fight the scroll-to-bottom behaviour.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Virtuoso } from 'react-virtuoso';
 import { toast } from 'react-toastify';
 import {
     AlertCircle,
+    ArrowLeft,
     Ban,
+    Bell,
+    BellOff,
+    BellRing,
+    Mail,
+    MailOpen,
     ThumbsDown,
     ThumbsUp,
     Check,
     CheckCheck,
     ChevronRight,
+    ClipboardCopy,
+    Eye,
+    EyeOff,
     Loader2,
     Megaphone,
     MessageSquarePlus,
@@ -49,7 +58,16 @@ import {
 import { cn } from '@/lib/utils';
 import { isAgentRole } from '@/lib/agentAccess';
 import { resolveEffectiveRole } from '@/lib/sessionRole';
-import { useInbox } from '@/hooks/useInbox';
+import { PENDING_PREFIX, useInbox } from '@/hooks/useInbox';
+import { useSearchParams } from 'react-router';
+import {
+    disablePush,
+    enablePush,
+    getPushState,
+    syncPushSubscription,
+    type PushState,
+} from '@/lib/pushNotifications';
+import { sendTestPush } from '@/services/messaging/messagingApi';
 import { ClientPicker } from '@/components/messaging/ClientPicker';
 import {
     confirmMultiSegmentSend,
@@ -74,10 +92,11 @@ import {
 } from '@/services/messaging/messagingApi';
 
 const FILTERS = [
-    { id: 'all', label: 'All' },
-    { id: 'unread', label: 'Unread' },
-    { id: 'broadcast', label: 'Broadcast' },
-    { id: 'opted-out', label: 'Opted out' },
+    { id: 'regular', label: 'Regular' },
+    { id: 'interested', label: 'Interested' },
+    { id: 'not-interested', label: 'Uninterested' },
+    { id: 'unreplied', label: 'Unreplied' },
+    { id: 'opt-out', label: 'Opt-out' },
 ] as const;
 
 /**
@@ -89,9 +108,6 @@ const FILTERS = [
  * sends — the backend creates the row as a side effect of that send.
  */
 const DRAFT_CONVERSATION_ID = '__draft__';
-
-/** Stable empty array, so a draft chat does not re-render on every pass. */
-const EMPTY_MESSAGES: Message[] = [];
 
 /** Client-side E.164 normalization, so a draft can be validated without a round-trip. */
 function normalizeNumberInput(raw: string): string | null {
@@ -196,13 +212,13 @@ export default function Inbox() {
     );
 
     const [searchInput, setSearchInput] = useState('');
-    const [filter, setFilter] = useState<string>('all');
+    const [filter, setFilter] = useState<string>('regular');
     const search = useDebounced(searchInput);
 
     const [config, setConfig] = useState<MessagingConfig | null>(null);
     const [draft, setDraft] = useState('');
     const draftSms = useSmsSegmentInfo(draft);
-    const [isSending, setIsSending] = useState(false);
+    const [draftMessages, setDraftMessages] = useState<Message[]>([]);
     const [newNumber, setNewNumber] = useState('');
     const [isClientPickerOpen, setIsClientPickerOpen] = useState(false);
     // The CRM client book is admin-only; agents message their own leads.
@@ -228,16 +244,24 @@ export default function Inbox() {
         activeConversationId,
         activeConversation: selectedConversation,
         openConversation,
+        markUnread,
+        markRead,
         messages: loadedMessages,
         isLoadingMessages,
+        hasOlderMessages,
+        isLoadingOlderMessages,
+        loadOlderMessages,
         refreshAfterSend,
+        pushOptimisticOutbound,
+        reconcileOptimisticOutbound,
+        discardOptimistic,
         isRealtime,
     } = useInbox({ userScope, search, filter });
 
     /* A draft takes over the chat pane; it has no id, so no history to load. */
     const activeConversation = draftConversation ?? selectedConversation;
     const isDraft = Boolean(draftConversation);
-    const messages = isDraft ? EMPTY_MESSAGES : loadedMessages;
+    const messages = isDraft ? draftMessages : loadedMessages;
 
     /** Open a real thread, discarding any unsent draft. */
     const selectConversation = useCallback(
@@ -269,6 +293,7 @@ export default function Inbox() {
             openConversation(null);
             setDraftConversation(makeDraftConversation(contactNumber, businessNumber, contactName));
             setDraftClientId(clientId);
+            setDraftMessages([]);
             setDraft('');
             return true;
         },
@@ -279,9 +304,121 @@ export default function Inbox() {
         fetchMessagingConfig().then(setConfig).catch(() => setConfig(null));
     }, []);
 
+    /* ── Push notifications ── */
+    const [pushState, setPushState] = useState<PushState | null>(null);
+    const [pushBusy, setPushBusy] = useState(false);
     useEffect(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [messages.length]);
+        void getPushState().then(setPushState);
+        void syncPushSubscription();
+    }, []);
+
+    const togglePush = useCallback(async () => {
+        setPushBusy(true);
+        try {
+            if (pushState === 'on') {
+                setPushState(await disablePush());
+                toast.info('Notifications turned off on this device');
+            } else {
+                const next = await enablePush();
+                setPushState(next);
+                if (next === 'on') {
+                    const { delivered } = await sendTestPush().catch(() => ({ delivered: 0 }));
+                    toast.success(delivered ? 'Notifications on — a test notification was sent' : 'Notifications on for this device');
+                } else if (next === 'denied') {
+                    toast.error('Notifications are blocked for this site. Allow them in your browser settings, then try again.');
+                } else if (next === 'unavailable') {
+                    toast.error('Push notifications are not configured on the server yet.');
+                } else if (next === 'unsupported') {
+                    toast.error('This browser does not support push. On iPhone, add Harbor to your Home Screen first.');
+                }
+            }
+        } catch (error: any) {
+            toast.error(error?.message || 'Could not change notification settings');
+        } finally {
+            setPushBusy(false);
+        }
+    }, [pushState]);
+
+    /* ── Deep link from a notification: /inbox?conversation=<id> ── */
+    const [searchParams, setSearchParams] = useSearchParams();
+    useEffect(() => {
+        const target = searchParams.get('conversation');
+        if (!target) return;
+        selectConversation(target);
+        const next = new URLSearchParams(searchParams);
+        next.delete('conversation');
+        setSearchParams(next, { replace: true });
+    }, [searchParams, selectConversation, setSearchParams]);
+
+    /* ── Read / unread ── */
+    const handleMarkUnread = useCallback(
+        async (conversationId: string) => {
+            try {
+                await markUnread(conversationId);
+            } catch (error: any) {
+                toast.error(error?.response?.data?.message || 'Failed to mark as unread');
+                void reloadConversations();
+            }
+        },
+        [markUnread, reloadConversations],
+    );
+    const handleMarkRead = useCallback(
+        async (conversationId: string) => {
+            try {
+                await markRead(conversationId);
+            } catch (error: any) {
+                toast.error(error?.response?.data?.message || 'Failed to mark as read');
+                void reloadConversations();
+            }
+        },
+        [markRead, reloadConversations],
+    );
+
+    // Follow the newest message only when the tail of the thread changes;
+    // prepending older history must not yank the view to the bottom.
+    // Switching threads jumps straight to the bottom (no animated scroll from
+    // the top); a new tail message animates only when the agent is already
+    // near the bottom or sent it — reading history is never yanked away.
+    const messagesScrollRef = useRef<HTMLDivElement | null>(null);
+    const lastMessage = messages[messages.length - 1];
+    const lastMessageId = lastMessage?.id;
+    const scrolledThreadRef = useRef<string | null>(null);
+    const threadKeyForScroll = activeConversation?.id ?? activeConversation?.contactNumber ?? null;
+    useLayoutEffect(() => {
+        const el = messagesScrollRef.current;
+        if (!el || !lastMessageId) return;
+        if (scrolledThreadRef.current !== threadKeyForScroll) {
+            scrolledThreadRef.current = threadKeyForScroll;
+            el.scrollTop = el.scrollHeight;
+            return;
+        }
+        const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
+        if (nearBottom || lastMessage?.direction === 'OUTBOUND') {
+            messagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [lastMessageId, threadKeyForScroll]);
+
+    /** scrollHeight/scrollTop captured before older messages are prepended. */
+    const scrollAnchor = useRef<{ height: number; top: number } | null>(null);
+
+    const handleMessagesScroll = useCallback(() => {
+        const el = messagesScrollRef.current;
+        if (!el || isDraft || !hasOlderMessages || isLoadingOlderMessages) return;
+        if (el.scrollTop > 80) return;
+        scrollAnchor.current = { height: el.scrollHeight, top: el.scrollTop };
+        void loadOlderMessages();
+    }, [hasOlderMessages, isDraft, isLoadingOlderMessages, loadOlderMessages]);
+
+    // Once the older page renders, shift scrollTop by the height it added so
+    // the message the user was reading stays put.
+    useLayoutEffect(() => {
+        const el = messagesScrollRef.current;
+        const anchor = scrollAnchor.current;
+        if (!el || !anchor || isLoadingOlderMessages) return;
+        scrollAnchor.current = null;
+        el.scrollTop = anchor.top + (el.scrollHeight - anchor.height);
+    }, [messages, isLoadingOlderMessages]);
 
     /** Load the saved contact record backing the open thread, for the details panel. */
     useEffect(() => {
@@ -307,47 +444,116 @@ export default function Inbox() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [activeConversation?.contactNumber]);
 
-    const handleSend = useCallback(async () => {
-        const body = draft.trim();
-        if (!body || !activeConversation || isSending) return;
-        if (!confirmMultiSegmentSend(draftSms, 1)) return;
+    /**
+     * Send `body` on the open thread with an optimistic bubble. Shared by the
+     * composer and by "Retry" on a failed bubble.
+     */
+    const sendBody = useCallback((body: string) => {
+        if (!body || !activeConversation) return;
 
-        setIsSending(true);
-        try {
-            const result = await sendMessage({
-                toNumber: activeConversation.contactNumber,
-                fromNumber: activeConversation.businessNumber || undefined,
-                body,
-                ...(isDraft && draftClientId ? { clientId: draftClientId } : {}),
-            });
-            setDraft('');
+        const fromNumber =
+            activeConversation.businessNumber || config?.defaultSender || '';
+        const toNumber = activeConversation.contactNumber;
 
-            if (isDraft) {
-                // The send is what created the thread — swap the placeholder for
-                // the real one so ticks, history and delete all work from here.
-                setDraftConversation(null);
-                setDraftClientId(null);
-                await reloadConversations();
-                if (result?.conversationId) openConversation(result.conversationId);
-            } else {
-                refreshAfterSend();
-            }
-        } catch (error: any) {
-            toast.error(error?.response?.data?.message || 'Failed to send message');
-        } finally {
-            setIsSending(false);
+        let optimisticId: string | null = null;
+        if (isDraft) {
+            const tempId = `pending-${globalThis.crypto?.randomUUID?.() ?? String(Date.now())}`;
+            const now = new Date().toISOString();
+            setDraftMessages((prev) => [
+                ...prev,
+                {
+                    id: tempId,
+                    direction: 'OUTBOUND',
+                    fromNumber,
+                    toNumber,
+                    body,
+                    mediaUrls: [],
+                    status: 'SENDING',
+                    errorMessage: null,
+                    broadcastId: null,
+                    isStopKeyword: false,
+                    sentAt: now,
+                    deliveredAt: null,
+                    createdAt: now,
+                },
+            ]);
+            optimisticId = tempId;
+        } else if (activeConversation.id) {
+            optimisticId = pushOptimisticOutbound({ body, fromNumber, toNumber });
         }
+
+        void (async () => {
+            try {
+                const result = await sendMessage({
+                    toNumber,
+                    fromNumber: fromNumber || undefined,
+                    body,
+                    ...(isDraft && draftClientId ? { clientId: draftClientId } : {}),
+                });
+
+                if (isDraft) {
+                    setDraftConversation(null);
+                    setDraftClientId(null);
+                    setDraftMessages([]);
+                    void reloadConversations();
+                    if (result?.conversationId) openConversation(result.conversationId);
+                } else if (optimisticId) {
+                    reconcileOptimisticOutbound(optimisticId, {
+                        messageId: result?.messageId ?? null,
+                        status: result?.status,
+                    });
+                    void refreshAfterSend();
+                }
+            } catch (error: any) {
+                const message =
+                    error?.response?.data?.message || 'Failed to send message';
+                toast.error(message);
+                if (isDraft && optimisticId) {
+                    setDraftMessages((prev) =>
+                        prev.map((row) =>
+                            row.id === optimisticId
+                                ? { ...row, status: 'FAILED', errorMessage: message }
+                                : row,
+                        ),
+                    );
+                } else if (optimisticId) {
+                    reconcileOptimisticOutbound(optimisticId, null, message);
+                }
+            }
+        })();
     }, [
         activeConversation,
-        draft,
+        config?.defaultSender,
         draftClientId,
-        draftSms,
         isDraft,
-        isSending,
         openConversation,
+        pushOptimisticOutbound,
+        reconcileOptimisticOutbound,
         refreshAfterSend,
         reloadConversations,
     ]);
+
+    const handleSend = useCallback(() => {
+        const body = draft.trim();
+        if (!body || !activeConversation) return;
+        if (!confirmMultiSegmentSend(draftSms, 1)) return;
+        setDraft('');
+        sendBody(body);
+    }, [activeConversation, draft, draftSms, sendBody]);
+
+    /** Re-send a bubble whose send request failed (never reached the provider). */
+    const handleRetry = useCallback(
+        (message: Message) => {
+            if (!message.body) return;
+            if (isDraft) {
+                setDraftMessages((prev) => prev.filter((row) => row.id !== message.id));
+            } else {
+                discardOptimistic(message.id);
+            }
+            sendBody(message.body);
+        },
+        [discardOptimistic, isDraft, sendBody],
+    );
 
     const handleStartConversation = useCallback(() => {
         if (startDraft(newNumber, null)) setNewNumber('');
@@ -465,6 +671,46 @@ export default function Inbox() {
         );
     }, [activeConversation?.contactName, contactDetail]);
 
+    /**
+     * "Copy profile": every known detail about the contact as plain text, one
+     * "Label: value" per line, so it pastes cleanly into email, notes or a CRM.
+     */
+    const copyProfile = useCallback(async () => {
+        if (!activeConversation) return;
+        const id = contactDetail?.identity;
+        const lines: Array<[string, string | null | undefined]> = [
+            ['Owner name', id?.ownerName ?? contactFullName],
+            ['Business name', id?.businessName ?? contactDetail?.company],
+            ['EIN', id?.ein],
+            ['SSN', id?.ssn],
+            ['Phone number', formatPhone(activeConversation.contactNumber)],
+            ['Email', id?.email ?? contactDetail?.emailAddress],
+        ];
+        const text = lines
+            .filter(([, value]) => value != null && String(value).trim() !== '')
+            .map(([label, value]) => `${label}: ${value}`)
+            .join('\n');
+
+        try {
+            await navigator.clipboard.writeText(text);
+        } catch {
+            // Clipboard API needs a secure context; fall back to a hidden textarea.
+            const area = document.createElement('textarea');
+            area.value = text;
+            area.style.position = 'fixed';
+            area.style.opacity = '0';
+            document.body.appendChild(area);
+            area.select();
+            const ok = document.execCommand('copy');
+            area.remove();
+            if (!ok) {
+                toast.error('Could not copy — your browser blocked clipboard access');
+                return;
+            }
+        }
+        toast.success('Profile copied to clipboard');
+    }, [activeConversation, contactDetail, contactFullName]);
+
     /** Group messages by day so the thread gets date separators. */
     const grouped = useMemo(() => {
         const groups: Array<{ day: string; items: Message[] }> = [];
@@ -478,9 +724,11 @@ export default function Inbox() {
     }, [messages]);
 
     return (
-        <div className="flex h-[calc(100vh-5rem)] overflow-hidden rounded-xl border bg-background shadow-sm">
-            {/* ─────────────── Left: thread list ─────────────── */}
-            <aside className="flex w-full max-w-[22rem] flex-col border-r">
+        <div className="flex h-[calc(100dvh-5rem)] overflow-hidden rounded-xl border bg-background shadow-sm">
+            {/* ─────────────── Left: thread list ───────────────
+                On phones the list and the chat are separate screens: the list
+                hides while a conversation is open, and the chat has a back button. */}
+            <aside className={cn('w-full flex-col border-r md:flex md:max-w-[22rem]', activeConversation ? 'hidden' : 'flex')}>
                 <div className="space-y-3 border-b p-3">
                     <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
@@ -491,6 +739,36 @@ export default function Inbox() {
                                 </span>
                             )}
                         </div>
+                        <div className="flex items-center gap-1">
+                        {pushState && pushState !== 'unavailable' && (
+                            <Button
+                                size="sm"
+                                variant={pushState === 'on' ? 'secondary' : 'outline'}
+                                className="h-7 gap-1 px-2 text-[11px]"
+                                onClick={() => void togglePush()}
+                                disabled={pushBusy || pushState === 'unsupported'}
+                                title={
+                                    pushState === 'on'
+                                        ? 'Notifications are on for this device — click to turn off'
+                                        : pushState === 'denied'
+                                          ? 'Notifications are blocked in your browser settings'
+                                          : pushState === 'unsupported'
+                                            ? 'Not supported in this browser (on iPhone, add Harbor to the Home Screen)'
+                                            : 'Get a notification for every new message, even when Harbor is closed'
+                                }
+                            >
+                                {pushBusy ? (
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                ) : pushState === 'on' ? (
+                                    <BellRing className="h-3.5 w-3.5 text-emerald-600" />
+                                ) : pushState === 'denied' || pushState === 'unsupported' ? (
+                                    <BellOff className="h-3.5 w-3.5" />
+                                ) : (
+                                    <Bell className="h-3.5 w-3.5" />
+                                )}
+                                {pushState === 'on' ? 'Notifying' : 'Notify me'}
+                            </Button>
+                        )}
                         <span
                             className="flex items-center gap-1 text-[11px] text-muted-foreground"
                             title={isRealtime ? 'Live updates active' : 'Socket offline — polling'}
@@ -502,6 +780,7 @@ export default function Inbox() {
                             )}
                             {isRealtime ? 'Live' : 'Polling'}
                         </span>
+                        </div>
                     </div>
 
                     {/* Users can be assigned different sending numbers, and the
@@ -617,6 +896,11 @@ export default function Inbox() {
                                             isActive={!draftConversation && conversation.id === activeConversationId}
                                             onSelect={() => selectConversation(conversation.id)}
                                             onDelete={() => setPendingDelete(conversation)}
+                                            onToggleRead={() =>
+                                                void (conversation.unreadCount > 0
+                                                    ? handleMarkRead(conversation.id)
+                                                    : handleMarkUnread(conversation.id))
+                                            }
                                         />
                                     )}
                                     className="h-full"
@@ -628,7 +912,7 @@ export default function Inbox() {
             </aside>
 
             {/* ─────────────── Centre: chat ─────────────── */}
-            <section className="flex min-w-0 flex-1 flex-col bg-muted/20">
+            <section className={cn('min-w-0 flex-1 flex-col bg-muted/20 md:flex', activeConversation ? 'flex' : 'hidden')}>
                 {!activeConversation ? (
                     <div className="flex flex-1 flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
                         <MessagingAvatar name={null} size="lg" />
@@ -636,8 +920,17 @@ export default function Inbox() {
                     </div>
                 ) : (
                     <>
-                        <header className="flex items-center justify-between gap-3 border-b bg-background px-4 py-2.5">
-                            <div className="flex min-w-0 items-center gap-3">
+                        <header className="flex items-center justify-between gap-2 border-b bg-background px-2 py-2.5 sm:px-4">
+                            <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+                                <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className="h-8 w-8 shrink-0 md:hidden"
+                                    onClick={() => selectConversation(null)}
+                                    title="Back to conversations"
+                                >
+                                    <ArrowLeft className="h-4 w-4" />
+                                </Button>
                                 <MessagingAvatar name={contactFullName} />
                                 <div className="min-w-0">
                                     <p className="truncate text-sm font-medium">
@@ -650,13 +943,35 @@ export default function Inbox() {
                                 </div>
                             </div>
 
-                            <div className="flex shrink-0 items-center gap-1.5">
+                            <div className="flex shrink-0 items-center gap-0.5 sm:gap-1.5">
                                 {activeConversation.hasBroadcastMessage && (
-                                    <Badge variant="secondary" className="gap-1">
+                                    <Badge variant="secondary" className="hidden gap-1 lg:inline-flex">
                                         <Megaphone className="h-3 w-3" /> Broadcast
                                     </Badge>
                                 )}
-                                {activeConversation.isOptedOut && <Badge variant="destructive">Opted out</Badge>}
+                                {activeConversation.isOptedOut && (
+                                    <Badge variant="destructive" className="hidden sm:inline-flex">Opted out</Badge>
+                                )}
+                                <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className="h-8 w-8 xl:hidden"
+                                    onClick={() => void copyProfile()}
+                                    title="Copy profile to clipboard"
+                                >
+                                    <ClipboardCopy className="h-4 w-4" />
+                                </Button>
+                                {!isDraft && activeConversation.id && (
+                                    <Button
+                                        size="icon"
+                                        variant="ghost"
+                                        className="h-8 w-8"
+                                        onClick={() => void handleMarkUnread(activeConversation.id)}
+                                        title="Mark as unread and close"
+                                    >
+                                        <Mail className="h-4 w-4" />
+                                    </Button>
+                                )}
 
                                 {/* Interested / Not Interested. Either marker takes the lead
                                     out of follow-up broadcasts; clicking the active one
@@ -695,7 +1010,7 @@ export default function Inbox() {
                                 </Button>
 
                                 {config?.voiceEnabled && (
-                                    <Button size="icon" variant="ghost" className="h-8 w-8" title="Call this contact">
+                                    <Button size="icon" variant="ghost" className="hidden h-8 w-8 sm:inline-flex" title="Call this contact">
                                         <Phone className="h-4 w-4" />
                                     </Button>
                                 )}
@@ -720,7 +1035,7 @@ export default function Inbox() {
                                 <Button
                                     size="icon"
                                     variant="ghost"
-                                    className="h-8 w-8"
+                                    className="hidden h-8 w-8 xl:inline-flex"
                                     onClick={() => setShowDetails((value) => !value)}
                                     title={showDetails ? 'Hide details' : 'Show details'}
                                 >
@@ -729,7 +1044,30 @@ export default function Inbox() {
                             </div>
                         </header>
 
-                        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
+                        <div
+                            ref={messagesScrollRef}
+                            onScroll={handleMessagesScroll}
+                            className="min-h-0 flex-1 space-y-4 overflow-y-auto px-3 py-4 sm:px-4"
+                        >
+                            {!isDraft && (isLoadingOlderMessages || hasOlderMessages) && messages.length > 0 && (
+                                <div className="flex justify-center">
+                                    {isLoadingOlderMessages ? (
+                                        <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+                                    ) : (
+                                        <button
+                                            type="button"
+                                            className="text-[11px] text-muted-foreground hover:underline"
+                                            onClick={() => {
+                                                const el = messagesScrollRef.current;
+                                                if (el) scrollAnchor.current = { height: el.scrollHeight, top: el.scrollTop };
+                                                void loadOlderMessages();
+                                            }}
+                                        >
+                                            Load earlier messages
+                                        </button>
+                                    )}
+                                </div>
+                            )}
                             {isLoadingMessages && messages.length === 0 ? (
                                 <p className="text-sm text-muted-foreground">Loading messages…</p>
                             ) : (
@@ -741,7 +1079,7 @@ export default function Inbox() {
                                             </span>
                                         </div>
                                         {group.items.map((message) => (
-                                            <MessageBubble key={message.id} message={message} />
+                                            <MessageBubble key={message.id} message={message} onRetry={handleRetry} />
                                         ))}
                                     </div>
                                 ))
@@ -749,7 +1087,7 @@ export default function Inbox() {
                             <div ref={messagesEndRef} />
                         </div>
 
-                        <footer className="border-t bg-background p-3">
+                        <footer className="border-t bg-background p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] sm:p-3">
                             {!config?.configured && (
                                 <p className="mb-2 rounded bg-amber-50 px-2 py-1 text-xs text-amber-700 dark:bg-amber-900/20 dark:text-amber-400">
                                     Messaging is not configured — set INFOBIP_BASE_URL, INFOBIP_API_KEY and
@@ -786,13 +1124,9 @@ export default function Inbox() {
                                     size="icon"
                                     className="h-9 w-9 shrink-0"
                                     onClick={handleSend}
-                                    disabled={!canSend || !draft.trim() || isSending}
+                                    disabled={!canSend || !draft.trim()}
                                 >
-                                    {isSending ? (
-                                        <Loader2 className="h-4 w-4 animate-spin" />
-                                    ) : (
-                                        <Send className="h-4 w-4" />
-                                    )}
+                                    <Send className="h-4 w-4" />
                                 </Button>
                             </div>
                             {draft.trim() ? (
@@ -802,7 +1136,7 @@ export default function Inbox() {
                                     onTextChange={setDraft}
                                 />
                             ) : (
-                                <p className="mt-1 text-[11px] text-muted-foreground">
+                                <p className="mt-1 hidden text-[11px] text-muted-foreground sm:block">
                                     Enter to send · Shift+Enter for a new line
                                 </p>
                             )}
@@ -832,26 +1166,28 @@ export default function Inbox() {
                             {activeConversation.isOptedOut && <Badge variant="destructive">Opted out</Badge>}
                             {activeConversation.hasBroadcastMessage && <Badge variant="secondary">Broadcast</Badge>}
                         </div>
+                        <Button size="sm" variant="outline" className="mt-1 h-8 gap-1.5" onClick={() => void copyProfile()}>
+                            <ClipboardCopy className="h-3.5 w-3.5" /> Copy profile
+                        </Button>
                     </div>
 
                     <div className="flex-1 space-y-2 overflow-y-auto p-3 text-sm">
-                        <DetailField label="Company" value={contactDetail?.company} />
-                        <DetailField label="Email" value={contactDetail?.emailAddress} />
                         <DetailField
-                            label="Location"
-                            value={[contactDetail?.city, contactDetail?.state].filter(Boolean).join(', ')}
+                            label="Owner name"
+                            value={contactDetail?.identity?.ownerName ?? contactFullName}
                         />
-                        <DetailField label="Tags" value={contactDetail?.tags?.join(', ')} />
                         <DetailField
-                            label="Client"
-                            value={
-                                contactDetail?.client
-                                    ? `${contactDetail.client.businessName} (#${contactDetail.client.clientNumber})`
-                                    : null
-                            }
+                            label="Business name"
+                            value={contactDetail?.identity?.businessName ?? contactDetail?.company}
                         />
-                        <DetailField label="Sender" value={formatPhone(activeConversation.businessNumber)} />
-                        <DetailField label="Messages" value={String(messages.length)} />
+                        <DetailField label="EIN" value={contactDetail?.identity?.ein} />
+                        {/* SSN is admin-only; the API does not send it to agents at all. */}
+                        {canUseClients && <SsnField value={contactDetail?.identity?.ssn ?? null} />}
+                        <DetailField label="Phone number" value={formatPhone(activeConversation.contactNumber)} />
+                        <DetailField
+                            label="Email"
+                            value={contactDetail?.identity?.email ?? contactDetail?.emailAddress}
+                        />
 
                         {contactDetail?.source === 'crm-client' && (
                             <p className="pt-2 text-xs text-muted-foreground">
@@ -913,6 +1249,32 @@ export default function Inbox() {
     );
 }
 
+/** SSN is masked to its last four digits until the agent chooses to show it. */
+function SsnField({ value }: { value: string | null }) {
+    const [shown, setShown] = useState(false);
+    useEffect(() => setShown(false), [value]);
+    const digits = (value ?? '').replace(/\D/g, '');
+    const masked = digits.length >= 4 ? `•••-••-${digits.slice(-4)}` : value ? '•••••••••' : null;
+    return (
+        <div className="flex items-start justify-between gap-3 border-b pb-2 last:border-b-0">
+            <span className="shrink-0 text-xs text-muted-foreground">SSN</span>
+            <span className="flex items-center gap-1.5 text-right text-xs">
+                <span className="font-mono">{value ? (shown ? value : masked) : '—'}</span>
+                {value && (
+                    <button
+                        type="button"
+                        onClick={() => setShown((v) => !v)}
+                        className="rounded p-0.5 text-muted-foreground hover:text-foreground"
+                        title={shown ? 'Hide SSN' : 'Show SSN'}
+                    >
+                        {shown ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                    </button>
+                )}
+            </span>
+        </div>
+    );
+}
+
 function DetailField({ label, value }: { label: string; value?: string | null }) {
     return (
         <div className="flex items-start justify-between gap-3 border-b pb-2 last:border-b-0">
@@ -928,12 +1290,14 @@ function ConversationRow({
     isDraft = false,
     onSelect,
     onDelete,
+    onToggleRead,
 }: {
     conversation: Conversation;
     isActive: boolean;
     isDraft?: boolean;
     onSelect: () => void;
     onDelete: () => void;
+    onToggleRead?: () => void;
 }) {
     const isUnread = conversation.unreadCount > 0;
 
@@ -974,7 +1338,7 @@ function ConversationRow({
                         {isDraft ? 'New chat — send a message to start' : conversation.lastMessageText || 'No messages yet'}
                     </span>
 
-                    <span className="flex shrink-0 items-center gap-1 pr-6">
+                    <span className={cn('flex shrink-0 items-center gap-1', onToggleRead ? 'pr-12' : 'pr-6')}>
                         {conversation.hasBroadcastMessage && (
                             <Megaphone className="h-3 w-3 text-muted-foreground" />
                         )}
@@ -992,28 +1356,49 @@ function ConversationRow({
             </div>
             </button>
 
-            <button
-                type="button"
-                onClick={onDelete}
-                title={isDraft ? 'Discard this chat' : 'Delete conversation'}
-                className="absolute bottom-2 right-2 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-background hover:text-red-500 focus-visible:opacity-100 group-hover/row:opacity-100"
-            >
-                <Trash2 className="h-3.5 w-3.5" />
-            </button>
+            {/* Row actions. Always visible on touch screens (no hover there). */}
+            <div className="absolute bottom-1.5 right-1.5 flex items-center gap-0.5 opacity-100 transition-opacity focus-within:opacity-100 md:opacity-0 md:group-hover/row:opacity-100">
+                {onToggleRead && (
+                    <button
+                        type="button"
+                        onClick={onToggleRead}
+                        title={isUnread ? 'Mark as read' : 'Mark as unread'}
+                        className="rounded p-1 text-muted-foreground hover:bg-background hover:text-foreground"
+                    >
+                        {isUnread ? <MailOpen className="h-3.5 w-3.5" /> : <Mail className="h-3.5 w-3.5" />}
+                    </button>
+                )}
+                <button
+                    type="button"
+                    onClick={onDelete}
+                    title={isDraft ? 'Discard this chat' : 'Delete conversation'}
+                    className="rounded p-1 text-muted-foreground hover:bg-background hover:text-red-500"
+                >
+                    <Trash2 className="h-3.5 w-3.5" />
+                </button>
+            </div>
         </div>
     );
 }
 
-function MessageBubble({ message }: { message: Message }) {
+const MessageBubble = memo(function MessageBubble({
+    message,
+    onRetry,
+}: {
+    message: Message;
+    onRetry?: (message: Message) => void;
+}) {
     const isOutbound = message.direction === 'OUTBOUND';
     const isFailed = message.status === 'FAILED' || message.status === 'UNDELIVERABLE';
+    /** Only a send that never got a server id can be retried safely (no double send). */
+    const canRetry = isFailed && message.id.startsWith(PENDING_PREFIX) && Boolean(onRetry);
     const time = new Date(message.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
     return (
         <div className={cn('flex', isOutbound ? 'justify-end' : 'justify-start')}>
             <div
                 className={cn(
-                    'max-w-[70%] rounded-2xl px-3 py-2 text-sm shadow-sm',
+                    'max-w-[85%] rounded-2xl px-3 py-2 text-sm shadow-sm sm:max-w-[70%]',
                     isOutbound
                         ? 'rounded-br-sm bg-primary text-primary-foreground'
                         : 'rounded-bl-sm bg-background',
@@ -1050,9 +1435,18 @@ function MessageBubble({ message }: { message: Message }) {
                     <p className="mt-1 flex items-start gap-1 text-[10px] font-medium text-red-400">
                         <AlertCircle className="mt-px h-3 w-3 shrink-0" />
                         <span>{message.errorMessage || 'Not delivered'}</span>
+                        {canRetry && (
+                            <button
+                                type="button"
+                                className="ml-1 underline hover:no-underline"
+                                onClick={() => onRetry?.(message)}
+                            >
+                                Retry
+                            </button>
+                        )}
                     </p>
                 )}
             </div>
         </div>
     );
-}
+});

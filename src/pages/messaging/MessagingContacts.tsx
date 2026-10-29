@@ -7,7 +7,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { toast } from 'react-toastify';
-import { Ban, CheckCircle2, Loader2, ShieldAlert, Upload } from 'lucide-react';
+import { Ban, CheckCircle2, ChevronLeft, ChevronRight, Loader2, ShieldAlert, Upload } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -52,8 +52,14 @@ const DISPOSITION_LABELS: Record<ContactDisposition, string> = {
     NOT_INTERESTED: 'Not interested',
 };
 
+/** Server caps contact pages at 200. */
+const PAGE_SIZES = [25, 50, 100, 200] as const;
+
 export default function MessagingContacts() {
     const [contacts, setContacts] = useState<MessagingContact[]>([]);
+    const [page, setPage] = useState(1);
+    const [pageSize, setPageSize] = useState<number>(50);
+    const [total, setTotal] = useState(0);
     const [isLoading, setIsLoading] = useState(true);
     const [search, setSearch] = useState('');
     const [statusFilter, setStatusFilter] = useState<StatusFilter>('ALL');
@@ -73,8 +79,8 @@ export default function MessagingContacts() {
         setIsLoading(true);
         try {
             const response = await fetchContacts({
-                page: 1,
-                pageSize: 100,
+                page,
+                pageSize,
                 search: search || undefined,
                 status:
                     statusFilter === 'ACTIVE' || statusFilter === 'BLOCKED' ? statusFilter : undefined,
@@ -83,12 +89,22 @@ export default function MessagingContacts() {
                 batchId: batchFilter === 'ALL' ? undefined : batchFilter,
             });
             setContacts(response.data);
+            setTotal(response.pagination.total ?? response.data.length);
         } catch (error: any) {
             toast.error(error?.response?.data?.message || 'Failed to load contacts');
         } finally {
             setIsLoading(false);
         }
-    }, [batchFilter, dispositionFilter, search, statusFilter]);
+    }, [batchFilter, dispositionFilter, page, pageSize, search, statusFilter]);
+
+    // A new filter or page size starts again from the first page.
+    useEffect(() => {
+        setPage(1);
+    }, [batchFilter, dispositionFilter, pageSize, search, statusFilter]);
+
+    const pageCount = Math.max(1, Math.ceil(total / pageSize));
+    const firstShown = total === 0 ? 0 : (page - 1) * pageSize + 1;
+    const lastShown = Math.min(page * pageSize, total);
 
     // Batches change only on an upload, so they load once rather than with
     // every filter change.
@@ -114,9 +130,21 @@ export default function MessagingContacts() {
             setLastImport(summary);
             setFile(null);
             toast.success(`Imported ${summary.imported} new, updated ${summary.updated}`);
-            await load();
+            void load().catch(() => {
+                toast.info('Import saved — refresh if the list looks stale.');
+            });
         } catch (error: any) {
-            toast.error(error?.response?.data?.message || 'Import failed');
+            const timedOut =
+                error?.code === 'ECONNABORTED' ||
+                String(error?.message ?? '').toLowerCase().includes('timeout');
+            if (timedOut) {
+                toast.warn(
+                    'Upload took too long to confirm. Refresh — contacts may already be imported.',
+                );
+                void load();
+            } else {
+                toast.error(error?.response?.data?.message || error?.message || 'Import failed');
+            }
         } finally {
             setIsImporting(false);
         }
@@ -326,7 +354,7 @@ export default function MessagingContacts() {
                         <Table>
                             <TableHeader>
                                 <TableRow>
-                                    <TableHead>Name</TableHead>
+                                    <TableHead>Owner name</TableHead>
                                     <TableHead>Phone</TableHead>
                                     <TableHead>Company</TableHead>
                                     <TableHead>Marker</TableHead>
@@ -339,7 +367,7 @@ export default function MessagingContacts() {
                                 {contacts.map((contact) => (
                                     <TableRow key={contact.id}>
                                         <TableCell>
-                                            {[contact.firstName, contact.lastName].filter(Boolean).join(' ') || '—'}
+                                            {contact.ownerName?.trim() || [contact.firstName, contact.lastName].filter(Boolean).join(' ') || '—'}
                                         </TableCell>
                                         <TableCell className="font-mono text-xs">{contact.phoneNumber}</TableCell>
                                         <TableCell>{contact.company || '—'}</TableCell>
@@ -382,6 +410,49 @@ export default function MessagingContacts() {
                                 ))}
                             </TableBody>
                         </Table>
+                    )}
+
+                    {total > 0 && (
+                        <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground">
+                            <span>
+                                {firstShown.toLocaleString()}–{lastShown.toLocaleString()} of {total.toLocaleString()}
+                            </span>
+                            <div className="flex items-center gap-2">
+                                <select
+                                    value={pageSize}
+                                    onChange={(event) => setPageSize(Number(event.target.value))}
+                                    className="h-8 rounded-md border bg-background px-2 text-sm"
+                                    aria-label="Contacts per page"
+                                >
+                                    {PAGE_SIZES.map((size) => (
+                                        <option key={size} value={size}>
+                                            {size} / page
+                                        </option>
+                                    ))}
+                                </select>
+                                <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                                    disabled={isLoading || page <= 1}
+                                    aria-label="Previous page"
+                                >
+                                    <ChevronLeft className="h-4 w-4" />
+                                </Button>
+                                <span>
+                                    Page {page} of {pageCount}
+                                </span>
+                                <Button
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
+                                    disabled={isLoading || page >= pageCount}
+                                    aria-label="Next page"
+                                >
+                                    <ChevronRight className="h-4 w-4" />
+                                </Button>
+                            </div>
+                        </div>
                     )}
                 </CardContent>
             </Card>

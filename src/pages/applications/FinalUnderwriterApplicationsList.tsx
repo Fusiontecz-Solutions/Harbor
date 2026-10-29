@@ -16,6 +16,7 @@ import type { Application } from '@/types/applicationTypes';
 import {
     type ColumnDef,
     type PaginationState,
+    type SortingState,
     getCoreRowModel,
     getFilteredRowModel,
     getPaginationRowModel,
@@ -27,6 +28,7 @@ import { Loader2, Search, Trash2 } from 'lucide-react';
 import DataTableContent from '@/components/DataTable/DataTableContent';
 import { isListBlockingLoad } from '@/lib/listLoading';
 import DataTablePagination from '@/components/DataTable/DataTablePagination';
+import DataTableSortHeader from '@/components/DataTable/DataTableSortHeader';
 import { axiosGet } from '@/redux/axios';
 import { formatDate as formatDateUtil } from "@/lib/utils";
 import ApplicationDetailsSheet from "@/components/application/ApplicationDetailsSheet";
@@ -37,6 +39,7 @@ import {
     statCardTitleToApplicationsQuery,
 } from "@/constants/dashboardApplicationsNavigation";
 import {
+    applicationsListSortFromTable,
     buildApplicationsListParams,
     DEFAULT_APPLICATIONS_PAGE_SIZE,
 } from "@/lib/applicationsListParams";
@@ -109,6 +112,7 @@ export default function FinalUnderwriterApplicationsList() {
     const [, setContractTemplate] = useState<{ url: string; originalName: string } | null>(null);
     // const templateInputRef = useRef<HTMLInputElement | null>(null);
 
+    const [sorting, setSorting] = useState<SortingState>([]);
     const [pagination, setPagination] = useState<PaginationState>({
         pageIndex: 0,
         pageSize: DEFAULT_APPLICATIONS_PAGE_SIZE,
@@ -317,11 +321,9 @@ export default function FinalUnderwriterApplicationsList() {
         const dataColumns: ColumnDef<Application>[] = [
             {
                 accessorKey: "applicationId",
-                header: () => (
-                    <div className="flex items-center gap-2">
-                        <span className="font-medium text-foreground">ID</span>
-                    </div>
-                ),
+                header: ({ column }) => (
+                    <DataTableSortHeader column={column} label="ID" />
+                  ),
                 cell: ({ row }) => (
                     <span
                         className="font-medium text-foreground cursor-pointer hover:text-blue-600"
@@ -336,11 +338,9 @@ export default function FinalUnderwriterApplicationsList() {
             {
                 id: "businessName",
                 accessorFn: (row) => getApplicationBusinessDisplayName(row),
-                header: () => (
-                    <div className="flex items-center gap-2">
-                        <span className="font-medium text-foreground">BUSINESS NAME</span>
-                    </div>
-                ),
+                header: ({ column }) => (
+                    <DataTableSortHeader column={column} label="BUSINESS NAME" />
+                  ),
                 cell: ({ row }) => (
                     <span className="text-foreground">
                         {getApplicationBusinessDisplayName(row.original)}
@@ -350,11 +350,9 @@ export default function FinalUnderwriterApplicationsList() {
             {
                 id: "email",
                 accessorFn: (row) => getClientEmail(row.client),
-                header: () => (
-                    <div className="flex items-center gap-2">
-                        <span className="font-medium text-foreground">EMAIL</span>
-                    </div>
-                ),
+                header: ({ column }) => (
+                    <DataTableSortHeader column={column} label="EMAIL" />
+                  ),
                 cell: ({ row }) => (
                     <span className="text-foreground">{getClientEmail(row.original.client)}</span>
                 ),
@@ -362,11 +360,9 @@ export default function FinalUnderwriterApplicationsList() {
             {
                 id: "loanAmount",
                 accessorFn: (row) => resolveApplicationDisplayLoanAmount(row),
-                header: () => (
-                    <div className="flex items-center gap-2">
-                        <span className="font-medium text-foreground">Loan Amount</span>
-                    </div>
-                ),
+                header: ({ column }) => (
+                    <DataTableSortHeader column={column} label="Loan Amount" />
+                  ),
                 cell: ({ row }) => {
                     const loanAmount = resolveApplicationDisplayLoanAmount(row.original);
                     if (loanAmount == null) return <span className="text-foreground">-</span>;
@@ -380,11 +376,9 @@ export default function FinalUnderwriterApplicationsList() {
                     String(row.currentQueue ?? row.queue ?? "")
                         .trim()
                         .toLowerCase(),
-                header: () => (
-                    <div className="flex items-center gap-2">
-                        <span className="font-medium text-foreground">Current queue</span>
-                    </div>
-                ),
+                header: ({ column }) => (
+                    <DataTableSortHeader column={column} label="Current queue" />
+                  ),
                 cell: ({ row }) => {
                     const queue = getApplicationCurrentQueue(row.original);
                     return (
@@ -398,22 +392,18 @@ export default function FinalUnderwriterApplicationsList() {
             },
             {
                 accessorKey: "createdAt",
-                header: () => (
-                    <div className="flex items-center gap-2">
-                        <span className="font-medium text-foreground">CREATED AT</span>
-                    </div>
-                ),
+                header: ({ column }) => (
+                    <DataTableSortHeader column={column} label="CREATED AT" />
+                  ),
                 cell: ({ row }) => (
                     <span className="text-foreground">{formatDate(row.original.createdAt)}</span>
                 ),
             },
             {
                 accessorKey: "lastModifiedAt",
-                header: () => (
-                    <div className="flex items-center gap-2">
-                        <span className="font-medium text-foreground">Last Modified Date</span>
-                    </div>
-                ),
+                header: ({ column }) => (
+                    <DataTableSortHeader column={column} label="Last Modified Date" />
+                  ),
                 cell: ({ row }) => {
                     const value =
                         (row.original as any).lastModifiedAt ??
@@ -475,7 +465,10 @@ export default function FinalUnderwriterApplicationsList() {
             setPagination(next);
         },
         manualPagination: true,
-        state: { pagination, rowSelection },
+        // Sorting runs on the server across every page, not just the rows loaded.
+        manualSorting: true,
+        onSortingChange: setSorting,
+        state: { pagination, rowSelection, sorting },
         onRowSelectionChange: setRowSelection,
         getRowId: (row) => row._id,
     });
@@ -489,6 +482,7 @@ export default function FinalUnderwriterApplicationsList() {
                     searchTerm: debouncedSearchTerm,
                     dashboardStateFilter: "",
                     statusFilter: "all",
+                    ...applicationsListSortFromTable(sorting),
                 }),
             ),
         );
@@ -497,6 +491,7 @@ export default function FinalUnderwriterApplicationsList() {
         pagination.pageIndex,
         pagination.pageSize,
         debouncedSearchTerm,
+        sorting,
     ]);
 
     useEffect(() => {
@@ -506,7 +501,7 @@ export default function FinalUnderwriterApplicationsList() {
 
     useEffect(() => {
         setPagination((prev) => (prev.pageIndex === 0 ? prev : { ...prev, pageIndex: 0 }));
-    }, [debouncedSearchTerm]);
+    }, [debouncedSearchTerm, sorting]);
 
     const handleBulkDelete = useCallback(async () => {
         if (selectedApplicationIds.length === 0) return;

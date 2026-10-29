@@ -482,7 +482,7 @@ export default function ContractTab({
                     data.state = next;
                 }
             }
-            if (!Object.keys(data).length) return;
+            if (!Object.keys(data).length) return false;
             try {
                 const res = await dispatch(
                     updateContract({ id: contractId, data }),
@@ -497,8 +497,10 @@ export default function ContractTab({
                         prev && typeof prev === "object" ? { ...prev, ...data } : prev,
                     );
                 }
+                return true;
             } catch (err) {
                 console.warn("[ContractTab] persist funder/state skipped:", err);
+                return false;
             }
         },
         [dispatch, fetchedContract],
@@ -2365,7 +2367,7 @@ export default function ContractTab({
 
             const contractNumericIdForPersist = Number((latestContract as { id?: unknown })?.id);
             if (Number.isFinite(contractNumericIdForPersist) && contractNumericIdForPersist > 0) {
-                await persistContractFunderMeta(
+                const funderMetaChanged = await persistContractFunderMeta(
                     contractNumericIdForPersist,
                     {
                         funderName: sendPayload.funderName,
@@ -2373,18 +2375,21 @@ export default function ContractTab({
                     },
                     latestContract as Record<string, unknown>,
                 );
-                try {
-                    const refreshedAfterMeta = await dispatch(
-                        getByApplicationIdContract(String(applicationUuid)),
-                    ).unwrap();
-                    const refreshedContract =
-                        (refreshedAfterMeta as { data?: unknown })?.data ?? refreshedAfterMeta;
-                    if (refreshedContract) {
-                        latestContract = refreshedContract;
-                        setFetchedContract(refreshedContract);
+                // latestContract was just fetched — re-read only if we changed it.
+                if (funderMetaChanged) {
+                    try {
+                        const refreshedAfterMeta = await dispatch(
+                            getByApplicationIdContract(String(applicationUuid)),
+                        ).unwrap();
+                        const refreshedContract =
+                            (refreshedAfterMeta as { data?: unknown })?.data ?? refreshedAfterMeta;
+                        if (refreshedContract) {
+                            latestContract = refreshedContract;
+                            setFetchedContract(refreshedContract);
+                        }
+                    } catch {
+                        /* use latestContract */
                     }
-                } catch {
-                    /* use latestContract */
                 }
             }
 
@@ -2793,27 +2798,27 @@ export default function ContractTab({
                                           ?.totalAmount,
                             contractPrefillOverrides: nextOverrides,
                         });
-                        try {
-                            await syncContractPrefillToSourceRecords({
-                                dispatch,
-                                applicationData,
-                                applicationUuid: String(applicationUuid || ""),
-                                prefill: syncedPartial,
-                                offerDecision:
-                                    (offerDecision as Record<string, unknown> | null) ?? null,
-                                contractGuarantors: contractPrefillRecords.guarantors ?? null,
-                                contractOwners: contractPrefillRecords.owners ?? null,
-                                contractAch:
-                                    (contractPrefillRecords.ach as Record<string, unknown> | null) ??
-                                    null,
-                                bankDetail: contractPrefillRecords.bankDetail ?? null,
-                            });
-                        } catch (syncErr) {
+                        // Owners / client / bank / offer records are not read by the
+                        // envelope build (values travel in prefillFields) — don't block on it.
+                        void syncContractPrefillToSourceRecords({
+                            dispatch,
+                            applicationData,
+                            applicationUuid: String(applicationUuid || ""),
+                            prefill: syncedPartial,
+                            offerDecision:
+                                (offerDecision as Record<string, unknown> | null) ?? null,
+                            contractGuarantors: contractPrefillRecords.guarantors ?? null,
+                            contractOwners: contractPrefillRecords.owners ?? null,
+                            contractAch:
+                                (contractPrefillRecords.ach as Record<string, unknown> | null) ??
+                                null,
+                            bankDetail: contractPrefillRecords.bankDetail ?? null,
+                        }).catch((syncErr) => {
                             console.warn(
                                 "[ContractTab] prefill → application source sync failed:",
                                 syncErr,
                             );
-                        }
+                        });
                     } catch (persistErr) {
                         console.warn("[ContractTab] persist synced contract prefill failed:", persistErr);
                     }
@@ -3182,7 +3187,9 @@ export default function ContractTab({
         if (!envelopeId) {
             throw new Error("DocuSign did not return an envelope ID after creating the draft.");
         }
-        if (!payload.standaloneAchOnly && payload.includeMainContract !== false) {
+        // CRM bookkeeping only — the caller opens DocuSign without waiting for it.
+        const persisted = (async () => {
+            if (payload.standaloneAchOnly || payload.includeMainContract === false) return;
             const cid = Number((fetchedContract as { id?: unknown })?.id);
             if (Number.isFinite(cid) && cid > 0) {
                 await persistContractFunderMeta(cid, {
@@ -3241,12 +3248,15 @@ export default function ContractTab({
                     console.warn("[ContractTab] contract send history save skipped:", historyErr);
                 }
             }
-        }
+        })().catch((persistErr) => {
+            console.warn("[ContractTab] post-draft contract persist failed:", persistErr);
+        });
         return {
             envelopeId,
             prefillTabsApplied: result.prefillTabsApplied,
             prefillFieldCount: result.prefillFieldCount,
             sendUrl: result.sendUrl ?? null,
+            persisted,
         };
     };
 

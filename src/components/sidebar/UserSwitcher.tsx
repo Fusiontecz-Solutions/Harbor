@@ -122,7 +122,7 @@ export default function UserSwitcher() {
                     title={impersonator ? "You are acting as another user" : "Switch to a user's account"}
                 >
                     <ArrowLeftRight className="h-3.5 w-3.5 shrink-0" />
-                    <span className="max-w-[160px] truncate">
+                    <span className="hidden max-w-[160px] truncate sm:inline">
                         {impersonator ? `Viewing as ${userLabel(currentUser ?? {})}` : "Switch user"}
                     </span>
                 </button>

@@ -7,14 +7,28 @@ import type { GetApplicationsParams } from "@/types/applicationTypes";
 import type { SortingState } from "@tanstack/react-table";
 
 /** API `sortBy` values supported by `GET /applications`. */
-export type ApplicationsListSortField = "createdAt" | "applicationId" | "updatedAt";
+export type ApplicationsListSortField =
+  | "createdAt"
+  | "applicationId"
+  | "updatedAt"
+  | "businessName"
+  | "email"
+  | "loanAmount"
+  | "status";
 
+/** Table column id → API sort field (see buildApplicationListOrderBy in harbor-be). */
 const TABLE_SORT_TO_API: Record<string, ApplicationsListSortField> = {
   createdAt: "createdAt",
   applicationId: "applicationId",
   dealId: "applicationId",
   updatedAt: "updatedAt",
   lastModifiedAt: "updatedAt",
+  businessName: "businessName",
+  email: "email",
+  loanAmount: "loanAmount",
+  // Pipeline-stage order, not alphabetical.
+  status: "status",
+  currentQueue: "status",
 };
 
 /** Map TanStack column sort → backend query (defaults to newest first). */

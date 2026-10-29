@@ -50,10 +50,13 @@ import {
     SmsComposeMeter,
     useSmsSegmentInfo,
 } from '@/components/messaging/SmsComposeMeter';
+import { AudienceBreakdown } from '@/components/messaging/AudienceBreakdown';
 import {
     createBroadcastFromFile,
     createBroadcastFromList,
     fetchLeadBatches,
+    previewBroadcastAudience,
+    type AudiencePreview,
     fetchUpcomingSendWindows,
     type LeadBatch,
     type UpcomingSendWindow,
@@ -107,6 +110,8 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
         setLeadBatchId('');
         setFile(null);
         setManualNumbers('');
+        setPreview(null);
+        setPreviewError(null);
         setThrottle('10');
         setScheduledAt('');
         setAckCompliance(false);
@@ -145,14 +150,65 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
         [batches, leadBatchId],
     );
 
+    /**
+     * Server-side breakdown of the selected audience (opt-outs, blocks, already
+     * marked leads, invalid and duplicate numbers). Refreshed shortly after the
+     * selection changes; its `willSend` is the number that actually sends.
+     */
+    const [preview, setPreview] = useState<AudiencePreview | null>(null);
+    const [previewLoading, setPreviewLoading] = useState(false);
+    const [previewError, setPreviewError] = useState<string | null>(null);
+
+    useEffect(() => {
+        if (!open || step < 2) return;
+        const input =
+            source === 'batch' && leadBatchId
+                ? { leadBatchId }
+                : source === 'clients' && clientIds.length
+                  ? { clientIds }
+                  : source === 'manual' && manualList.length
+                    ? { recipients: manualList.map((phoneNumber) => ({ phoneNumber })) }
+                    : source === 'file' && file
+                      ? { file }
+                      : null;
+        if (!input) {
+            setPreview(null);
+            setPreviewError(null);
+            return;
+        }
+        let cancelled = false;
+        setPreviewLoading(true);
+        const timer = setTimeout(() => {
+            previewBroadcastAudience(input)
+                .then((data) => {
+                    if (cancelled) return;
+                    setPreview(data);
+                    setPreviewError(null);
+                })
+                .catch((err: any) => {
+                    if (cancelled) return;
+                    setPreview(null);
+                    setPreviewError(err?.response?.data?.message || 'Could not check this audience');
+                })
+                .finally(() => {
+                    if (!cancelled) setPreviewLoading(false);
+                });
+        }, 400);
+        return () => {
+            cancelled = true;
+            clearTimeout(timer);
+        };
+    }, [open, step, source, leadBatchId, clientIds, manualList, file]);
+
     const audienceCount = useMemo(() => {
+        if (preview) return preview.willSend;
         if (source === 'clients') return clientIds.length;
         if (source === 'manual') return manualList.length;
         // The batch count is the caller's own share, before blocked and
         // already-marked leads are dropped — so it is an upper bound.
         if (source === 'batch') return selectedBatch?.myLeadCount ?? 0;
         return file ? null : 0; // file size is only known server-side after parsing
-    }, [clientIds.length, file, manualList.length, selectedBatch, source]);
+    }, [clientIds.length, file, manualList.length, preview, selectedBatch, source]);
 
     const smsInfo = useSmsSegmentInfo(body);
 
@@ -163,10 +219,11 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
 
     const canLeaveStepOne = name.trim().length > 0 && body.trim().length > 0;
     const canLeaveStepTwo =
-        (source === 'clients' && clientIds.length > 0) ||
+        !(preview && preview.willSend === 0) &&
+        ((source === 'clients' && clientIds.length > 0) ||
         (source === 'batch' && Boolean(leadBatchId)) ||
         (source === 'file' && Boolean(file)) ||
-        (source === 'manual' && manualList.length > 0);
+        (source === 'manual' && manualList.length > 0));
     const canSubmit = ackCompliance && ackIrreversible && !isSubmitting;
 
     const submit = useCallback(
@@ -208,6 +265,10 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
                         `${result.suppressedCount} suppressed · ${result.duplicatesDropped} duplicates · ` +
                         `${result.invalidDropped} invalid`,
                 );
+
+                if (result.missingOwnerName) {
+                    toast.info(`${result.missingOwnerName} lead(s) without an owner name were left out`);
+                }
 
                 if (result.skippedClients?.length) {
                     toast.warn(`${result.skippedClients.length} client(s) skipped — see the campaign for details`);
@@ -384,7 +445,8 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
                                 {file && <p className="text-xs text-muted-foreground">{file.name}</p>}
                                 <p className="text-xs text-muted-foreground">
                                     A phone column is required. Every other column becomes a merge field, so a
-                                    "firstName" header fills {'{{firstName}}'} automatically.
+                                    "firstName" header fills {'{{firstName}}'} automatically. Rows without an owner
+                                    name ("Owners Name") are left out; {'{{ownerName}}'} inserts it.
                                 </p>
                             </TabsContent>
 
@@ -403,6 +465,10 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
                                 </p>
                             </TabsContent>
                         </Tabs>
+                    )}
+
+                    {step === 2 && (
+                        <AudienceBreakdown preview={preview} isLoading={previewLoading} error={previewError} />
                     )}
 
                     {step === 3 && (
@@ -573,7 +639,9 @@ export function CreateBroadcastModal({ open, onOpenChange, onCreated }: CreateBr
 
                 {step === 2 && audienceCount !== null && (
                     <p className="text-center text-xs text-muted-foreground">
-                        {audienceCount} recipient{audienceCount === 1 ? '' : 's'} selected
+                        {preview
+                            ? `${preview.willSend.toLocaleString()} of ${preview.totalLeads.toLocaleString()} leads will receive this broadcast`
+                            : `${audienceCount} recipient${audienceCount === 1 ? '' : 's'} selected`}
                     </p>
                 )}
             </DialogContent>

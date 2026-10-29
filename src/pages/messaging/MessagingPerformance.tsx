@@ -186,17 +186,23 @@ export default function MessagingPerformance() {
                 </header>
 
                 {totals && (
-                    <div className="grid grid-cols-2 gap-2 p-4 sm:grid-cols-3 lg:grid-cols-6">
-                        <Tile label="Messages sent" value={totals.messagesSent} />
+                    <div className="grid grid-cols-2 gap-2 p-4 sm:grid-cols-3 lg:grid-cols-7">
+                        <Tile label="Messages sent" value={totals.messagesSent} hint="Accepted by the provider" />
                         <Tile label="Delivered" value={totals.delivered} tone="good" />
+                        <Tile
+                            label="Undeliverable"
+                            value={totals.undeliverable ?? 0}
+                            tone="warn"
+                            hint="Accepted by the provider, carrier did not deliver (incl. expired)"
+                        />
                         <Tile
                             label="Failed"
                             value={totals.failed}
                             tone="bad"
-                            hint="Rejected by the provider or never delivered"
+                            hint="Rejected by the provider or never accepted — not counted as sent"
                         />
                         <Tile label="Campaigns" value={totals.campaigns} />
-                        <Tile label="Replies" value={totals.replies} tone="good" />
+                        <Tile label="Replies" value={totals.replies} tone="good" hint="Inbound messages excluding STOP" />
                         <Tile
                             label="Opt-outs"
                             value={totals.optOuts}
@@ -224,6 +230,7 @@ export default function MessagingPerformance() {
                                 <th className="px-4 py-2 text-left">Sends from</th>
                                 <th className="px-4 py-2 text-right">Sent</th>
                                 <th className="px-4 py-2 text-right">Delivered</th>
+                                <th className="px-4 py-2 text-right">Undeliverable</th>
                                 <th className="px-4 py-2 text-right">Failed</th>
                                 <th className="px-4 py-2 text-right">Campaigns</th>
                                 <th className="px-4 py-2 text-right">Replies</th>
@@ -234,13 +241,13 @@ export default function MessagingPerformance() {
                         <tbody>
                             {isLoading && !data ? (
                                 <tr>
-                                    <td colSpan={9} className="px-4 py-8 text-center text-muted-foreground">
+                                    <td colSpan={10} className="px-4 py-8 text-center text-muted-foreground">
                                         Loading…
                                     </td>
                                 </tr>
                             ) : !data?.users.length ? (
                                 <tr>
-                                    <td colSpan={9} className="px-4 py-8 text-center text-muted-foreground">
+                                    <td colSpan={10} className="px-4 py-8 text-center text-muted-foreground">
                                         No messaging activity in this range.
                                     </td>
                                 </tr>
@@ -259,6 +266,9 @@ export default function MessagingPerformance() {
                                         </td>
                                         <td className="px-4 py-2 text-right text-emerald-600">
                                             {user.delivered.toLocaleString()}
+                                        </td>
+                                        <td className="px-4 py-2 text-right text-amber-600">
+                                            {(user.undeliverable ?? 0).toLocaleString()}
                                         </td>
                                         <td
                                             className={cn(

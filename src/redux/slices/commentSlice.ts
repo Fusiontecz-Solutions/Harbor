@@ -16,8 +16,9 @@ interface CommentsState {
     pagination: {
         total: number;
         page: number;
-        limit: number;
+        pageSize: number;
         totalPages: number;
+        hasMore: boolean;
     } | null;
     error: string | null;
 }

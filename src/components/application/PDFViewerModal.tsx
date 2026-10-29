@@ -417,6 +417,8 @@ interface PDFViewerModalProps {
             prefillTabsApplied?: number;
             prefillFieldCount?: number;
             sendUrl?: string | null;
+            /** CRM bookkeeping after the draft exists; runs while DocuSign opens. */
+            persisted?: Promise<void>;
         }
     >;
     prefillFieldsPreview?: Array<{ id: string; label?: string; value: string }>;
@@ -4324,6 +4326,13 @@ const PDFViewerModal = ({
             setDocuSignOpenUrl(null);
             docuSignTab = window.open("about:blank", "_blank");
             if (docuSignTab) {
+                // Sever the opener link: DocuSign's sending console treats a tab with a live
+                // `window.opener` as an embedded popup and never finishes loading.
+                try {
+                    docuSignTab.opener = null;
+                } catch {
+                    /* ignore */
+                }
                 try {
                     writeDocuSignLoadingTab(docuSignTab.document);
                 } catch {
@@ -4505,7 +4514,21 @@ const PDFViewerModal = ({
                         draftPreparedSignerRolesRef.current = signerFingerprintForSend;
                         draftPreparedOwnerCountRef.current = currentOwnerCount;
                         draftPreparedPackageFingerprintRef.current = sendPackageFingerprint;
-                        await persistContractEnvelopeHistory(envelopeId, "draft");
+                        // Save history after the parent's bookkeeping (same contract JSON),
+                        // without holding the DocuSign tab on it.
+                        const draftEnvelopeId = envelopeId;
+                        const parentPersisted =
+                            (prepared as { persisted?: Promise<void> } | undefined)?.persisted ??
+                            Promise.resolve();
+                        void parentPersisted
+                            .catch(() => undefined)
+                            .then(() => persistContractEnvelopeHistory(draftEnvelopeId, "draft"))
+                            .catch((historyErr) =>
+                                console.warn(
+                                    "[PDFViewerModal] contract envelope history save failed:",
+                                    historyErr,
+                                ),
+                            );
                     }
                 }
 
