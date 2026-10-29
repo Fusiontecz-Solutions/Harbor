@@ -105,7 +105,7 @@ router.put('/limit', async (req: Request, res: Response) => {
 
 router.put('/prepaid', async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
-  const { balance, pricePerUnit, currency, chargeBy, actor } = body;
+  const { balance, pricePerUnit, inboundPricePerUnit, currency, chargeBy, actor } = body;
   if (typeof balance !== 'number' || !Number.isFinite(balance) || balance < 0) {
     res.status(400).json({ error: 'balance must be a non-negative number' });
     return;
@@ -118,10 +118,24 @@ router.put('/prepaid', async (req: Request, res: Response) => {
     res.status(400).json({ error: 'chargeBy must be messages or segments' });
     return;
   }
+  if (
+    inboundPricePerUnit !== undefined &&
+    inboundPricePerUnit !== null &&
+    (typeof inboundPricePerUnit !== 'number' || !Number.isFinite(inboundPricePerUnit) || inboundPricePerUnit < 0)
+  ) {
+    res.status(400).json({ error: 'inboundPricePerUnit must be a non-negative number or null' });
+    return;
+  }
   try {
     const prepaid = await setPrepaidState({
       balance,
       pricePerUnit,
+      inboundPricePerUnit:
+        inboundPricePerUnit === undefined
+          ? undefined
+          : inboundPricePerUnit === null
+            ? null
+            : inboundPricePerUnit,
       currency: typeof currency === 'string' ? currency : 'USD',
       chargeBy: chargeBy === 'segments' ? 'segments' : 'messages',
       updatedBy: typeof actor === 'string' ? actor : null,

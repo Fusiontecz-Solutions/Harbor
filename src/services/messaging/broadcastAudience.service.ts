@@ -8,13 +8,14 @@
  * Two of the buckets are not stored on the recipient row and have to be derived
  * from the message table:
  *
- *   replied    — inbound messages attributed to this campaign
- *   opted-out  — those inbound messages that matched a stop keyword
+ *   replied    — contacts with a non-STOP inbound attributed to this campaign
+ *   opted-out  — contacts whose inbound matched a stop keyword
  *
  * Deriving them keeps the recipient row as a pure record of *our* send attempt,
  * so a reply arriving days later can never race a counter update.
  */
 import type { Prisma } from '@prisma/client';
+import { contactDisplayName } from './contactName';
 import prisma from '../../config/prismaClient';
 
 export type AudienceBucket =
@@ -22,6 +23,7 @@ export type AudienceBucket =
   | 'queued'
   | 'sending'
   | 'sent'
+  | 'pending'
   | 'delivered'
   | 'failed'
   | 'undeliverable'
@@ -57,7 +59,7 @@ export interface AudiencePage {
 const DIRECT_STATUS: Partial<Record<AudienceBucket, string>> = {
   queued: 'QUEUED',
   sending: 'SENDING',
-  sent: 'SENT',
+  pending: 'SENT',
   delivered: 'DELIVERED',
   failed: 'FAILED',
   undeliverable: 'UNDELIVERABLE',
@@ -79,6 +81,13 @@ function buildRecipientWhere(broadcastId: string, bucket: AudienceBucket): Prism
     where.suppressedReason = { not: null };
   }
 
+  // "Sent" = accepted by the provider, whatever the outcome since (smsMetrics).
+  if (bucket === 'sent') {
+    where.providerMessageId = { not: null };
+    where.status = { in: ['SENT', 'DELIVERED', 'UNDELIVERABLE'] };
+    where.suppressedReason = null;
+  }
+
   return where;
 }
 
@@ -87,21 +96,29 @@ function buildRecipientWhere(broadcastId: string, bucket: AudienceBucket): Prism
  * One query, then grouped in memory — a campaign's reply count is orders of
  * magnitude smaller than its recipient count.
  */
-async function loadReplies(broadcastId: string): Promise<Map<string, { text: string | null; at: Date; isStop: boolean }>> {
+async function loadReplies(
+  broadcastId: string,
+): Promise<Map<string, { text: string | null; at: Date; isStop: boolean; hasReply: boolean }>> {
   const replies = await prisma.messagingMessage.findMany({
     where: { broadcastId, direction: 'INBOUND' },
     orderBy: { createdAt: 'asc' },
     select: { fromNumber: true, body: true, createdAt: true, isStopKeyword: true },
   });
 
-  const byNumber = new Map<string, { text: string | null; at: Date; isStop: boolean }>();
+  const byNumber = new Map<string, { text: string | null; at: Date; isStop: boolean; hasReply: boolean }>();
   for (const reply of replies) {
     const existing = byNumber.get(reply.fromNumber);
     // Keep the earliest reply, but let a later STOP win the opt-out flag.
     if (!existing) {
-      byNumber.set(reply.fromNumber, { text: reply.body, at: reply.createdAt, isStop: reply.isStopKeyword });
-    } else if (reply.isStopKeyword) {
-      existing.isStop = true;
+      byNumber.set(reply.fromNumber, {
+        text: reply.body,
+        at: reply.createdAt,
+        isStop: reply.isStopKeyword,
+        hasReply: !reply.isStopKeyword,
+      });
+    } else {
+      if (reply.isStopKeyword) existing.isStop = true;
+      if (!reply.isStopKeyword) existing.hasReply = true;
     }
   }
 
@@ -120,7 +137,7 @@ export async function getBroadcastAudience(
   /* ---- Derived buckets: driven by the message table, not the recipient row ---- */
   if (bucket === 'replied' || bucket === 'opted-out') {
     const replies = await loadReplies(broadcastId);
-    const wanted = [...replies.entries()].filter(([, r]) => (bucket === 'opted-out' ? r.isStop : true));
+    const wanted = [...replies.entries()].filter(([, r]) => (bucket === 'opted-out' ? r.isStop : r.hasReply));
 
     const total = wanted.length;
     const slice = wanted.slice((safePage - 1) * safeSize, safePage * safeSize);
@@ -129,7 +146,7 @@ export async function getBroadcastAudience(
     // Enrich with whatever contact detail we hold for those numbers.
     const contacts = await prisma.messagingContact.findMany({
       where: { phoneNumber: { in: numbers } },
-      select: { phoneNumber: true, firstName: true, lastName: true, company: true, city: true, state: true },
+      select: { phoneNumber: true, ownerName: true, firstName: true, lastName: true, company: true, city: true, state: true },
     });
     const contactByPhone = new Map(contacts.map((c) => [c.phoneNumber, c]));
 
@@ -145,7 +162,7 @@ export async function getBroadcastAudience(
         const recipient = recipientByPhone.get(phone);
         return {
           phoneNumber: phone,
-          contactName: contact ? [contact.firstName, contact.lastName].filter(Boolean).join(' ') || null : null,
+          contactName: contactDisplayName(contact),
           company: contact?.company ?? null,
           city: contact?.city ?? null,
           state: contact?.state ?? null,
@@ -181,7 +198,7 @@ export async function getBroadcastAudience(
         errorMessage: true,
         suppressedReason: true,
         sentAt: true,
-        contact: { select: { firstName: true, lastName: true, company: true, city: true, state: true } },
+        contact: { select: { ownerName: true, firstName: true, lastName: true, company: true, city: true, state: true } },
         mergeData: true,
       },
     }),
@@ -191,11 +208,11 @@ export async function getBroadcastAudience(
   return {
     rows: rows.map((row) => {
       const merge = (row.mergeData as Record<string, unknown> | null) ?? {};
-      const mergedName = [merge.firstName, merge.lastName].filter(Boolean).join(' ').trim();
+      const mergedName = String(merge.ownerName ?? '').trim() || [merge.firstName, merge.lastName].filter(Boolean).join(' ').trim();
       return {
         phoneNumber: row.phoneNumber,
         contactName:
-          [row.contact?.firstName, row.contact?.lastName].filter(Boolean).join(' ').trim() || mergedName || null,
+          contactDisplayName(row.contact) || mergedName || null,
         company: row.contact?.company ?? (merge.company ? String(merge.company) : null),
         city: row.contact?.city ?? (merge.city ? String(merge.city) : null),
         state: row.contact?.state ?? (merge.state ? String(merge.state) : null),

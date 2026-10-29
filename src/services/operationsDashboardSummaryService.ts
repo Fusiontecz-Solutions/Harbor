@@ -219,10 +219,47 @@ export async function aggregateOperationsDashboardSummary(
     };
 }
 
+/**
+ * Matches the recent-cases search box: application id, merchant (business or
+ * owner name), email, and the queue/state shown as the status pill.
+ */
+function recentCasesSearchWhere(search: string): Prisma.ApplicationWhereInput | null {
+    const term = search.trim();
+    if (!term) return null;
+    const contains = { contains: term, mode: 'insensitive' as const };
+    const or: Prisma.ApplicationWhereInput[] = [
+        { currentQueue: contains },
+        { currentState: contains },
+        {
+            client: {
+                is: {
+                    OR: [
+                        { businessName: contains },
+                        { businessEmail: contains },
+                        { ownerFirstName: contains },
+                        { ownerLastName: contains },
+                        { ownerEmail: contains },
+                    ],
+                },
+            },
+        },
+    ];
+    const asNumber = Number(term.replace(/^#/, ''));
+    if (Number.isInteger(asNumber) && asNumber > 0 && asNumber <= 2_147_483_647) {
+        or.push({ applicationId: asNumber });
+    }
+    return { OR: or };
+}
+
+/**
+ * Recent cases for the operations dashboard. Without `page` this keeps the
+ * old shape (the newest `limit` rows); with it the caller also gets `total`.
+ */
 export async function listOperationsDashboardRecentCases(
     authUser: AuthenticatedUser | null,
     limit = 200,
-): Promise<OperationsDashboardRecentCasePayload> {
+    opts: { page?: number; search?: string } = {},
+): Promise<{ rows: OperationsDashboardRecentCasePayload; total: number | null }> {
     const roleBase = buildRoleDefaultWhere(authUser);
     const visibilityBase = mergeApplicationVisibilityWhere(roleBase, authUser);
     const mode = viewerMode(authUser);
@@ -238,15 +275,21 @@ export async function listOperationsDashboardRecentCases(
         isSuperAdmin || isOperations
             ? buildOperationsStatusFilterWhere('Contract_Signed', filterMode)
             : buildOperationsStatusFilterWhere('Contracted', filterMode);
-    const where = combineWhere(
+    const searchWhere = recentCasesSearchWhere(opts.search ?? '');
+    let where = combineWhere(
         combineWhere(visibilityBase, recentDealsWhere),
         excludeSoftDeletedWhere(),
     );
+    if (searchWhere) where = combineWhere(where, searchWhere);
     const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(Math.trunc(limit), 1), 500) : 200;
+    const paged = opts.page != null;
+    const page = Math.max(1, Math.trunc(opts.page ?? 1) || 1);
 
-    const rows = await prisma.application.findMany({
+    const [rows, total] = await Promise.all([prisma.application.findMany({
         where,
-        orderBy: { updatedAt: 'desc' },
+        // id breaks updatedAt ties so pages never overlap or skip a row.
+        orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
+        skip: paged ? (page - 1) * safeLimit : undefined,
         take: safeLimit,
         select: {
             id: true,
@@ -268,9 +311,9 @@ export async function listOperationsDashboardRecentCases(
                 },
             },
         },
-    });
+    }), paged ? prisma.application.count({ where }) : Promise.resolve(null)]);
 
-    return rows.map((row) => ({
+    const mapped = rows.map((row) => ({
         _id: row.id,
         applicationId: row.applicationId ?? null,
         client: row.client
@@ -294,6 +337,7 @@ export async function listOperationsDashboardRecentCases(
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
     }));
+    return { rows: mapped, total };
 }
 
 export type OperationsPaymentPerformancePeriod = 'daily' | 'weekly' | 'monthly';

@@ -43,6 +43,8 @@ export interface DispatchResult {
   reason: string | null;
   /** True when the caller should requeue rather than treat this as terminal. */
   retryable: boolean;
+  /** Provider or platform error code on failure (e.g. TENANT_LIMIT_REACHED). */
+  errorCode?: string | null;
 }
 
 export interface DispatchInput {
@@ -119,6 +121,9 @@ export async function dispatchOutboundMessage(input: DispatchInput): Promise<Dis
     businessNumber: fromNumber,
     contactNumber: toNumber,
     ownerUserId: input.sentById ?? null,
+    // An agent's direct message brings a deleted thread back; a broadcast
+    // send does not (broadcast threads stay hidden until the contact replies).
+    restore: !input.broadcastId,
   });
 
   const message = await recordOutboundMessage({
@@ -177,19 +182,38 @@ export async function dispatchOutboundMessage(input: DispatchInput): Promise<Dis
 
     const terminalFailure = result.status === 'FAILED' || result.status === 'UNDELIVERABLE';
 
-    // 5. Reconcile.
-    await markOutboundSubmitted({
+    // 5. Reconcile. The provider has accepted the message at this point, so a
+    // database hiccup here must not turn it into a "failed" send, so errors
+    // are handled here and never reach the catch below. Retry a few times;
+    // if it still cannot be written, log it and report what really happened.
+    const reconcile = {
       messageId: message.id,
       conversationId: conversation.id,
       providerMessageId: result.providerMessageId,
       providerBulkId: result.providerBulkId,
-      status: terminalFailure ? (result.status as 'FAILED' | 'UNDELIVERABLE') : 'SENT',
+      status: (terminalFailure ? result.status : 'SENT') as 'SENT' | 'FAILED' | 'UNDELIVERABLE',
       errorCode: result.errorCode,
       errorMessage: result.errorMessage,
       segmentCount: result.segmentCount,
       body: input.body,
       hasMedia: Boolean(input.mediaUrls?.length),
-    });
+    };
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await markOutboundSubmitted(reconcile);
+        break;
+      } catch (reconcileErr) {
+        if (attempt >= 3) {
+          console.error(
+            '[messaging:sms] provider accepted the message but recording it failed:',
+            message.id,
+            (reconcileErr as Error)?.message,
+          );
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1_000 * attempt));
+      }
+    }
 
     // 1:1 messages update the UI immediately. Broadcast messages do not emit
     // per-message — the debounced progress event covers them.
@@ -235,6 +259,7 @@ export async function dispatchOutboundMessage(input: DispatchInput): Promise<Dis
       providerMessageId: null,
       reason: error.message,
       retryable: error.retryable,
+      errorCode: error.providerCode,
     };
   }
 }

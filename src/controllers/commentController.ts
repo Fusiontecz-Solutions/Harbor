@@ -1,5 +1,6 @@
 import type { Request, Response } from 'express';
 import prisma from '../config/prismaClient';
+import { parsePagination, paginationMeta } from '../utils/pagination';
 import sendMail, { isOutboundSmtpConfigured } from '../config/nodemailer';
 import {
   getApplicationForUser,
@@ -328,11 +329,15 @@ class CommentController {
         return;
       }
 
+      // Paged only when the caller sends page/pageSize; otherwise every
+      // comment, as before.
+      const paging = parsePagination(req, { defaultPageSize: null, maxPageSize: 200 });
+      const where = {
+        applicationId: application.id,
+        isDeleted: false,
+      };
       const commentsRecords = await prisma.comment.findMany({
-        where: {
-          applicationId: application.id,
-          isDeleted: false,
-        },
+        where,
         include: {
           createdBy: {
             select: {
@@ -345,14 +350,17 @@ class CommentController {
             },
           },
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        ...(paging ? { skip: paging.skip, take: paging.take } : {}),
       });
+      const total = paging ? await prisma.comment.count({ where }) : null;
 
       const comments = commentsRecords.map(mapCommentToApi);
 
       return res.status(200).json({
         success: true,
         data: comments,
+        ...(paging && total != null ? { pagination: paginationMeta(paging, total) } : {}),
       });
     } catch (error) {
       console.error('Get comments by application error:', error);

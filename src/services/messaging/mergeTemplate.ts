@@ -95,5 +95,12 @@ export function buildMergeDataFromSheetRow(
     set(field, row[header]);
   }
 
+  // {{firstName}} / {{lastName}} still work on an owner-name-only sheet.
+  if (typeof mergeData.ownerName === 'string' && mergeData.firstName === undefined) {
+    const parts = mergeData.ownerName.trim().split(/\s+/);
+    set('firstName', parts[0]);
+    set('lastName', parts.slice(1).join(' '));
+  }
+
   return mergeData;
 }

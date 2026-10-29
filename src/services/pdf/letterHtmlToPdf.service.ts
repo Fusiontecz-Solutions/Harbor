@@ -318,7 +318,7 @@ async function resolveLetterPdfExecutablePaths(): Promise<Array<string | undefin
   return resolved;
 }
 
-async function launchLetterPdfBrowser(): Promise<Browser> {
+export async function launchLetterPdfBrowser(): Promise<Browser> {
   const launchArgs = [
     '--no-sandbox',
     '--disable-setuid-sandbox',

@@ -14,8 +14,9 @@ import { isRedisAvailable } from '../config/redis';
  *
  * BullMQ has no such coupling. Jobs from different broadcasts interleave freely
  * across the worker's concurrency slots, so N campaigns genuinely run in
- * parallel. Fairness between them is enforced by the per-broadcast Redis token
- * buckets (see services/messaging/tokenBucket.ts), not by the transport.
+ * parallel. At most one chunk per broadcastId runs at a time (see
+ * broadcastInflightLock.ts). Fairness between campaigns is enforced by the
+ * per-broadcast Redis token buckets (see services/messaging/tokenBucket.ts).
  *
  * Jobs carry a CHUNK of recipients rather than a single one. At 50k recipients,
  * per-recipient jobs mean 50k Redis round-trips of queue bookkeeping; chunks of
@@ -33,12 +34,22 @@ export interface SmsBroadcastJobData {
   recipientIds: string[];
   /** Chunk index, for log correlation only. */
   chunkIndex: number;
+  /**
+   * Which retry pass this is. 0 for the initial send; each requeue of
+   * rate-limited or transiently failed recipients increments it, and the
+   * worker gives up on a recipient after BROADCAST_MAX_RETRY_PASSES.
+   */
+  pass?: number;
 }
 
-/** Recipients per job. Override with BROADCAST_CHUNK_SIZE. */
+/**
+ * Recipients per job. Override with BROADCAST_CHUNK_SIZE. 500 = 10 provider
+ * batches: big enough that the hand-off between chunks (lock release, job
+ * pickup, a ~1s lock-retry delay) is a small share of a chunk's runtime.
+ */
 export const BROADCAST_CHUNK_SIZE = (() => {
   const raw = Number(process.env.BROADCAST_CHUNK_SIZE);
-  if (!Number.isFinite(raw) || raw <= 0) return 100;
+  if (!Number.isFinite(raw) || raw <= 0) return 500;
   return Math.min(1_000, Math.max(1, Math.floor(raw)));
 })();
 
@@ -79,9 +90,12 @@ export const getSmsBroadcastQueue = (): Queue<SmsBroadcastJobData> | null => {
 /**
  * Enqueue every chunk for a broadcast.
  *
- * Job ids are deterministic (`bcast:<id>:<chunkIndex>`) so re-running the
- * enqueue after a partial failure cannot double-send: BullMQ rejects a
- * duplicate job id while the original is still known to the queue.
+ * Each start gets its own run key in the job id (`bcast-<id>-<run>-<chunk>`).
+ * Ids used to be `bcast:<id>:<chunk>` for every run, and because BullMQ keeps
+ * completed jobs (removeOnComplete: 1000) and silently ignores an add whose id
+ * it still knows, a resume after pause enqueued nothing at all. Double-send
+ * protection does not rely on job ids: startBroadcast claims the campaign with
+ * a conditional update, and the worker claims each recipient QUEUED→SENDING.
  */
 export const enqueueBroadcastChunks = async (
   broadcastId: string,
@@ -92,6 +106,7 @@ export const enqueueBroadcastChunks = async (
     throw new Error('Broadcast queue unavailable: REDIS_URL is not configured');
   }
 
+  const runKey = Date.now().toString(36);
   const jobs: Array<{
     name: SmsBroadcastJobName;
     data: SmsBroadcastJobData;
@@ -107,7 +122,9 @@ export const enqueueBroadcastChunks = async (
         recipientIds: recipientIds.slice(i, i + BROADCAST_CHUNK_SIZE),
         chunkIndex,
       },
-      opts: { jobId: `bcast:${broadcastId}:${chunkIndex}` },
+      // BullMQ rejects a custom id containing ':' unless it has exactly three
+      // ':'-separated parts, so ids use '-' as the separator.
+      opts: { jobId: `bcast-${broadcastId}-${runKey}-${chunkIndex}` },
     });
   }
 
@@ -118,6 +135,31 @@ export const enqueueBroadcastChunks = async (
   }
 
   return jobs.length;
+};
+
+/**
+ * Re-enqueue recipients a chunk handed back to QUEUED (rate limited, or a
+ * transient provider error) after a short delay. Without this they sat in
+ * QUEUED with no job behind them and the campaign never left RUNNING.
+ */
+export const enqueueBroadcastRetry = async (
+  broadcastId: string,
+  recipientIds: string[],
+  chunkIndex: number,
+  pass: number,
+  delayMs: number,
+): Promise<void> => {
+  const queue = getSmsBroadcastQueue();
+  if (!queue) {
+    throw new Error('Broadcast queue unavailable: REDIS_URL is not configured');
+  }
+  if (recipientIds.length === 0) return;
+
+  await queue.add(
+    'send-chunk',
+    { broadcastId, recipientIds, chunkIndex, pass },
+    { jobId: `bcast-${broadcastId}-retry-${chunkIndex}-${pass}-${Date.now().toString(36)}`, delay: delayMs },
+  );
 };
 
 /**

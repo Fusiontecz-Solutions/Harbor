@@ -31,6 +31,12 @@ router.get('/conversations', messagingController.getConversations.bind(messaging
 router.post('/conversations', messagingController.openConversation.bind(messagingController));
 router.get('/conversations/:id/messages', messagingController.getMessages.bind(messagingController));
 router.patch('/conversations/:id/read', messagingController.markRead.bind(messagingController));
+router.patch('/conversations/:id/unread', messagingController.markUnread.bind(messagingController));
+/* Web Push for new inbound messages. */
+router.get('/push/config', messagingController.pushConfig.bind(messagingController));
+router.post('/push/subscribe', messagingController.pushSubscribe.bind(messagingController));
+router.post('/push/unsubscribe', messagingController.pushUnsubscribe.bind(messagingController));
+router.post('/push/test', messagingController.pushTest.bind(messagingController));
 router.patch('/conversations/:id/archive', messagingController.setArchived.bind(messagingController));
 router.delete('/conversations/:id', messagingController.deleteConversation.bind(messagingController));
 router.post('/send', messagingController.sendMessage.bind(messagingController));
@@ -80,6 +86,7 @@ router.delete('/send-windows/:id', messagingBroadcastController.removeSendWindow
 
 /* Broadcasts */
 router.get('/broadcasts', messagingBroadcastController.list.bind(messagingBroadcastController));
+router.post('/broadcasts/audience-preview', messagingBroadcastController.audiencePreview.bind(messagingBroadcastController));
 router.post('/broadcasts', messagingBroadcastController.create.bind(messagingBroadcastController));
 router.get('/broadcasts/:id', messagingBroadcastController.stats.bind(messagingBroadcastController));
 router.get('/broadcasts/:id/recipients', messagingBroadcastController.recipients.bind(messagingBroadcastController));

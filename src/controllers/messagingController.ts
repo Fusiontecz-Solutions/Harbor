@@ -18,7 +18,16 @@ import {
   listConversations,
   listMessages,
   markConversationRead,
+  markConversationUnread,
+  softDeleteConversation,
 } from '../services/messaging/conversation.service';
+import {
+  getPushPublicKey,
+  parseSubscription,
+  removeSubscription,
+  saveSubscription,
+  sendTestPush,
+} from '../services/messaging/push.service';
 import {
   findClientById,
   upsertContactFromClient,
@@ -48,9 +57,10 @@ const errorStatus = (err: unknown, fallback: number): number =>
 async function findVisibleConversation(req: Request, conversationId: string) {
   const conversation = await prisma.messagingConversation.findUnique({
     where: { id: conversationId },
-    select: { id: true, businessNumber: true, unreadCount: true },
+    select: { id: true, businessNumber: true, unreadCount: true, deletedAt: true },
   });
-  if (!conversation) return null;
+  // A soft-deleted thread is gone as far as the inbox is concerned.
+  if (!conversation || conversation.deletedAt) return null;
   const allowed = await visibleSendersForUser(actorId(req), req.user?.role);
   if (allowed && !allowed.includes(conversation.businessNumber)) return null;
   return conversation;
@@ -70,7 +80,7 @@ class MessagingController {
         userId,
         page: Number(req.query.page) || 1,
         search: String(req.query.search ?? ''),
-        filter: String(req.query.filter ?? 'all'),
+        filter: String(req.query.filter ?? 'regular'),
         senderNumbers: await visibleSendersForUser(userId, req.user?.role),
       });
 
@@ -131,6 +141,7 @@ class MessagingController {
         businessNumber,
         contactNumber,
         ownerUserId: actorId(req),
+        restore: true,
       });
 
       res.status(201).json({ success: true, data: conversation });
@@ -222,12 +233,82 @@ class MessagingController {
       await markConversationRead(conversationId);
 
       emitConversationUpdate({ id: conversationId, unreadCount: 0 });
-      emitUnreadCountUpdate(await getTotalUnread());
+      emitUnreadCountUpdate(conversationId);
 
       res.json({ success: true, data: { id: conversationId, unreadCount: 0 } });
     } catch (err) {
       console.error('[messaging] markRead failed:', err);
       res.status(500).json({ success: false, message: (err as Error)?.message || 'Failed to mark conversation read' });
+    }
+  }
+
+  /** PATCH /messaging/conversations/:id/unread — "keep this for later". */
+  async markUnread(req: Request, res: Response): Promise<void> {
+    try {
+      const conversationId = String(req.params.id);
+      if (!(await findVisibleConversation(req, conversationId))) {
+        res.status(404).json({ success: false, message: 'Conversation not found' });
+        return;
+      }
+      const unreadCount = await markConversationUnread(conversationId);
+
+      emitConversationUpdate({ id: conversationId, unreadCount });
+      emitUnreadCountUpdate(conversationId);
+
+      res.json({ success: true, data: { id: conversationId, unreadCount } });
+    } catch (err) {
+      console.error('[messaging] markUnread failed:', err);
+      res.status(500).json({ success: false, message: (err as Error)?.message || 'Failed to mark conversation unread' });
+    }
+  }
+
+  /** GET /messaging/push/config — the VAPID public key a browser subscribes with. */
+  async pushConfig(_req: Request, res: Response): Promise<void> {
+    const publicKey = getPushPublicKey();
+    res.json({ success: true, data: { enabled: Boolean(publicKey), publicKey } });
+  }
+
+  /** POST /messaging/push/subscribe — body: the browser PushSubscription JSON. */
+  async pushSubscribe(req: Request, res: Response): Promise<void> {
+    try {
+      const userId = actorId(req);
+      const sub = parseSubscription(req.body?.subscription ?? req.body);
+      if (!userId || !sub) {
+        res.status(400).json({ success: false, message: 'A valid push subscription is required' });
+        return;
+      }
+      await saveSubscription(userId, sub, String(req.headers['user-agent'] ?? '').slice(0, 300) || null);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('[messaging] push subscribe failed:', err);
+      res.status(500).json({ success: false, message: 'Failed to save push subscription' });
+    }
+  }
+
+  /** POST /messaging/push/unsubscribe — body: { endpoint } */
+  async pushUnsubscribe(req: Request, res: Response): Promise<void> {
+    try {
+      const endpoint = String(req.body?.endpoint ?? '').trim();
+      if (endpoint) await removeSubscription(endpoint, actorId(req) ?? undefined);
+      res.json({ success: true });
+    } catch (err) {
+      console.error('[messaging] push unsubscribe failed:', err);
+      res.status(500).json({ success: false, message: 'Failed to remove push subscription' });
+    }
+  }
+
+  /** POST /messaging/push/test — send a test notification to the caller's devices. */
+  async pushTest(req: Request, res: Response): Promise<void> {
+    try {
+      const userId = actorId(req);
+      if (!userId) {
+        res.status(401).json({ success: false, message: 'Authentication required' });
+        return;
+      }
+      res.json({ success: true, data: { delivered: await sendTestPush(userId) } });
+    } catch (err) {
+      console.error('[messaging] push test failed:', err);
+      res.status(500).json({ success: false, message: 'Failed to send test notification' });
     }
   }
 
@@ -258,8 +339,10 @@ class MessagingController {
   /**
    * DELETE /messaging/conversations/:id
    *
-   * Removes the thread and its history. `MessagingMessage.conversationId`
-   * cascades, so the single delete takes the messages with it.
+   * Hides the thread from the inbox (soft delete). Its messages are KEPT:
+   * hard-deleting them used to make campaign, report and performance counts
+   * drop after the fact. A new inbound message from the contact brings the
+   * thread back.
    *
    * Deliberately NOT deleted: the MessagingContact record and any suppression
    * entry. Deleting a chat is a housekeeping action on the inbox — it must
@@ -276,13 +359,14 @@ class MessagingController {
         return;
       }
 
-      await prisma.messagingConversation.delete({ where: { id: conversationId } });
+      await softDeleteConversation(conversationId);
 
       // The FE treats any conversation_update as "refetch page 1", which is
       // what we want here — the row simply stops coming back.
-      emitConversationUpdate({ id: conversationId, deleted: true });
+      // Pass its number so the emit reaches the right sender room.
+      emitConversationUpdate({ id: conversationId, deleted: true, businessNumber: existing.businessNumber });
       if (existing.unreadCount > 0) {
-        emitUnreadCountUpdate(await getTotalUnread());
+        emitUnreadCountUpdate(conversationId, existing.businessNumber);
       }
 
       res.json({ success: true, data: { id: conversationId } });

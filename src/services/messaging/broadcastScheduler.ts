@@ -17,7 +17,8 @@
  * The tick is cheap: one indexed query on (status, scheduledAt) per minute.
  */
 import prisma from '../../config/prismaClient';
-import { startBroadcast } from './broadcast.service';
+import { BroadcastStateError, startBroadcast } from './broadcast.service';
+import { recoverStalledBroadcasts } from '../../workers/smsBroadcastWorker';
 
 const INTERVAL_MS = Number(process.env.BROADCAST_SCHEDULER_INTERVAL_MS ?? '60000');
 
@@ -65,15 +66,15 @@ export async function runDueBroadcasts(now: Date = new Date()): Promise<number> 
       );
     } catch (err) {
       // One broken campaign must not stop the rest of the window from going
-      // out. Mark it FAILED so it stops being retried every minute and shows
-      // as broken in the UI rather than as perpetually pending.
-      console.error(`[messaging:scheduler] failed to start "${broadcast.name}":`, (err as Error)?.message);
-      await prisma.smsBroadcast
-        .update({
-          where: { id: broadcast.id },
-          data: { status: 'FAILED', finishedAt: new Date() },
-        })
-        .catch(() => undefined);
+      // out, but a failed start must not kill the campaign either:
+      //   - BroadcastStateError means another instance (or a manual Start)
+      //     already claimed it — the campaign is fine, just not ours.
+      //   - Anything else (Redis blip, DB timeout) left the row in QUEUED, so
+      //     the next tick retries it until the grace period runs out.
+      // Marking FAILED here used to stop campaigns mid-send whenever two API
+      // instances raced on the same due row.
+      if (err instanceof BroadcastStateError) continue;
+      console.error(`[messaging:scheduler] failed to start "${broadcast.name}", will retry:`, (err as Error)?.message);
     }
   }
 
@@ -87,6 +88,7 @@ export function startBroadcastScheduler(): void {
     if (running) return;
     running = true;
     void runDueBroadcasts()
+      .then(() => recoverStalledBroadcasts())
       .catch((err) => console.error('[messaging:scheduler] tick failed:', (err as Error)?.message))
       .finally(() => {
         running = false;

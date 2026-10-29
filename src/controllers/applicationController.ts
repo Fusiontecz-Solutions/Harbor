@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import { randomUUID } from 'crypto';
 import type { Prisma } from '@prisma/client';
 import prisma from '../config/prismaClient';
+import { parsePagination, paginationMeta } from '../utils/pagination';
 import { withDbRetry } from '../utils/dbRetry';
 import uploadService from '../services/uploadService';
 import pdfExtractionService from '../services/pdfExtractionService';
@@ -2848,16 +2849,33 @@ class ApplicationController {
             }
             const rawLimit = Number(req.query.limit);
             const limit = Number.isFinite(rawLimit) ? rawLimit : 200;
+            // `page` opts into paging (and a `total`); without it this is the
+            // old "newest `limit` rows" list.
+            const rawPage = Number(req.query.page);
+            const page = Number.isFinite(rawPage) && rawPage >= 1 ? Math.trunc(rawPage) : undefined;
+            const search = typeof req.query.search === 'string' ? req.query.search.trim().slice(0, 200) : '';
             const roleKey = String(authUser.role ?? '').trim();
-            const opsRecentKey = `${authUser.id}|${roleKey}|${limit}`;
-            const data = await withDashboardCache(
+            const opsRecentKey = `${authUser.id}|${roleKey}|${limit}|${page ?? ''}|${search.toLowerCase()}`;
+            const { rows, total } = await withDashboardCache(
                 DashboardCacheKind.OPS_RECENT,
                 opsRecentKey,
-                () => listOperationsDashboardRecentCases(authUser, limit),
+                () => listOperationsDashboardRecentCases(authUser, limit, { page, search }),
             );
+            const pageSize = Math.min(Math.max(Math.trunc(limit), 1), 500);
             return res.status(200).json({
                 success: true,
-                data,
+                data: rows,
+                ...(page != null && total != null
+                    ? {
+                        pagination: {
+                            page,
+                            pageSize,
+                            total,
+                            totalPages: Math.max(1, Math.ceil(total / pageSize)),
+                            hasMore: page * pageSize < total,
+                        },
+                    }
+                    : {}),
             });
         } catch (error) {
             console.error('Get operations dashboard recent cases error:', error);
@@ -7606,7 +7624,10 @@ class ApplicationController {
                 });
             }
 
-            const { logs } = await getApplicationActivityLogsForUser(application.id, authUser);
+            // Paged only when the caller asks (page/pageSize); older clients
+            // that filter the whole history client-side still get every log.
+            const paging = parsePagination(req, { defaultPageSize: null, maxPageSize: 200 });
+            const { logs, total } = await getApplicationActivityLogsForUser(application.id, authUser, paging ?? undefined);
 
             const { mapApplicationActivityLogEntry } = await import('../services/applicationActivityLogMapper');
             const mappedLogs = logs.map((log) => mapApplicationActivityLogEntry(log as any));
@@ -7614,6 +7635,7 @@ class ApplicationController {
             return res.status(200).json({
                 success: true,
                 data: mappedLogs,
+                ...(paging && total != null ? { pagination: paginationMeta(paging, total) } : {}),
             });
         } catch (error: any) {
             console.error('Get application activity logs error:', error);
@@ -7707,7 +7729,9 @@ class ApplicationController {
                 });
             }
 
-            const result = await listPaymentMailLogs(application.id, authUser);
+            // Opt-in paging, same as activity logs.
+            const paging = parsePagination(req, { defaultPageSize: null, maxPageSize: 200 });
+            const result = await listPaymentMailLogs(application.id, authUser, paging ?? undefined);
 
             if (result.forbidden) {
                 return res.status(403).json({
@@ -7718,7 +7742,11 @@ class ApplicationController {
 
             const data = await enrichPaymentMailLogsForApi([...result.logs]);
 
-            return res.status(200).json({ success: true, data });
+            return res.status(200).json({
+                success: true,
+                data,
+                ...(paging && result.total != null ? { pagination: paginationMeta(paging, result.total) } : {}),
+            });
         } catch (error: any) {
             console.error('Get payment mail logs error:', error);
             return res.status(500).json({

@@ -568,22 +568,32 @@ export async function createPaymentMailLog(
   return { forbidden: false, notFound: false, log };
 }
 
-export async function listPaymentMailLogs(applicationId: string, user: AuthenticatedUser | null) {
+/** Template mail logs, newest first; `page` limits to one slice and adds `total`. */
+export async function listPaymentMailLogs(
+  applicationId: string,
+  user: AuthenticatedUser | null,
+  page?: { skip: number; take: number },
+) {
   const access = await assertApplicationMailLogAccess(applicationId, user);
   if (!access.application) {
-    return { forbidden: false, notFound: true, logs: [] as const };
+    return { forbidden: false, notFound: true, logs: [] as const, total: null as number | null };
   }
   if (access.forbidden) {
-    return { forbidden: true, notFound: false, logs: [] as const };
+    return { forbidden: true, notFound: false, logs: [] as const, total: null as number | null };
   }
 
-  const rows = await prisma.outbound_communications.findMany({
-    where: {
-      applicationId: access.application.id,
-      channel: 'TEMPLATE',
-    },
-    orderBy: { createdAt: 'desc' },
-  });
+  const where = {
+    applicationId: access.application.id,
+    channel: 'TEMPLATE',
+  } as const;
+  const [rows, total] = await Promise.all([
+    prisma.outbound_communications.findMany({
+      where,
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      ...(page ? { skip: page.skip, take: page.take } : {}),
+    }),
+    page ? prisma.outbound_communications.count({ where }) : Promise.resolve(null),
+  ]);
   const logs: PaymentMailLog[] = rows.map((row) => {
     const meta =
       row.metadata && typeof row.metadata === 'object' && !Array.isArray(row.metadata)
@@ -607,7 +617,7 @@ export async function listPaymentMailLogs(applicationId: string, user: Authentic
     };
   });
 
-  return { forbidden: false, notFound: false, logs };
+  return { forbidden: false, notFound: false, logs, total };
 }
 
 /** Latest Payoff / Zero Balance letter delivery status for Letters list. */

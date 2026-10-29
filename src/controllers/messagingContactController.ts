@@ -31,6 +31,15 @@ const actorId = (req: Request): string | null => req.user?.id ?? null;
  * Which owners' leads this caller may see: null for an admin (everything), or
  * just themselves. Repeated in enough handlers now to be worth naming.
  */
+/**
+ * SSN is for admins only. Every response that can carry a contact row goes
+ * through this, so an agent's request never receives the number at all —
+ * hiding it in the browser alone would still send it over the wire.
+ */
+const canSeeSsn = (req: Request): boolean => isPrivilegedMessagingRole(req.user?.role);
+const withoutSsn = <T extends object>(req: Request, row: T): T =>
+  canSeeSsn(req) || !row || !('ssn' in row) ? row : { ...row, ssn: null };
+
 const ownerScope = (req: Request): string[] | null =>
   isPrivilegedMessagingRole(req.user?.role) ? null : [actorId(req) ?? ''];
 
@@ -62,7 +71,7 @@ class MessagingContactController {
 
       res.json({
         success: true,
-        data: result.items,
+        data: result.items.map((item) => withoutSsn(req, item)),
         pagination: {
           page: result.page,
           pageSize: result.pageSize,
@@ -94,7 +103,7 @@ class MessagingContactController {
         clientId: req.body?.clientId ?? null,
       });
 
-      res.status(201).json({ success: true, data: contact });
+      res.status(201).json({ success: true, data: withoutSsn(req, contact) });
     } catch (err) {
       console.error('[messaging:contacts] create failed:', err);
       res.status(400).json({ success: false, message: (err as Error)?.message || 'Failed to create contact' });
@@ -182,7 +191,7 @@ class MessagingContactController {
         },
       });
 
-      res.json({ success: true, data: contact });
+      res.json({ success: true, data: withoutSsn(req, contact) });
     } catch (err) {
       console.error('[messaging:contacts] update failed:', err);
       res.status(400).json({ success: false, message: (err as Error)?.message || 'Failed to update contact' });
@@ -392,6 +401,9 @@ class MessagingContactController {
         select: {
           id: true,
           phoneNumber: true,
+          ownerName: true,
+          ein: true,
+          ssn: true,
           firstName: true,
           lastName: true,
           emailAddress: true,
@@ -405,7 +417,41 @@ class MessagingContactController {
         },
       });
 
+      // A contact linked to a specific CRM client wins over a phone match.
       const client = await findClientByPhone(phoneNumber);
+      const identityClientId = saved?.clientId || client?.id || null;
+
+      /**
+       * The profile card shows owner, business, EIN, SSN, phone and email. EIN
+       * and SSN exist only on the CRM client, so they are read here, for this
+       * one record, rather than added to the shared client lookup other
+       * features reuse.
+       */
+      const crm = identityClientId
+        ? await prisma.client.findUnique({
+            where: { id: identityClientId },
+            select: {
+              ownerFirstName: true,
+              ownerLastName: true,
+              businessName: true,
+              businessEinNumber: true,
+              ownerSsn: true,
+              ownerEmail: true,
+              businessEmail: true,
+            },
+          })
+        : null;
+      const ownerName = (first?: string | null, last?: string | null) =>
+        [first, last].filter((v) => v && String(v).trim()).join(' ').trim() || null;
+      const identity = {
+        ownerName: saved?.ownerName?.trim() || ownerName(crm?.ownerFirstName, crm?.ownerLastName) || ownerName(saved?.firstName, saved?.lastName),
+        businessName: crm?.businessName || saved?.company || null,
+        ein: crm?.businessEinNumber || saved?.ein || null,
+        // Admins only — agents get null, so there is nothing to reveal.
+        ssn: canSeeSsn(req) ? crm?.ownerSsn || saved?.ssn || null : null,
+        phoneNumber,
+        email: saved?.emailAddress || crm?.ownerEmail || crm?.businessEmail || null,
+      };
 
       if (!saved && !client) {
         res.json({ success: true, data: null });
@@ -430,6 +476,7 @@ class MessagingContactController {
             status: 'ACTIVE',
             createdAt: null,
             source: 'crm-client',
+            identity,
             client: {
               id: client.id,
               clientNumber: client.clientId,
@@ -454,6 +501,7 @@ class MessagingContactController {
           city: saved!.city || client?.businessCity || null,
           state: saved!.state || client?.businessState || null,
           source: 'contact',
+          identity,
           client: client
             ? {
                 id: client.id,

@@ -12,18 +12,16 @@
  * Reference: https://www.infobip.com/docs/api/channels/sms/inbound-sms/receive-inbound-sms-messages
  */
 import type { Request, Response } from 'express';
+import { notifyInboundMessage } from '../services/messaging/push.service';
 import prisma from '../config/prismaClient';
 import {
   parseDeliveryReportPayload,
   parseInboundPayload,
   verifyWebhookSecret,
 } from '../services/messaging/infobip.service';
-import {
-  applyDeliveryReport,
-  getTotalUnread,
-  recordInboundMessage,
-} from '../services/messaging/conversation.service';
-import { recordBroadcastCounter } from '../services/messaging/broadcast.service';
+import { recordInboundMessage } from '../services/messaging/conversation.service';
+import { applyProviderStatus, type ProviderStatus } from '../services/messaging/deliveryStatus.service';
+import { normalizePhoneNumber, normalizeSender } from '../services/messaging/phone';
 import { applyStartKeyword, applyStopKeyword, isStartKeyword } from '../services/messaging/suppression.service';
 import {
   emitConversationUpdate,
@@ -69,6 +67,10 @@ class MessagingWebhookController {
     }
 
     let processed = 0;
+    /** Threads that gained unread messages — each gets a scoped badge update. */
+    const touchedConversations = new Set<string>();
+    /** An opt-out we could not apply — ask Infobip to redeliver the batch. */
+    let stopFailed = false;
 
     for (const message of messages) {
       try {
@@ -86,14 +88,30 @@ class MessagingWebhookController {
           broadcastId,
         });
 
-        if (!result || result.duplicate) continue;
-        processed += 1;
+        if (!result) continue;
 
-        // The campaign's replied/optOut counters were already incremented inside
-        // recordInboundMessage; this only applies the suppression side effect.
+        // A lost opt-out is a compliance problem, so on failure we answer
+        // non-2xx and Infobip redelivers. The message row already exists by
+        // then, so the retry arrives as a duplicate — which is why STOP is
+        // re-applied for duplicates too (it is idempotent). START is not, since
+        // an old START redelivered after a newer STOP must not undo it.
         if (result.isStop) {
-          await applyStopKeyword(message.from, result.conversationId);
-        } else if (isStartKeyword(message.text)) {
+          try {
+            await applyStopKeyword(message.from, result.conversationId);
+          } catch (err) {
+            stopFailed = true;
+            console.error('[messaging:webhook] could not apply STOP, requesting redelivery:', message.from, err);
+            continue;
+          }
+        }
+
+        if (result.duplicate) continue;
+        processed += 1;
+        touchedConversations.add(result.conversationId);
+
+        // recordInboundMessage scheduled the campaign's counter recompute;
+        // STOP's suppression was applied above.
+        if (!result.isStop && isStartKeyword(message.text)) {
           await applyStartKeyword(message.from, result.conversationId);
         }
 
@@ -111,6 +129,16 @@ class MessagingWebhookController {
           createdAt: message.receivedAt.toISOString(),
         });
 
+        // Push to everyone who can see this thread — even with Harbor closed.
+        void notifyInboundMessage({
+          conversationId: result.conversationId,
+          businessNumber: message.to,
+          contactNumber: message.from,
+          text: message.text,
+          isStop: result.isStop,
+          hasMedia: Boolean(message.mediaUrls?.length),
+        });
+
         emitConversationUpdate({
           id: result.conversationId,
           lastMessageText: message.text,
@@ -125,10 +153,11 @@ class MessagingWebhookController {
       }
     }
 
-    try {
-      emitUnreadCountUpdate(await getTotalUnread());
-    } catch {
-      /* non-critical */
+    for (const conversationId of touchedConversations) emitUnreadCountUpdate(conversationId);
+
+    if (stopFailed) {
+      res.status(500).json({ success: false, processed, message: 'Opt-out could not be recorded; please redeliver' });
+      return;
     }
 
     res.status(200).json({ success: true, processed });
@@ -148,41 +177,30 @@ class MessagingWebhookController {
 
     for (const report of reports) {
       try {
-        const applied = await applyDeliveryReport({
+        // One shared path (webhook, reconciler, backfill): forward-only status,
+        // price/cost, recipient mirror, and a counter recompute from rows.
+        const applied = await applyProviderStatus({
           providerMessageId: report.providerMessageId,
-          status: report.status as 'SENT' | 'DELIVERED' | 'FAILED' | 'UNDELIVERABLE',
+          status: report.status as ProviderStatus,
           errorCode: report.errorCode,
           errorMessage: report.errorMessage,
           doneAt: report.doneAt,
           segmentCount: report.segmentCount,
           priceAmount: report.priceAmount,
           priceCurrency: report.priceCurrency,
+          callbackData: report.callbackData,
         });
 
         if (!applied) continue;
         processed += 1;
 
-        // Mirror the outcome onto the broadcast recipient row and counters.
-        const broadcastId = applied.broadcastId ?? report.callbackData;
-        if (broadcastId) {
-          await prisma.smsBroadcastRecipient.updateMany({
-            where: { broadcastId, providerMessageId: report.providerMessageId },
-            data: {
-              status: report.status as never,
-              errorCode: report.errorCode,
-              errorMessage: report.errorMessage,
-            },
-          });
-
-          if (report.status === 'DELIVERED') recordBroadcastCounter(broadcastId, 'deliveredCount');
-          if (report.status === 'FAILED') recordBroadcastCounter(broadcastId, 'failedCount');
-          if (report.status === 'UNDELIVERABLE') recordBroadcastCounter(broadcastId, 'undeliverableCount');
-        }
+        // A duplicate or late receipt changes nothing — don't repaint the UI.
+        if (!applied.changed) continue;
 
         emitMessageStatusUpdate(applied.conversationId, {
           messageId: report.providerMessageId,
           providerMessageId: report.providerMessageId,
-          status: report.status,
+          status: applied.to,
           errorMessage: report.errorMessage,
         });
       } catch (err) {
@@ -230,16 +248,29 @@ class MessagingWebhookController {
  * Looks for the most recent outbound broadcast message this number received in
  * the last 30 days. Older than that and a reply is far more likely to be a new
  * conversation than a late campaign response.
+ *
+ * Both numbers are normalized first. Infobip reports MO numbers as bare digits
+ * ("19176151235") while every number we store went through
+ * normalizePhoneNumber ("+19176151235"), so matching the raw callback values
+ * against stored columns never found a row: every reply was recorded with a
+ * null broadcastId, campaign reply counts sat at zero however many people
+ * answered, and follow-ups could not tell a responder from a silent lead.
  */
-async function inferBroadcastId(fromNumber: string, toNumber: string): Promise<string | null> {
+async function inferBroadcastId(rawFrom: string, rawTo: string): Promise<string | null> {
   const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+
+  const contactNumber = normalizePhoneNumber(rawFrom);
+  const businessNumber = normalizeSender(rawTo);
+  if (!contactNumber || !businessNumber) return null;
 
   const lastBroadcastMessage = await prisma.messagingMessage.findFirst({
     where: {
       direction: 'OUTBOUND',
       broadcastId: { not: null },
-      toNumber: fromNumber,
-      fromNumber: toNumber,
+      // Scoped to the number the reply arrived on, so two campaigns running
+      // from different senders cannot steal each other's replies.
+      toNumber: contactNumber,
+      fromNumber: businessNumber,
       createdAt: { gte: new Date(Date.now() - THIRTY_DAYS_MS) },
     },
     orderBy: { createdAt: 'desc' },

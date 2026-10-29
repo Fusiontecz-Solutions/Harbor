@@ -82,6 +82,49 @@ export async function cacheDel(...keys: string[]): Promise<void> {
 }
 
 /**
+ * Generation counters: O(1) invalidation for a whole family of keys.
+ *
+ * Readers fold the current generation into their cache key; a writer bumps it
+ * with one INCR, so every older key stops being read and simply ages out on its
+ * TTL. This replaces pattern deletes on the send path — a SCAN walks the entire
+ * keyspace (BullMQ job keys included) in batches of 100, and doing two per
+ * outbound message throttled broadcasts to roughly one send per minute.
+ *
+ * Fail-open like everything else here: on a Redis error the generation reads
+ * as '0', which at worst serves a list until its short TTL expires.
+ */
+const generationKey = (name: string): string => `${KEY_PREFIX}gen:${name}`;
+
+export async function cacheGeneration(name: string): Promise<string> {
+  const redis = client();
+  if (!redis) return '0';
+
+  try {
+    return (await redis.get(generationKey(name))) ?? '0';
+  } catch (err) {
+    console.warn('[messaging:cache] generation read failed:', name, (err as Error)?.message);
+    return '0';
+  }
+}
+
+export async function cacheBumpGeneration(...names: string[]): Promise<void> {
+  const redis = client();
+  if (!redis || names.length === 0) return;
+
+  try {
+    const pipeline = redis.pipeline();
+    for (const name of names) {
+      // Expire idle counters; a reset to 0 is harmless because every key built
+      // from an older generation has a TTL far shorter than this.
+      pipeline.incr(generationKey(name)).expire(generationKey(name), 7 * 24 * 60 * 60);
+    }
+    await pipeline.exec();
+  } catch (err) {
+    console.warn('[messaging:cache] generation bump failed:', names.join(','), (err as Error)?.message);
+  }
+}
+
+/**
  * Delete every key matching a glob, walking the keyspace with SCAN.
  *
  * Deletes are issued in batches as the cursor advances rather than collecting
