@@ -60,6 +60,8 @@ interface UsageDay {
    * the console surfaces it as "Messages Received".
    */
   replied: number;
+  /** Segments of the inbound messages counted in `replied` (a message with no count is 1). */
+  inboundSegments: number;
   optOut: number;
   /**
    * The shared SMS definitions (capability `metrics`). The fields above keep
@@ -87,6 +89,7 @@ export async function collectUsage(query: Query, now = new Date()) {
       segments: bigint;
       blocked: bigint;
       replied: bigint;
+      inboundSegments: bigint;
       optOut: bigint;
     } & MetricsRow)[]
   >`
@@ -97,6 +100,7 @@ export async function collectUsage(query: Query, now = new Date()) {
            COALESCE(SUM(${SEGMENTS_SQL}) FILTER (WHERE ${COUNTED_SQL}), 0)::bigint AS segments,
            count(*) FILTER (WHERE ${REFUSED_SQL}) AS blocked,
            count(*) FILTER (WHERE ${INBOUND_COUNTED_SQL}) AS replied,
+           COALESCE(SUM(${SEGMENTS_SQL}) FILTER (WHERE ${INBOUND_COUNTED_SQL}), 0)::bigint AS "inboundSegments",
            count(*) FILTER (WHERE ${INBOUND_COUNTED_SQL} AND "isStopKeyword") AS "optOut",
            ${OUTBOUND_METRICS_SQL},
            ${INBOUND_METRICS_SQL}
@@ -121,6 +125,7 @@ export async function collectUsage(query: Query, now = new Date()) {
       segments: Number(r?.segments ?? 0),
       blocked: Number(r?.blocked ?? 0),
       replied: Number(r?.replied ?? 0),
+      inboundSegments: Number(r?.inboundSegments ?? 0),
       optOut: Number(r?.optOut ?? 0),
       metrics: toMetrics(acc),
     };
@@ -142,6 +147,7 @@ export async function collectUsage(query: Query, now = new Date()) {
       segments: sum('segments'),
       blocked: sum('blocked'),
       replied: sum('replied'),
+      inboundSegments: sum('inboundSegments'),
       optOut: sum('optOut'),
       metrics: toMetrics(totalAcc),
     },
