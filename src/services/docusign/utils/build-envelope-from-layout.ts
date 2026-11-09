@@ -803,8 +803,24 @@ function isOptionalSignerEditablePlacement(placement: DocumentLayoutPlacement): 
 }
 
 function isRequiredSignerEditablePlacement(placement: DocumentLayoutPlacement): boolean {
+  if (placement.requiredForSigner === true) return true;
   const variable = String(placement.variable || '').trim().toLowerCase();
   return REQUIRED_SIGNER_EDITABLE_VARIABLES.has(variable);
+}
+
+/**
+ * Exhibit A: the signer must supply the EIN for every listed company. Rows with no
+ * company stay optional, otherwise signers could not finish deals listing under ten.
+ */
+function applyExhibitAEinRequirement(
+  placement: DocumentLayoutPlacement,
+  layoutKey: string,
+  values: Record<string, string>,
+): DocumentLayoutPlacement {
+  if (!layoutKey.toLowerCase().includes('exhibit_a')) return placement;
+  const row = /^company_ein_(\d+)$/.exec(String(placement.variable || '').trim())?.[1];
+  if (!row || !String(values[`company_name_${row}`] ?? '').trim()) return placement;
+  return { ...placement, requiredForSigner: true };
 }
 
 function isFillAtSigningPlacement(placement: DocumentLayoutPlacement): boolean {
@@ -1960,7 +1976,8 @@ export async function renderFlattenedLayoutPdf(
   const expanded = expandPrefillValues(values, counts.ownerCount);
   const scopedExpanded = scopeValuesForLayout(layout, expanded);
 
-  for (const placement of layout.placements) {
+  for (const rawPlacement of layout.placements) {
+    const placement = applyExhibitAEinRequirement(rawPlacement, layout.key, scopedExpanded);
     if (placement.type !== 'text' && placement.type !== 'date') continue;
     if (!placementAllowed(placement, counts, scopedExpanded, layout.key)) continue;
     if (isHarborContractFillAtSigningPlacement(layout.key, placement)) continue;
@@ -2132,7 +2149,8 @@ export function buildRecipientTabsByRoleForLayout(
     return signerTabs.get(signerIndex)!;
   };
 
-  for (const placement of layout.placements) {
+  for (const rawPlacement of layout.placements) {
+    const placement = applyExhibitAEinRequirement(rawPlacement, layout.key, scopedValues);
     if (!placementAllowed(placement, counts, scopedValues, layout.key)) continue;
 
     const signerIndex = resolvePlacementSignerIndex(placement, signers, counts, layout.key);
@@ -2260,7 +2278,8 @@ export function buildEnvelopeFromLayouts(options: BuildEnvelopeFromLayoutOptions
     const pageOffset = pageOffsetByLayoutKey.get(layout.key) ?? 0;
     const scopedValues = scopeValuesForLayout(layout, values);
 
-    for (const placement of layout.placements) {
+    for (const rawPlacement of layout.placements) {
+      const placement = applyExhibitAEinRequirement(rawPlacement, layout.key, scopedValues);
       if (!placementAllowed(placement, counts, scopedValues, layout.key)) continue;
 
       const signerIndex = resolvePlacementSignerIndex(

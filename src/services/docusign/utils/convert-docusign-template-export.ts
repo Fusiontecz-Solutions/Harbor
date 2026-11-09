@@ -33,6 +33,8 @@ export type DocumentLayoutPlacement = {
   lockedForSigner?: boolean;
   /** When true, tab is left blank at send so the signer fills it during signing (never locked or flattened). */
   fillAtSigning?: boolean;
+  /** When true, signer must complete this tab (stays editable, keeps any prefill, never flattened). */
+  requiredForSigner?: boolean;
   /** When true, DocuSign / flattened PDF text uses bold. */
   bold?: boolean;
   /** Explicit DocuSign/PDF font size in points (e.g. 14 → size14). */

@@ -31,6 +31,7 @@ function textPlacements(
       height: tab.height || '14',
       optional: tab.optional === true,
       lockedForSigner: tab.lockedForSigner === true,
+      ...(tab.bold ? { bold: true } : {}),
       signerParty: 'primary',
     });
     id += 1;

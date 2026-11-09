@@ -53,6 +53,7 @@ export interface AddendumDocumentFieldConfig {
     height?: string;
     optional?: boolean;
     lockedForSigner?: boolean;
+    bold?: boolean;
   }[];
   initialHereTabs?: { x: string; y: string; pageNumber?: string }[];
 }
@@ -391,20 +392,20 @@ export const EXHIBIT_A_COMPANY_ROW_COUNT = 10;
  *
  * The list area is blank space between the intro line (bottom y=83) and the
  * UCC-1 paragraph (top y=661), left margin x=84. Company rows are stacked from
- * y=104 at a 30px pitch (last row y=374) in three columns — legal name,
- * entity type, EIN — and every tab is optional because most deals list fewer
- * than ten entities.
+ * y=104 at a 30px pitch (last row y=374) in two columns — legal name and EIN —
+ * under bold headers at y=88. Row tabs are optional because most deals list
+ * fewer than ten entities.
  *
- * Signature area: only the Sign tab on the By: line (x 314–497, y 764).
- * "Title: Owner" is printed on the PDF.
+ * Signature area: Sign tab on the By: line (x 314–497, y 764), owner name
+ * directly under it. "Title: Owner" is printed on the PDF at x≈490.
  */
 const EXHIBIT_A_COMPANY_ROW_TOP_Y = 104;
 const EXHIBIT_A_COMPANY_ROW_PITCH_Y = 30;
+const EXHIBIT_A_HEADER_Y = 88;
 
-/** Column x / width for each company row. */
+/** Column x / width for each company row, with the header printed above it. */
 const EXHIBIT_A_COMPANY_COLUMNS = [
   { tabPrefix: 'company_name', x: 84, width: 250 },
-  { tabPrefix: 'company_entity_type', x: 340, width: 80 },
   { tabPrefix: 'company_ein', x: 425, width: 110 },
 ] as const;
 
@@ -427,6 +428,11 @@ const EXHIBIT_A: AddendumDocumentFieldConfig = {
   documentId: '1',
   pageNumber: '1',
   textTabs: [
+    ...EXHIBIT_A_COMPANY_COLUMNS.map((col) => ({
+      ...exhibitAText(`${col.tabPrefix}_header`, col.x, EXHIBIT_A_HEADER_Y, col.width),
+      bold: true,
+    })),
+    exhibitAText('print_name', 315, 770, 165),
     ...Array.from({ length: EXHIBIT_A_COMPANY_ROW_COUNT }, (_, i) =>
       EXHIBIT_A_COMPANY_COLUMNS.map((col) =>
         exhibitAText(

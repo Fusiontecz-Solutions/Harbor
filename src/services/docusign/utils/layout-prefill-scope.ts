@@ -255,8 +255,10 @@ function exhibitABusinessLegalName(values: Record<string, string>): string {
  * Exhibit A tab value: per-document value (already resolved into `current`),
  * else the contract's shared data, then print labels the PDF does not have.
  * - company_name_N → shared Exhibit A company list (Deal Review)
- * - company_entity_type_N / company_ein_N → business entity type / EIN when
- *   that row's company is the merchant business itself
+ * - company_ein_N → business EIN when that row's company is the merchant
+ *   business itself
+ * - *_header → fixed column headings
+ * - print_name → Owner 1 name, uppercase
  * - dba → "D/B/A …", omitted when it just repeats the legal name
  * - agreement_date → "DATE: …"
  */
@@ -265,8 +267,22 @@ function resolveExhibitAValue(
   current: string,
   values: Record<string, string>,
 ): string {
+  if (pdfVar === 'company_name_header') return "Company's Name";
+  if (pdfVar === 'company_ein_header') return 'EIN/Federal Tax ID';
+  if (pdfVar === 'print_name') {
+    return (
+      current ||
+      pickPrefillValue(values, [
+        'exhibit_owner_name',
+        'owner1_guarantor_name',
+        'guaranty_owner1_name',
+        'guaranty_guarantor1_name',
+        'seller_1_name',
+      ])
+    ).toUpperCase();
+  }
   let val = current;
-  const row = /^company_(?:name|entity_type|ein)_(\d+)$/.exec(pdfVar)?.[1];
+  const row = /^company_(?:name|ein)_(\d+)$/.exec(pdfVar)?.[1];
   if (!val && row) {
     if (pdfVar.startsWith('company_name_')) {
       val = pickPrefillValue(values, [`exhibit_a_value_${row}`, `exhibit_company_name_${row}`]);
@@ -277,9 +293,7 @@ function resolveExhibitAValue(
         `exhibit_company_name_${row}`,
       ]);
       if (sameEntityName(company, exhibitABusinessLegalName(values))) {
-        val = pdfVar.startsWith('company_ein_')
-          ? pickPrefillValue(values, ['federal_tax_id_EIN', 'federal_tax_id_ein', 'ein'])
-          : pickPrefillValue(values, ['entity_type', 'business_entity_type']);
+        val = pickPrefillValue(values, ['federal_tax_id_EIN', 'federal_tax_id_ein', 'ein']);
       }
     }
   }
