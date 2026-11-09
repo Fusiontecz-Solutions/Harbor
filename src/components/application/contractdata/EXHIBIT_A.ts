@@ -7,17 +7,18 @@ export const EXHIBIT_A_COMPANY_ROW_COUNT = 10;
 
 export type ExhibitACompanyRow = {
     legalName?: string;
-    entityType?: string;
     ein?: string;
 };
 
 /**
  * Prefill fields for Exhibit A (Blanket Security Interest — additional parties).
- * Each company row prints legal name / entity type / EIN on one line. "Title: Owner" is printed on the PDF.
+ * Each company row prints legal name / EIN on one line. "Title: Owner" is printed on the PDF.
  */
 export interface ExhibitAContractPrefillFields {
     /** Index 0 → Company 1. */
     companies?: readonly ExhibitACompanyRow[];
+    /** Printed under the signature line. */
+    ownerName?: string;
 }
 
 const COMPANY_FIELD_DEFS: Array<{
@@ -26,7 +27,6 @@ const COMPANY_FIELD_DEFS: Array<{
     tabPrefix: string;
 }> = [
     { id: "legalName", label: "Legal Name", tabPrefix: "company_name" },
-    { id: "entityType", label: "Entity Type", tabPrefix: "company_entity_type" },
     { id: "ein", label: "EIN", tabPrefix: "company_ein" },
 ];
 
@@ -41,7 +41,14 @@ export function exhibitACompanyTabLabel(
 export function buildExhibitAContractPrefillFields(
     values: ExhibitAContractPrefillFields = {},
 ): ContractPrefillField[] {
-    const out: ContractPrefillField[] = [];
+    const out: ContractPrefillField[] = [
+        {
+            id: `${EXHIBIT_A_SCOPE}print_name`,
+            label: "Owner Name",
+            value: String(values.ownerName ?? "").trim().toUpperCase(),
+            section: "Signature",
+        },
+    ];
     for (let i = 0; i < EXHIBIT_A_COMPANY_ROW_COUNT; i++) {
         const company = values.companies?.[i] ?? {};
         for (const { id, label } of COMPANY_FIELD_DEFS) {

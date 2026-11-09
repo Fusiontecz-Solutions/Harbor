@@ -14,6 +14,8 @@ import {
     getApplicationsByClient,
 } from '@/redux/actions/applicationActions'
 import { getClients } from '@/redux/actions/clientActions'
+import { axiosGet } from '@/redux/axios'
+import { buildClientsListUrl } from '@/lib/clientsListCache'
 import {
     resetCreateApplication,
     resetUpdateApplication,
@@ -128,6 +130,11 @@ interface SelectOption {
     label: string
 }
 
+const toClientOption = (client: any): SelectOption => ({
+    value: client._id,
+    label: client.business?.name || `${client.owner?.firstName || ''} ${client.owner?.lastName || ''}`.trim() || client._id,
+})
+
 function isRefinanceApplicationType(type: string | null | undefined): boolean {
     const t = String(type ?? '').trim().toLowerCase()
     return t === 'refinance' || t === 'refi'
@@ -220,6 +227,7 @@ const CreateApplication = () => {
     const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([])
     const [isDragOver, setIsDragOver] = useState(false)
     const [clientOptions, setClientOptions] = useState<SelectOption[]>([])
+    const [clientSearch, setClientSearch] = useState('')
     const [isFormReset, setIsFormReset] = useState(false)
     const [isPDFModalOpen, setIsPDFModalOpen] = useState(false)
     const [pdfFileUrl, setPdfFileUrl] = useState<string | null>(null)
@@ -346,6 +354,33 @@ const CreateApplication = () => {
         if (isCreatingNewClient) return
         dispatch(getClients({ limit: 100 }))
     }, [dispatch, isCreatingNewClient])
+
+    // The picker only preloads the newest 100 clients, so look up typed names on the server.
+    // Fetched directly: the Redux thunk would flip clientsLoading and disable the open picker.
+    useEffect(() => {
+        const search = clientSearch.trim()
+        if (!search || isCreatingNewClient) return
+
+        let cancelled = false
+        const timer = setTimeout(async () => {
+            try {
+                const response = await axiosGet(buildClientsListUrl({ search, limit: 100 }))
+                if (cancelled) return
+                const found: SelectOption[] = (response.data?.data ?? []).map(toClientOption)
+                setClientOptions((prev) => {
+                    const known = new Set(prev.map((o) => o.value))
+                    return [...prev, ...found.filter((o) => !known.has(o.value))]
+                })
+            } catch (error) {
+                console.error('Client search error:', error)
+            }
+        }, 300)
+
+        return () => {
+            cancelled = true
+            clearTimeout(timer)
+        }
+    }, [clientSearch, isCreatingNewClient])
 
     // Fetch application data when in edit mode
     useEffect(() => {
@@ -637,11 +672,7 @@ const CreateApplication = () => {
     // Generate client options from fetched clients
     useEffect(() => {
         if (clients && Array.isArray(clients)) {
-            const options: SelectOption[] = clients.map((client: any) => ({
-                value: client._id,
-                label: client.business?.name || `${client.owner?.firstName || ''} ${client.owner?.lastName || ''}`.trim() || client._id,
-            }))
-            setClientOptions(options)
+            setClientOptions(clients.map(toClientOption))
         }
     }, [clients])
 
@@ -974,7 +1005,7 @@ const CreateApplication = () => {
                                                     <SelectTrigger className={`${fieldInputClass} w-full`}>
                                                         <SelectValue placeholder={clientsLoading ? "Loading clients..." : "Select Client"} />
                                                     </SelectTrigger>
-                                                    <SelectContent>
+                                                    <SelectContent onSearchChange={setClientSearch}>
                                                         {clientOptions.map((option) => (
                                                             <SelectItem key={option.value} value={option.value}>
                                                                 {option.label}

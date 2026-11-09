@@ -121,8 +121,11 @@ function SelectContent({
   searchThreshold = 0,
   allowCreate = false,
   createOptionLabel,
+  onSearchChange,
   ...props
 }: React.ComponentProps<typeof SelectPrimitive.Content> & {
+  /** Called with the raw search text, so callers can load options that aren't in the list yet. */
+  onSearchChange?: (query: string) => void
   /** Force the search box on/off. Defaults to auto (shown when there are enough options). */
   enableSearch?: boolean
   searchPlaceholder?: string
@@ -162,7 +165,7 @@ function SelectContent({
     const end = input.value.length
     input.focus({ preventScroll: true })
     input.setSelectionRange(end, end)
-  }, [query, showSearch])
+  }, [query, showSearch, itemCount])
 
   // When searching, flatten every option, keep matches, and rank the closest ones first.
   const rendered = React.useMemo(() => {
@@ -287,7 +290,10 @@ function SelectContent({
               <input
                 ref={inputRef}
                 value={query}
-                onChange={(e) => setQuery(e.target.value)}
+                onChange={(e) => {
+                  setQuery(e.target.value)
+                  onSearchChange?.(e.target.value)
+                }}
                 placeholder={searchPlaceholder}
                 autoFocus
                 className="placeholder:text-muted-foreground h-8 w-full bg-transparent py-1 text-sm outline-none"

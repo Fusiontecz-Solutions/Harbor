@@ -957,26 +957,25 @@ function sameEntityName(a: string, b: string): boolean {
 
 /**
  * Exhibit A — company names come from the contract's shared Exhibit A list
- * (Deal Review). Entity type / EIN default from the business profile only on
+ * (Deal Review). EIN defaults from the business profile only on
  * the row naming the merchant business itself; other entities are typed in.
  */
 function buildExhibitAComputed(contract: Record<string, unknown> | null): ContractPrefillField[] {
     const c = contract ?? {};
     const fromRecord = exhibitValuesToPrefillPartial(c) as Record<string, unknown>;
     const businessLegalName = resolveContractBusinessLegalNameForPrefill(c);
-    const businessEntityType = str(c.entityType) || str(c.businessEntityType);
     const businessEin = str(c.federalTaxIdEin) || str(c.businessEinNumber) || str(c.ein);
     const companies = EXHIBIT_A_VALUE_FIELD_KEYS.map((key) => {
         const legalName = str(c[key]) || str(fromRecord[key]);
         const isBusiness = sameEntityName(legalName, businessLegalName);
         return {
             legalName,
-            entityType: isBusiness ? businessEntityType : "",
             ein: isBusiness ? businessEin : "",
         };
     });
     return buildExhibitAContractPrefillFields({
         companies,
+        ownerName: str(c.exhibitOwnerName),
     });
 }
 
@@ -1059,9 +1058,9 @@ function dotExhibitA(): ExhibitAContractPrefillFields {
     return {
         companies: Array.from({ length: EXHIBIT_A_COMPANY_ROW_COUNT }, () => ({
             legalName: DUMMY,
-            entityType: DUMMY,
             ein: DUMMY,
         })),
+        ownerName: DUMMY,
     };
 }
 
