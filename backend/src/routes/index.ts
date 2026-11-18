@@ -1,0 +1,84 @@
+import express from 'express';
+const router = express.Router();
+
+import authRoutes from './authRoutes';
+import roleRoutes from './roleRoutes';
+import clientRoutes from './clientRoutes';
+import applicationRoutes from './applicationRoutes';
+import publicApprovalRoutes from './publicApprovalRoutes';
+import userRoutes from './userRoutes';
+import uploadRoutes from './uploadRoutes';
+import contractTemplateRoutes from './contractTemplateRoutes';
+import commentRoutes from './commentRoutes';
+import positionRoutes from './positionRoutes';
+import termsOfferRoutes from './termsOfferRoutes';
+import noteRoutes from './noteRoutes';
+import applicationQuestionRoutes from './applicationQuestionRoutes';
+import bankDetailRoutes from './bankDetailRoutes';
+import finalAnswerRoutes from './finalAnswerRoutes';
+import monthRoutes from './monthRoutes';
+import transactionRoutes from './transactionRoutes';
+import bankAnalysisRoutes from './bankAnalysisRoutes';
+import offerDecisionRoutes from './offerDecisionRoutes';
+import docusignRoutes from '../services/docusign/docusign.routes';
+import boldsignRoutes from '../services/boldsign/boldsign.routes';
+import contractRoutes from './contractRoutes';
+import isoRoutes from './isoRoutes';
+import mailRoutes from './mailRoutes';
+import integrationSettingsRoutes from './integrationSettingsRoutes';
+import sendgridWebhookRoutes from './sendgridWebhookRoutes';
+import messagingRoutes from './messagingRoutes';
+import reportRoutes from './reportRoutes';
+import notificationRoutes from './notificationRoutes';
+import backgroundCheckRoutes from './backgroundCheckRoutes';
+import datamerchRoutes from './datamerchRoutes';
+import opencorporatesRoutes from './opencorporatesRoutes';
+import clearRoutes from './clearRoutes';
+import backgroundCheckReportRoutes from './backgroundCheckReportRoutes';
+
+/**
+ * Contract-workflow API surface.
+ * Keeps offer/contract/ACH dependencies (positions, bank analysis, etc.) while
+ * omitting payments, syndicators, chat, gmail, commissions, letters, and similar modules.
+ */
+router.use('/auth', authRoutes);
+router.use('/roles', roleRoutes);
+router.use('/clients', clientRoutes);
+router.use('/applications', applicationRoutes);
+router.use('/public', publicApprovalRoutes);
+router.use('/users', userRoutes);
+router.use('/uploads', uploadRoutes);
+router.use('/contract-templates', contractTemplateRoutes);
+router.use('/comments', commentRoutes);
+router.use('/positions', positionRoutes);
+router.use('/terms-offers', termsOfferRoutes);
+router.use('/notes', noteRoutes);
+router.use('/application-questions', applicationQuestionRoutes);
+router.use('/bank-details', bankDetailRoutes);
+router.use('/final-answers', finalAnswerRoutes);
+router.use('/months', monthRoutes);
+router.use('/transactions', transactionRoutes);
+router.use('/bank-analysis', bankAnalysisRoutes);
+router.use('/docusign', docusignRoutes);
+router.use('/boldsign', boldsignRoutes);
+router.use('/offer-decisions', offerDecisionRoutes);
+router.use('/contract', contractRoutes);
+router.use('/iso', isoRoutes);
+router.use('/sendgrid', sendgridWebhookRoutes);
+router.use('/mail', mailRoutes);
+router.use('/integration-settings', integrationSettingsRoutes);
+router.use('/background-checks', backgroundCheckRoutes);
+router.use('/datamerch', datamerchRoutes);
+router.use('/opencorporates', opencorporatesRoutes);
+router.use('/clear', clearRoutes);
+// SMS / voice communication platform (Infobip): inbox, broadcasts, contacts,
+// DNC and calling. Its own router handles the split between the public
+// provider callbacks and the authenticated agent endpoints.
+router.use('/messaging', messagingRoutes);
+router.use('/reports', reportRoutes);
+// In-app notification feed (bell / Notifications page). Separate from Web Push,
+// which lives under /messaging/push and only alerts devices about new messages.
+router.use('/notifications', notificationRoutes);
+router.use('/background-check-report', backgroundCheckReportRoutes);
+
+export default router;
