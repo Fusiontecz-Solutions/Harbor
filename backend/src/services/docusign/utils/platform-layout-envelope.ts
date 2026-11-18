@@ -46,6 +46,7 @@ import {
   resolveMainContractCoordinateLayoutKey,
 } from './resolve-main-contract-layout';
 import { applyClearCapitalMainContractLayout } from './clear-capital-contract-layout';
+import { applyLendifiMainContractLayout } from './lendifi-contract-layout';
 import {
   applyAllianceBridgeContractPrefillToFieldList,
   shouldApplyAllianceBridgeContractPrefill,
@@ -167,11 +168,15 @@ export async function loadMainContractLayoutPackage(
         orderBy: { createdAt: 'desc' },
         select: { name: true },
       });
-      const adjusted = applyClearCapitalMainContractLayout(layout, {
+      const layoutHints = {
         funderName: funderRow?.name,
         displayName: funderRow?.displayName,
         templateName: row?.name,
-      });
+      };
+      const adjusted = applyLendifiMainContractLayout(
+        applyClearCapitalMainContractLayout(layout, layoutHints),
+        layoutHints,
+      );
       return {
         ...adjusted,
         key,
