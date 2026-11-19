@@ -1,0 +1,75 @@
+# Deploys the Harbor frontend (frontend/) when it changes on main.
+# Self-hosted runner on 46.202.160.243 (user fusiontecz-www-harbor, label harbor).
+# Builds in the runner's work folder, then copies into frontend/FE, which the
+# Express wrapper (frontend/index.js, pm2 "frontend", port 3034) serves.
+# The wrapper itself is not in git and is never touched. .env files are kept.
+name: Deploy frontend
+
+on:
+  push:
+    branches: [main]
+    paths: ['frontend/**', '.github/workflows/deploy-frontend.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: production-frontend
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, harbor]
+    env:
+      APP_DIR: /home/fusiontecz-www-harbor/frontend/FE
+      PM2_NAME: frontend
+      PORT: 3034
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Check the live folder
+        working-directory: /tmp
+        run: |
+          [ -f "$APP_DIR/package.json" ] || { echo "No frontend at $APP_DIR, stopping"; exit 1; }
+          export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"
+          pm2 describe "$PM2_NAME" >/dev/null 2>&1 || { echo "pm2 process $PM2_NAME not found, stopping"; pm2 ls; exit 1; }
+
+      - uses: actions/checkout@v4
+
+      - name: Use the site's Node (nvm)
+        working-directory: /tmp
+        run: |
+          export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"
+          dirname "$(nvm which default)" >> "$GITHUB_PATH"
+
+      - name: Copy env files from the live folder
+        run: |
+          for f in .env .env.local .env.production .env.production.local; do
+            if [ -f "$APP_DIR/$f" ]; then cp "$APP_DIR/$f" "$f"; fi
+          done
+
+      - name: Install
+        run: |
+          # The repo has no package-lock.json; reuse the live one so versions match production
+          if [ ! -f package-lock.json ] && [ -f "$APP_DIR/package-lock.json" ]; then
+            cp "$APP_DIR/package-lock.json" package-lock.json
+          fi
+          npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+      - name: Build
+        run: npm run build
+
+      - name: Go live
+        run: |
+          rsync -a --delete --exclude '.env*' ./ "$APP_DIR/"
+          pm2 restart "$PM2_NAME" --update-env
+          pm2 save
+
+      - name: Health check
+        run: |
+          for i in 1 2 3 4 5 6; do
+            sleep 5
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/" || true)
+            echo "attempt $i: $code"
+            [ "$code" = "200" ] && exit 0
+          done
+          echo "Frontend did not answer 200 on port $PORT"; pm2 logs "$PM2_NAME" --lines 50 --nostream; exit 1
