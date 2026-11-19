@@ -6,7 +6,6 @@ import {
   LETTER_MUTED,
   LETTER_TEXT,
   renderFactRow,
-  renderLetterFooter,
   renderLetterhead,
   wrapLetterDocument,
 } from "./payoffLetterLayout";
@@ -58,13 +57,9 @@ export function renderZeroBalanceLetterHtml(values: TemplateValues, brand: Lette
       <p style="margin:0 0 14px 0;">To Whom It May Concern:</p>
       <p style="margin:0 0 16px 0;">In regards to the future receivables purchase and sale contract between <strong>${accountName}</strong> and <strong>${upper}</strong>, our records indicate that the current balance of purchased but unremitted receivables is <strong>$0</strong>.</p>
       <p style="margin:0 0 30px 0;"><strong>${upper}</strong> will close this contract and release its security interest reflected in the UCC-1 financing statement.</p>
-      <p style="margin:0 0 30px 0;">Sincerely,<br /><strong>${name} Management</strong></p>
+      <p style="margin:0 0 40px 0;">Sincerely,<br /><strong>${name} Management</strong></p>
     </td>
-  </tr>
-  ${renderLetterFooter(
-    brand,
-    `This letter confirms the account balance as of the date above.${brand.email ? ` Questions? Contact ${escapeHtml(brand.email)}.` : ""}`,
-  )}`;
+  </tr>`;
 
   return wrapLetterDocument(`${brand.brandName} Zero Balance Letter`, rows);
 }

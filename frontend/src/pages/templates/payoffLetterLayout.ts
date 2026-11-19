@@ -106,8 +106,9 @@ export function renderLetterhead(brand: LetterBrand): string {
   const mark = brand.logoUrl
     ? `<img src="${escapeHtml(brand.logoUrl)}" alt="${name}" width="150" border="0" style="display:block;width:150px;max-width:150px;height:auto;border:0;outline:none;-ms-interpolation-mode:bicubic;" />`
     : `<span style="${t(24, brand.dark, "bold", "letter-spacing:1px;")}">${name}</span>`;
+  // Brand name only — legal entity names are not printed on letters.
   const details = [
-    brand.legalName ? escapeHtml(brand.legalName) : name,
+    name,
     brand.addressLine ? addr(brand.addressLine) : "",
     [brand.phone ? escapeHtml(brand.phone) : "", brand.email ? escapeHtml(brand.email) : ""].filter(Boolean).join(" &nbsp;&middot;&nbsp; "),
   ]
@@ -272,13 +273,9 @@ export function renderPayoffLetterHtml(
   <tr>
     <td class="content-pad" style="padding:0 48px;${t(14, LETTER_TEXT, "normal", "line-height:1.65;")}">
       <p style="margin:0 0 18px 0;">This payoff amount is valid through <strong>${validThrough}</strong>. If payment is not received by that date, the payoff amount may be subject to adjustment.</p>
-      <p style="margin:0 0 30px 0;">Sincerely,<br /><strong>${name} Management</strong></p>
+      <p style="margin:0 0 40px 0;">Sincerely,<br /><strong>${name} Management</strong></p>
     </td>
-  </tr>
-  ${renderLetterFooter(
-    brand,
-    `${name} reserves all rights under the Agreement until payment has been received and confirmed.${brand.email ? ` Questions about this payoff? Contact ${escapeHtml(brand.email)}.` : " Should you have any questions regarding this payoff, please contact our office."}`,
-  )}`;
+  </tr>`;
 
   return wrapLetterDocument(options.documentTitle || `${brand.brandName} Payoff Letter`, rows);
 }
