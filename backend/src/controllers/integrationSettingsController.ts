@@ -205,7 +205,9 @@ function parseFunderProfileBody(body: Record<string, unknown>): FunderProfileInp
       | 'letterWireAddressLine1'
       | 'letterWireCityStateZip'
       | 'letterWireRoutingNumber'
-      | 'letterWireAccountNumber',
+      | 'letterWireAccountNumber'
+      | 'letterWireBeneficiaryName'
+      | 'letterWireBeneficiaryAddress',
   ) => {
     if (body[key] === undefined) return;
     payload[key] =
@@ -224,6 +226,8 @@ function parseFunderProfileBody(body: Record<string, unknown>): FunderProfileInp
   optionalTrimmed('letterWireCityStateZip');
   optionalTrimmed('letterWireRoutingNumber');
   optionalTrimmed('letterWireAccountNumber');
+  optionalTrimmed('letterWireBeneficiaryName');
+  optionalTrimmed('letterWireBeneficiaryAddress');
 
   if (allowedStates !== undefined) {
     payload.allowedStates = allowedStates;

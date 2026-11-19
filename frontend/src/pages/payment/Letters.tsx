@@ -55,6 +55,23 @@ import {
 import { LetterHtmlPreviewFrame } from "@/pages/templates/LetterHtmlPreviewFrame";
 import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import type { Address } from "@/types/clientTypes";
+import { useFunderProfiles } from "@/hooks/useFunderProfiles";
+import { updateFunderProfile } from "@/redux/actions/integrationSettingsActions";
+import { normalizeRoleKey, resolveEffectiveRole } from "@/lib/sessionRole";
+import { LEGACY_FLAGSTAR_WIRE_BLOCK } from "@/pages/templates/legacyLetterWire";
+import {
+  encodeLetterBrand,
+  isHarborViewLetterFunder,
+  LETTER_BRAND_VALUE_KEY,
+  LETTER_WIRE_FIELDS,
+  letterBrandFromFunder,
+  letterWireToFunderPatch,
+  resolveLetterWire,
+  savedLetterWire,
+  type LetterWireSource,
+  type LetterWireValues,
+} from "@/pages/templates/letterBrand";
+import { Landmark, Save } from "lucide-react";
 
 type ApplicationFundingExtras = Application & {
   termsOffers?: Array<{ approvedAmount?: unknown }>;
@@ -277,9 +294,18 @@ function isPayoffOrZeroBalanceLetter(templateName: string): boolean {
   );
 }
 
-/** Merchant Communications funder filter (Harbor View Capital vs Clear Capital letter packs). */
-type LetterFunder = "katan" | "alliance";
+/** Payoff letters carry the wire block edited in the "Bank / wire details" section. */
+function isPayoffTemplateName(templateName: string): boolean {
+  const n = templateName.trim().toLowerCase();
+  return n.includes("payoff") || n.includes("pay off");
+}
 
+function maskAccount(value: string): string {
+  const v = value.replace(/\s+/g, "");
+  return v.length > 4 ? `•••• ${v.slice(-4)}` : v || "—";
+}
+
+/** Legacy Clear Capital copies of the letters (same layout now; hidden from the picker). */
 function isAllianceTemplate(template: {
   id?: string;
   name?: string;
@@ -423,8 +449,8 @@ const DEFAULT_PAYOFF_WIRE_DETAILS = {
   bank_name: "Flagstar Bank",
   bank_address_line1: "102 Duffy Ave",
   bank_city_state_zip: "Hicksville NY 11801",
-  routing_number: "226071004",
-  account_number: "609931762068",
+  routing_number: LEGACY_FLAGSTAR_WIRE_BLOCK.routingNumber,
+  account_number: LEGACY_FLAGSTAR_WIRE_BLOCK.accountNumber,
 } as const;
 
 /** Default Clear Capital wire / payment details (Flagstar — PDF letter). */
@@ -432,8 +458,8 @@ const DEFAULT_ALLIANCE_PAYOFF_WIRE_DETAILS = {
   bank_name: "Flagstar Bank",
   bank_address_line1: "102 Duffy Ave",
   bank_city_state_zip: "Hicksville NY 11801",
-  routing_number: "226071004",
-  account_number: "609931762068",
+  routing_number: LEGACY_FLAGSTAR_WIRE_BLOCK.routingNumber,
+  account_number: LEGACY_FLAGSTAR_WIRE_BLOCK.accountNumber,
 } as const;
 
 const DEFAULT_SENDER_NAME = "Admin Team";
@@ -675,7 +701,49 @@ export default function Letters() {
 
   const templateSource = templates;
 
-  const [funder, setFunder] = useState<LetterFunder>("katan");
+  const { funders, reload: reloadFunders } = useFunderProfiles();
+  const letterFunders = useMemo(
+    () => funders.filter((f) => f.isActive !== false),
+    [funders]
+  );
+  const [funderId, setFunderId] = useState<string>("");
+  useEffect(() => {
+    if (letterFunders.some((f) => f.id === funderId)) return;
+    const preferred =
+      letterFunders.find((f) => isHarborViewLetterFunder(f)) ?? letterFunders[0];
+    if (preferred) setFunderId(preferred.id);
+  }, [letterFunders, funderId]);
+  const selectedFunder = useMemo(
+    () => letterFunders.find((f) => f.id === funderId) ?? null,
+    [letterFunders, funderId]
+  );
+  const letterBrand = useMemo(
+    () => (selectedFunder ? letterBrandFromFunder(selectedFunder) : null),
+    [selectedFunder]
+  );
+  const brandValue = useMemo(
+    () => (letterBrand ? encodeLetterBrand(letterBrand) : ""),
+    [letterBrand]
+  );
+
+  const isSuperAdmin = normalizeRoleKey(resolveEffectiveRole(loginUser)) === "SUPER_ADMIN";
+  const [wireValues, setWireValues] = useState<LetterWireValues>(
+    () => resolveLetterWire(null).wire
+  );
+  const [wireSource, setWireSource] = useState<LetterWireSource>("missing");
+  const [isSavingWire, setIsSavingWire] = useState(false);
+  // Pre-fill the wire block from the funder's saved Letter Info (or built-in
+  // block) whenever the funder changes or its saved details are updated.
+  const funderWireVersion = selectedFunder
+    ? `${selectedFunder.id}:${JSON.stringify(savedLetterWire(selectedFunder))}`
+    : "";
+  useEffect(() => {
+    const { wire, source } = resolveLetterWire(selectedFunder);
+    setWireValues(wire);
+    setWireSource(source);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [funderWireVersion]);
+
   const [templateId, setTemplateId] = useState<string>("");
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({});
   const [recipientEmail, setRecipientEmail] = useState("");
@@ -684,15 +752,16 @@ export default function Letters() {
   const [isDownloading, setIsDownloading] = useState(false);
 
   const templatesForFunder = useMemo(() => {
-    return templateSource.filter((t) => {
-      if (funder === "alliance") return isAllianceTemplate(t);
-      // Harbor View Capital: payoff letter, zero balance letter, and payoff wire only
-      return (
+    // Payoff + zero balance letters, branded by the selected funder. Saved
+    // (non built-in) templates were written for Harbor View Capital only.
+    const harborView = selectedFunder ? isHarborViewLetterFunder(selectedFunder) : true;
+    return templateSource.filter(
+      (t) =>
         !isAllianceTemplate(t) &&
-        isPayoffOrZeroBalanceLetter(t.name ?? "")
-      );
-    });
-  }, [templateSource, funder]);
+        isPayoffOrZeroBalanceLetter(t.name ?? "") &&
+        (harborView || isBuiltinFeTemplate(t.id))
+    );
+  }, [templateSource, selectedFunder]);
 
   const selectedTemplate = useMemo(
     () => templateSource.find((t) => t.id === templateId) ?? null,
@@ -804,10 +873,72 @@ export default function Letters() {
     [selectedTemplate]
   );
 
+  const showWireSection = Boolean(
+    selectedTemplate &&
+      isBuiltinFeTemplate(selectedTemplate.id) &&
+      isPayoffTemplateName(selectedTemplate.name ?? "")
+  );
+
+  /** Merge values + selected funder brand (+ wire block on payoff letters). */
+  const builtinRenderValues = useMemo(
+    () => ({
+      ...fieldValues,
+      ...(brandValue ? { [LETTER_BRAND_VALUE_KEY]: brandValue } : {}),
+      ...(showWireSection ? wireValues : {}),
+    }),
+    [fieldValues, brandValue, showWireSection, wireValues]
+  );
+
+  const missingWireLabels = useMemo(
+    () =>
+      showWireSection
+        ? LETTER_WIRE_FIELDS.filter((f) => !wireValues[f.key]?.trim()).map((f) => f.label)
+        : [],
+    [showWireSection, wireValues]
+  );
+
+  const saveWireAsFunderDefault = async () => {
+    if (!selectedFunder || !letterBrand) return;
+    if (selectedFunder.id.startsWith("fallback-")) {
+      toast.error("Funders are still loading — try again in a moment.");
+      return;
+    }
+    if (missingWireLabels.length) {
+      toast.error(`Fill in all wire details first: ${missingWireLabels.join(", ")}`);
+      return;
+    }
+    const ok = window.confirm(
+      `Save these wire details as the default for ${letterBrand.brandName}?\n\n` +
+        `Beneficiary: ${wireValues.wire_beneficiary_name}\n` +
+        `Bank: ${wireValues.wire_bank_name}\n` +
+        `Account: ${maskAccount(wireValues.wire_account_number)}\n\n` +
+        `Every new ${letterBrand.brandName} payoff letter will use them.`
+    );
+    if (!ok) return;
+    setIsSavingWire(true);
+    try {
+      await updateFunderProfile(selectedFunder.id, letterWireToFunderPatch(wireValues));
+      await reloadFunders();
+      toast.success(`Saved wire details for ${letterBrand.brandName}.`);
+    } catch (error: any) {
+      toast.error(
+        error?.response?.data?.message || error?.message || "Failed to save wire details"
+      );
+    } finally {
+      setIsSavingWire(false);
+    }
+  };
+
+  const resetWireToFunderDefault = () => {
+    const { wire, source } = resolveLetterWire(selectedFunder);
+    setWireValues(wire);
+    setWireSource(source);
+  };
+
   const mergedBody = useMemo(() => {
     if (!selectedTemplate) return "";
     if (isBuiltinFeTemplate(selectedTemplate.id)) {
-      return renderBuiltinReactTemplateHtml(selectedTemplate.id, fieldValues);
+      return renderBuiltinReactTemplateHtml(selectedTemplate.id, builtinRenderValues);
     }
     const escapeVals = templateBodyIsHtml(selectedTemplate.body);
     return mergeTemplate(
@@ -816,7 +947,7 @@ export default function Letters() {
       escapeVals,
       placeholderKeys
     );
-  }, [selectedTemplate, fieldValues, placeholderKeys]);
+  }, [selectedTemplate, fieldValues, placeholderKeys, builtinRenderValues]);
 
   const previewHtml = useDebouncedValue(mergedBody, 300);
 
@@ -870,6 +1001,10 @@ export default function Letters() {
     }
     if (!mergedBody.trim()) {
       toast.error("Nothing to download yet.");
+      return;
+    }
+    if (missingWireLabels.length) {
+      toast.error(`Complete the bank / wire details: ${missingWireLabels.join(", ")}`);
       return;
     }
 
@@ -926,6 +1061,10 @@ export default function Letters() {
       );
       return;
     }
+    if (missingWireLabels.length) {
+      toast.error(`Complete the bank / wire details: ${missingWireLabels.join(", ")}`);
+      return;
+    }
     if (!recipientEmail.trim()) {
       toast.error("Add the merchant email address.");
       return;
@@ -953,7 +1092,7 @@ export default function Letters() {
           : `${selectedTemplate.name} - Deal #${dealLabel}`);
 
       const outboundBody = isBuiltinFeTemplate(selectedTemplate.id)
-        ? renderBuiltinReactTemplateHtml(selectedTemplate.id, fieldValues)
+        ? renderBuiltinReactTemplateHtml(selectedTemplate.id, builtinRenderValues)
         : mergedBody;
 
       const sendResult = await dispatch(
@@ -1029,17 +1168,19 @@ export default function Letters() {
                 <div className="space-y-2">
                   <Label className="text-sm font-medium text-foreground">Funder</Label>
                   <Select
-                    value={funder}
-                    onValueChange={(value: string) =>
-                      setFunder(value as LetterFunder)
-                    }
+                    value={funderId}
+                    onValueChange={(value: string) => setFunderId(value)}
+                    disabled={!letterFunders.length}
                   >
                     <SelectTrigger className="w-full border-border bg-background dark:border-white/10 dark:bg-white/[0.04]">
                       <SelectValue placeholder="Select funder..." />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="katan">Harbor View Capital</SelectItem>
-                      <SelectItem value="alliance">Clear Capital</SelectItem>
+                      {letterFunders.map((f) => (
+                        <SelectItem key={f.id} value={f.id}>
+                          {letterBrandFromFunder(f).brandName}
+                        </SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>
@@ -1120,6 +1261,88 @@ export default function Letters() {
                         />
                       </div>
                     ))}
+                  </div>
+                </div>
+              )}
+
+              {showWireSection && (
+                <div className="space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                      <Landmark className="size-4" /> Bank / Wire Details
+                    </div>
+                    <span
+                      className={cn(
+                        "rounded-full px-2.5 py-0.5 text-[11px] font-medium",
+                        wireSource === "saved" &&
+                          "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300",
+                        wireSource === "built-in" &&
+                          "bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300",
+                        wireSource === "missing" &&
+                          "bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-300"
+                      )}
+                    >
+                      {wireSource === "saved"
+                        ? `Saved default for ${letterBrand?.brandName ?? "this funder"}`
+                        : wireSource === "built-in"
+                          ? "Built-in details — not saved in Settings yet"
+                          : "No saved wire details — fill in all fields"}
+                    </span>
+                  </div>
+                  <div className="grid gap-x-3 gap-y-4 rounded-lg border border-border/60 bg-muted/20 p-4 dark:border-white/10 dark:bg-white/[0.02] sm:grid-cols-2">
+                    {LETTER_WIRE_FIELDS.map((f) => {
+                      const numeric =
+                        f.key === "wire_routing_number" || f.key === "wire_account_number";
+                      return (
+                        <div key={f.key} className="flex min-w-0 flex-col gap-1.5">
+                          <Label className="text-[11px] font-semibold uppercase leading-tight tracking-wide text-muted-foreground">
+                            {f.label}
+                          </Label>
+                          <Input
+                            value={wireValues[f.key] ?? ""}
+                            inputMode={numeric ? "numeric" : undefined}
+                            autoComplete="off"
+                            onChange={(e) =>
+                              setWireValues((p) => ({ ...p, [f.key]: e.target.value }))
+                            }
+                            className={cn(
+                              "h-9 border-border bg-background text-sm dark:border-white/10 dark:bg-white/[0.04]",
+                              numeric && "font-mono tracking-wide",
+                              !wireValues[f.key]?.trim() && "border-red-300 dark:border-red-500/40"
+                            )}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Changes here apply to this letter. Double-check the routing and account
+                    numbers — merchants wire their payoff to these details.
+                  </p>
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={resetWireToFunderDefault}
+                      className="cursor-pointer border-border dark:border-white/10"
+                    >
+                      <RotateCcw className="mr-2 size-4" />
+                      Reset to saved
+                    </Button>
+                    {isSuperAdmin && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={saveWireAsFunderDefault}
+                        disabled={isSavingWire || missingWireLabels.length > 0}
+                        className="cursor-pointer border-border dark:border-white/10"
+                      >
+                        <Save className="mr-2 size-4" />
+                        {isSavingWire
+                          ? "Saving…"
+                          : `Save as ${letterBrand?.brandName ?? "funder"} default`}
+                      </Button>
+                    )}
                   </div>
                 </div>
               )}

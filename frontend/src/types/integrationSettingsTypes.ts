@@ -61,6 +61,8 @@ export type FunderProfile = {
   letterWireCityStateZip?: string | null;
   letterWireRoutingNumber?: string | null;
   letterWireAccountNumber?: string | null;
+  letterWireBeneficiaryName?: string | null;
+  letterWireBeneficiaryAddress?: string | null;
 };
 
 export type DocuSignAccountProfileInput = {
@@ -113,4 +115,6 @@ export type FunderProfileInput = {
   letterWireCityStateZip?: string | null;
   letterWireRoutingNumber?: string | null;
   letterWireAccountNumber?: string | null;
+  letterWireBeneficiaryName?: string | null;
+  letterWireBeneficiaryAddress?: string | null;
 };

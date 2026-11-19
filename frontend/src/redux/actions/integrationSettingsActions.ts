@@ -91,6 +91,12 @@ function appendFunderFormFields(formData: FormData, payload: FunderProfileInput)
   if (payload.letterWireAccountNumber !== undefined) {
     formData.append("letterWireAccountNumber", payload.letterWireAccountNumber || "");
   }
+  if (payload.letterWireBeneficiaryName !== undefined) {
+    formData.append("letterWireBeneficiaryName", payload.letterWireBeneficiaryName || "");
+  }
+  if (payload.letterWireBeneficiaryAddress !== undefined) {
+    formData.append("letterWireBeneficiaryAddress", payload.letterWireBeneficiaryAddress || "");
+  }
 }
 
 export async function fetchFunderProfiles(

@@ -1,41 +1,30 @@
 import type { TemplateValues } from "./types";
-import { APP_COMPANY_NAME } from "@/constants/appBranding";
-import { escapeHtml } from "./applicationApprovalEmailShared";
 import {
   PAYOFF_LETTER_VARIABLES,
   renderPayoffLetterHtml,
 } from "./payoffLetterLayout";
+import {
+  decodeLetterBrand,
+  HARBOR_VIEW_DEFAULT_LETTER_BRAND,
+  LEGACY_LETTER_WIRE,
+  LETTER_BRAND_VALUE_KEY,
+} from "./letterBrand";
 
-/** Harbor View Capital payoff letter merge fields (shared payoff layout). */
+/** Payoff letter merge fields (shared payoff layout, every funder). */
 export const PAY_OFF_LETTER_VARIABLES = PAYOFF_LETTER_VARIABLES;
 
-/** Hosted Harbor View Capital logo for outbound payoff letter email. */
-const PAY_OFF_LETTER_EMAIL_LOGO_SRC =
-  "https://res.cloudinary.com/xnuzlpvy/image/upload/v1788194947/WhatsApp_Image_2026-08-28_at_00.09.40.jpg";
-
-/** Fixed Flagstar / Funding Club 18 wire block (not merge fields). */
-const HARBOR_VIEW_WIRE = {
-  bankName: "Flagstar Bank",
-  bankAddress: "102 Duffy Ave, Hicksville NY 11801",
-  beneficiaryName: "Funding Club 18 LLC",
-  beneficiaryAddress: "16 Middle Neck RD, Great Neck NY 11021",
-  routingNumber: "226071004",
-  accountNumber: "609931762068",
-} as const;
-
 /**
- * Gmail-safe HTML for the Harbor View Capital payoff letter — formal payoff
- * confirmation layout with the Harbor View logo letterhead.
- * Blank merge fields surface "NA".
+ * Gmail-safe HTML for the payoff letter. The Letters page passes the selected
+ * funder's brand (`__letter_brand`) and wire details (`wire_*`); without them
+ * it renders the original Harbor View Capital letter and built-in wire block.
  */
 export function renderPayOffLetterEmailHtml(values: TemplateValues): string {
-  const logoSrc = escapeHtml(PAY_OFF_LETTER_EMAIL_LOGO_SRC);
-  const companyName = escapeHtml(APP_COMPANY_NAME);
-
-  return renderPayoffLetterHtml(values, {
-    companyName: APP_COMPANY_NAME,
-    documentTitle: "Payoff Letter",
-    letterheadHtml: `<img src="${logoSrc}" alt="${companyName}" width="180" border="0" style="display:block;width:180px;max-width:180px;height:auto;margin:0 auto;border:0;outline:none;-ms-interpolation-mode:bicubic;" />`,
-    wire: HARBOR_VIEW_WIRE,
+  const brand = decodeLetterBrand(values as Record<string, unknown>, HARBOR_VIEW_DEFAULT_LETTER_BRAND);
+  // Built-in wire only for callers that pass no funder brand (the Letters page
+  // always passes both brand and wire_* values, so blanks stay blank there).
+  const usingDefaultBrand = !(values as Record<string, unknown>)[LETTER_BRAND_VALUE_KEY];
+  return renderPayoffLetterHtml(values, brand, {
+    documentTitle: `${brand.brandName} Payoff Letter`,
+    fallbackWire: usingDefaultBrand ? LEGACY_LETTER_WIRE : null,
   });
 }

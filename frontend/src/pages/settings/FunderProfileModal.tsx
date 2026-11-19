@@ -103,6 +103,8 @@ const emptyForm: FunderProfileInput = {
   letterWireCityStateZip: "",
   letterWireRoutingNumber: "",
   letterWireAccountNumber: "",
+  letterWireBeneficiaryName: "",
+  letterWireBeneficiaryAddress: "",
 };
 
 const ADDENDUM_PRESETS = [
@@ -342,6 +344,8 @@ export default function FunderProfileModal({
         letterWireCityStateZip: initial.letterWireCityStateZip ?? "",
         letterWireRoutingNumber: initial.letterWireRoutingNumber ?? "",
         letterWireAccountNumber: initial.letterWireAccountNumber ?? "",
+        letterWireBeneficiaryName: initial.letterWireBeneficiaryName ?? "",
+        letterWireBeneficiaryAddress: initial.letterWireBeneficiaryAddress ?? "",
       });
       setStatesText((initial.allowedStates ?? []).join(", "));
       setExcludedStatesText((initial.excludedStates ?? []).join(", "));
@@ -495,6 +499,8 @@ export default function FunderProfileModal({
       letterWireCityStateZip: form.letterWireCityStateZip?.trim() ?? "",
       letterWireRoutingNumber: form.letterWireRoutingNumber?.trim() ?? "",
       letterWireAccountNumber: form.letterWireAccountNumber?.trim() ?? "",
+      letterWireBeneficiaryName: form.letterWireBeneficiaryName?.trim() ?? "",
+      letterWireBeneficiaryAddress: form.letterWireBeneficiaryAddress?.trim() ?? "",
     };
 
     if (letterLogoRemoved && !letterLogoFile) {
@@ -1696,13 +1702,15 @@ export default function FunderProfileModal({
               <div>
                 <h3 className="text-sm font-semibold">Wire information</h3>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  Payment Address block shown on payoff letters for this funder.
+                  Wire instructions printed on this funder&apos;s payoff letters (editable per
+                  letter on the Letters page). Saved details are used only when both routing and
+                  account numbers are filled in.
                 </p>
               </div>
 
               <div className="grid gap-4">
                 <div className="grid gap-2">
-                  <Label htmlFor="wire-bank">Bank / payment name</Label>
+                  <Label htmlFor="wire-bank">Bank name</Label>
                   <Input
                     id="wire-bank"
                     value={form.letterWireBankName ?? ""}
@@ -1712,7 +1720,7 @@ export default function FunderProfileModal({
                 </div>
 
                 <div className="grid gap-2">
-                  <Label htmlFor="wire-address1">Address line 1</Label>
+                  <Label htmlFor="wire-address1">Bank address line 1</Label>
                   <Input
                     id="wire-address1"
                     value={form.letterWireAddressLine1 ?? ""}
@@ -1722,12 +1730,32 @@ export default function FunderProfileModal({
                 </div>
 
                 <div className="grid gap-2">
-                  <Label htmlFor="wire-city-state-zip">City, state, ZIP</Label>
+                  <Label htmlFor="wire-city-state-zip">Bank city, state, ZIP</Label>
                   <Input
                     id="wire-city-state-zip"
                     value={form.letterWireCityStateZip ?? ""}
                     onChange={(e) => set("letterWireCityStateZip", e.target.value)}
                     placeholder="Middletown, DE 19709"
+                  />
+                </div>
+
+                <div className="grid gap-2">
+                  <Label htmlFor="wire-beneficiary-name">Beneficiary (account holder) name</Label>
+                  <Input
+                    id="wire-beneficiary-name"
+                    value={form.letterWireBeneficiaryName ?? ""}
+                    onChange={(e) => set("letterWireBeneficiaryName", e.target.value)}
+                    placeholder="Acme Funding LLC"
+                  />
+                </div>
+
+                <div className="grid gap-2">
+                  <Label htmlFor="wire-beneficiary-address">Beneficiary address</Label>
+                  <Input
+                    id="wire-beneficiary-address"
+                    value={form.letterWireBeneficiaryAddress ?? ""}
+                    onChange={(e) => set("letterWireBeneficiaryAddress", e.target.value)}
+                    placeholder="123 Main St, New York NY 10001"
                   />
                 </div>
 

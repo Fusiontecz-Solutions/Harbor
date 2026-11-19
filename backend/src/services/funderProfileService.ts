@@ -85,6 +85,8 @@ export type FunderProfileInput = {
   letterWireCityStateZip?: string | null;
   letterWireRoutingNumber?: string | null;
   letterWireAccountNumber?: string | null;
+  letterWireBeneficiaryName?: string | null;
+  letterWireBeneficiaryAddress?: string | null;
 };
 
 function normalizeStateToken(state?: string | null): string {
@@ -203,6 +205,10 @@ export function serializeFunderProfile(row: Record<string, unknown>) {
       row.letterWireRoutingNumber != null ? String(row.letterWireRoutingNumber) : null,
     letterWireAccountNumber:
       row.letterWireAccountNumber != null ? String(row.letterWireAccountNumber) : null,
+    letterWireBeneficiaryName:
+      row.letterWireBeneficiaryName != null ? String(row.letterWireBeneficiaryName) : null,
+    letterWireBeneficiaryAddress:
+      row.letterWireBeneficiaryAddress != null ? String(row.letterWireBeneficiaryAddress) : null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -1144,6 +1150,12 @@ export async function createFunderProfile(input: FunderProfileInput) {
       letterWireAccountNumber: input.letterWireAccountNumber
         ? String(input.letterWireAccountNumber).trim()
         : null,
+      letterWireBeneficiaryName: input.letterWireBeneficiaryName
+        ? String(input.letterWireBeneficiaryName).trim()
+        : null,
+      letterWireBeneficiaryAddress: input.letterWireBeneficiaryAddress
+        ? String(input.letterWireBeneficiaryAddress).trim()
+        : null,
     },
     include: { docusignAccountProfile: { select: { id: true, name: true, defaultCcEmail: true } } },
   });
@@ -1309,6 +1321,16 @@ export async function updateFunderProfile(id: string, input: Partial<FunderProfi
   if (input.letterWireAccountNumber !== undefined) {
     data.letterWireAccountNumber = input.letterWireAccountNumber
       ? String(input.letterWireAccountNumber).trim()
+      : null;
+  }
+  if (input.letterWireBeneficiaryName !== undefined) {
+    data.letterWireBeneficiaryName = input.letterWireBeneficiaryName
+      ? String(input.letterWireBeneficiaryName).trim()
+      : null;
+  }
+  if (input.letterWireBeneficiaryAddress !== undefined) {
+    data.letterWireBeneficiaryAddress = input.letterWireBeneficiaryAddress
+      ? String(input.letterWireBeneficiaryAddress).trim()
       : null;
   }
 
