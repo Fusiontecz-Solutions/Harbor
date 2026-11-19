@@ -1,0 +1,73 @@
+# Deploys the Harbor backend (backend/) when it changes on main.
+# Self-hosted runner on 46.202.160.243 (user fusiontecz-www-harbor, label harbor).
+# Builds (npm install, prisma generate, tsc, asset copy) in the runner's work
+# folder, then copies into backend/ and restarts pm2 "backend" (port 8034).
+# .env and certificate files on the server are kept.
+#
+# NOT automatic: database schema changes. After changing prisma/schema, run by hand
+# on the server:  cd ~/backend && npx prisma db push   (or a migration).
+name: Deploy backend
+
+on:
+  push:
+    branches: [main]
+    paths: ['backend/**', '.github/workflows/deploy-backend.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: production-backend
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, harbor]
+    env:
+      APP_DIR: /home/fusiontecz-www-harbor/backend
+      PM2_NAME: backend
+      PORT: 8034
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check the live folder
+        working-directory: /tmp
+        run: |
+          [ -f "$APP_DIR/package.json" ] || { echo "No backend at $APP_DIR, stopping"; exit 1; }
+          export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"
+          pm2 describe "$PM2_NAME" >/dev/null 2>&1 || { echo "pm2 process $PM2_NAME not found, stopping"; pm2 ls; exit 1; }
+
+      - uses: actions/checkout@v4
+
+      - name: Use the site's Node (nvm)
+        working-directory: /tmp
+        run: |
+          export NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"
+          dirname "$(nvm which default)" >> "$GITHUB_PATH"
+
+      - name: Copy env files from the live folder
+        run: |
+          for f in .env .env.local .env.production; do
+            if [ -f "$APP_DIR/$f" ]; then cp "$APP_DIR/$f" "$f"; fi
+          done
+
+      - name: Install and build
+        run: npm run build
+
+      - name: Go live
+        run: |
+          rsync -a --delete \
+            --exclude '.env*' --exclude '*.pfx' --exclude '*.p12' --exclude '*.pem' \
+            --exclude 'output.csv' --exclude 'uploads' \
+            ./ "$APP_DIR/"
+          pm2 restart "$PM2_NAME" --update-env
+          pm2 save
+
+      - name: Health check
+        run: |
+          for i in 1 2 3 4 5 6; do
+            sleep 5
+            code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/" || true)
+            echo "attempt $i: $code"
+            if [ "$code" != "000" ] && [ "$code" -lt 500 ]; then exit 0; fi
+          done
+          echo "Backend not answering on port $PORT"; pm2 logs "$PM2_NAME" --lines 50 --nostream; exit 1
